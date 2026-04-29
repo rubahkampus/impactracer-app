@@ -4,8 +4,8 @@ This module is the authoritative data contract for the system. Every LLM
 response schema inherits from :class:`TruncatingModel` so that overlong
 string fields truncate silently instead of raising :class:`ValidationError`.
 
-Schemas here are passed directly to the Gemini ``google-genai`` SDK as
-``response_schema`` values inside :class:`GenerateContentConfig`.
+Schemas here are passed as ``response_schema`` to :class:`LLMClient.call`,
+which enforces JSON mode via the OpenRouter API.
 
 References:
     03_data_models.md - authoritative schema specification

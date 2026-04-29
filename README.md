@@ -34,7 +34,7 @@ impactracer index /path/to/target/repo
 impactracer analyze "Tambahkan fitur duplikasi komisi pada dashboard"
 
 # 7. Run full evaluation (after GT dataset prepared)
-impactracer evaluate --dataset ./eval/gt_dataset.json --output ./eval/results/
+impactracer evaluate --dataset ./eval/gt/ --output ./eval/results/
 ```
 
 ## LLM Provider

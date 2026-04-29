@@ -1,7 +1,7 @@
 """Online analysis pipeline (FR-B1..E3) with five LLM invocations.
 
 Modules:
-    llm_client                 - Gemini google-genai wrapper, cross-cutting
+    llm_client                 - OpenRouter httpx client, cross-cutting
     interpreter                - LLM #1 (FR-B1, FR-B2)
     retriever                  - FR-C1, FR-C2 (Adaptive RRF)
     prevalidation_filter       - FR-C4 (Steps 3.5, 3.6, 3.7)

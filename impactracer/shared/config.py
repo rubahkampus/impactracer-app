@@ -20,14 +20,14 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # ---- LLM (Gemini) -----------------------------------------------
-    google_api_key: str
-    llm_model: str = "gemini-2.5-flash"
+    # ---- LLM (OpenRouter — exclusive provider) --------------------------
+    openrouter_api_key: str = ""
+    llm_model: str = "google/gemini-2.5-flash"
     llm_temperature: float = 0.0
     llm_seed: int = 42
     llm_max_output_tokens: int = 4096
-    llm_retry_max_attempts: int = 3
-    llm_retry_base_backoff: float = 1.0
+    llm_retry_max_attempts: int = 10
+    llm_retry_base_backoff: float = 2.0
 
     # ---- Embedding and Reranking -----------------------------------
     embedding_model: str = "BAAI/bge-m3"
@@ -65,7 +65,9 @@ class Settings(BaseSettings):
     output_reserve_tokens: int = 2000
     top_k_backlinks_per_node: int = 3
 
-    # ---- Evaluation -------------------------------------------------
+    # ---- Audit and Evaluation ---------------------------------------
+    llm_audit_log_path: str = "./data/llm_audit.jsonl"
+    locked_parameters_path: str = "./data/locked_parameters.json"
     eval_k_values: list[int] = [5, 10]
     alpha: float = 0.05
 

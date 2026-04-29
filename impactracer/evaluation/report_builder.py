@@ -3,7 +3,7 @@
 Outputs:
   - summary_table.csv       - macro-averaged metrics per variant
   - per_category_table.csv  - metrics per variant per CR category
-  - statistical_test.csv     - Wilcoxon signed-rank test comparing V7 against V5
+  - statistical_tests.json  - Wilcoxon signed-rank test comparing V7 against V5
   - latency_distribution.png - box plot of per-CR latency per variant
 
 Reference: 10_evaluation_protocol.md §6.
