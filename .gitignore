@@ -1,0 +1,51 @@
+# Env and secrets
+.env
+
+# Data stores (generated)
+data/
+eval/results_*/
+impact_report.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Blueprint markdown files (user will paste into root; ignored in VCS)
+/00_blueprint_index.md
+/01_architecture_overview.md
+/02_fr_traceability_matrix.md
+/03_data_models.md
+/04_database_schema.md
+/05_ast_edge_catalog.md
+/06_offline_indexer.md
+/07_online_pipeline.md
+/08_gating_and_filters.md
+/09_ablation_harness.md
+/10_evaluation_protocol.md
+/11_configuration_and_cli.md
+/12_project_structure_and_sprints.md
