@@ -59,21 +59,44 @@ def test_get_ts_parser_returns_ts_for_ts():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("rel,expected", [
-    ("src/app/api/auth/login/route.ts",         "API_ROUTE"),
-    ("src/app/api/commissions/[id]/route.ts",   "API_ROUTE"),
-    ("src/app/api/chats/route.tsx",             "API_ROUTE"),
-    ("src/app/[username]/dashboard/page.tsx",   "PAGE_COMPONENT"),
-    ("src/app/[username]/dashboard/layout.tsx", "PAGE_COMPONENT"),
-    ("src/app/page.ts",                         "PAGE_COMPONENT"),
-    ("src/components/auth/LoginForm.tsx",       "UI_COMPONENT"),
-    ("src/components/SomeDeep/Nested.ts",       "UI_COMPONENT"),
-    ("src/lib/services/auth.service.ts",        "UTILITY"),
-    ("src/lib/db/repositories/user.repository.ts", "UTILITY"),
-    ("src/utils/jwt.ts",                        "UTILITY"),
-    ("src/types/common.ts",                     "TYPE_DEFINITION"),
-    ("src/types/proposal.ts",                   "TYPE_DEFINITION"),
-    ("middleware.ts",                           None),
-    ("src/app/api/auth/login/route.ts",         "API_ROUTE"),  # no leading /
+    # API routes
+    ("src/app/api/auth/login/route.ts",             "API_ROUTE"),
+    ("src/app/api/commissions/[id]/route.ts",       "API_ROUTE"),
+    ("src/app/api/chats/route.tsx",                 "API_ROUTE"),
+    # Page components
+    ("src/app/[username]/dashboard/page.tsx",       "PAGE_COMPONENT"),
+    ("src/app/[username]/dashboard/layout.tsx",     "PAGE_COMPONENT"),
+    ("src/app/page.ts",                             "PAGE_COMPONENT"),
+    # UI components
+    ("src/components/auth/LoginForm.tsx",           "UI_COMPONENT"),
+    ("src/components/SomeDeep/Nested.ts",           "UI_COMPONENT"),
+    # Hooks → UI_COMPONENT (client-side, not server logic)
+    ("src/hooks/useStartConversation.ts",           "UI_COMPONENT"),
+    # Zustand stores → UI_COMPONENT (client-state, not backend)
+    ("src/lib/stores/websocketStore.ts",            "UI_COMPONENT"),
+    ("src/lib/stores/uiStore.ts",                   "UI_COMPONENT"),
+    # Mongoose models → TYPE_DEFINITION (must match before UTILITY catch-all)
+    ("src/lib/db/models/user.model.ts",             "TYPE_DEFINITION"),
+    ("src/lib/db/models/wallet.model.ts",           "TYPE_DEFINITION"),
+    ("src/lib/db/models/contract.model.ts",         "TYPE_DEFINITION"),
+    # Model mocks → None (test infrastructure, excluded)
+    ("src/lib/db/models/__mocks__/wallet.mock.ts",  None),
+    # Repository test files → None
+    ("src/lib/db/repositories/__tests__/wallet.repository.test.ts", None),
+    # Services test files → None
+    ("src/lib/services/__tests__/gallery.wallet.test.ts", None),
+    # Backend UTILITY (services, repositories, utils, api helpers)
+    ("src/lib/services/auth.service.ts",            "UTILITY"),
+    ("src/lib/db/repositories/user.repository.ts",  "UTILITY"),
+    ("src/lib/utils/jwt.ts",                        "UTILITY"),
+    ("src/lib/api/withAuth.ts",                     "UTILITY"),
+    ("src/lib/db/connection.ts",                    "UTILITY"),
+    # TypeScript type files
+    ("src/types/common.ts",                         "TYPE_DEFINITION"),
+    ("src/types/proposal.ts",                       "TYPE_DEFINITION"),
+    # Unclassified
+    ("middleware.ts",                               None),
+    ("src/config.ts",                               None),
 ])
 def test_classify_file(rel, expected):
     assert classify_file(Path(rel)) == expected
