@@ -272,21 +272,25 @@ def test_severity_for_chain_behavioral_beats_module() -> None:
 
 
 def test_layer_compat_representative_cells() -> None:
-    """Representative cells from LAYER_COMPAT (recalibrated after E2E audit)."""
-    assert layer_compat("API_ROUTE", "FR") == 1.0
-    assert layer_compat("TYPE_DEFINITION", "Design") == 1.0   # raised: type defs are pure design contracts
-    assert layer_compat("UTILITY", "NFR") == 0.7
+    """Representative cells from LAYER_COMPAT (Sprint 6.5 recalibration)."""
+    assert layer_compat("API_ROUTE",       "FR")     == 1.0
+    assert layer_compat("TYPE_DEFINITION", "Design") == 1.0   # models ↔ DB design = perfect match
+    assert layer_compat("UTILITY",         "NFR")    == 0.7
+    assert layer_compat("UTILITY",         "Design") == 1.0   # services ↔ component design
+    assert layer_compat("UTILITY",         "General") == 0.8  # services appear in process flows
+    assert layer_compat("UI_COMPONENT",    "General") == 0.7  # stores/hooks in process flows
+    assert layer_compat("TYPE_DEFINITION", "FR")     == 0.8   # data structures implement FRs
 
 
 def test_layer_compat_none_classification() -> None:
-    """None classification falls back to the None row."""
-    assert layer_compat(None, "FR") == 0.9    # raised: unclassified lib/ files behave like UTILITY
-    assert layer_compat(None, "Design") == 0.9
+    """None classification falls back to the None row (conservative)."""
+    assert layer_compat(None, "FR")     == 0.8
+    assert layer_compat(None, "Design") == 0.8
 
 
 def test_layer_compat_unknown_classification() -> None:
     """Unknown classification also falls back to the None row."""
-    assert layer_compat("UNKNOWN_CLASS", "FR") == 0.9
+    assert layer_compat("UNKNOWN_CLASS", "FR") == 0.8
 
 
 # ---------------------------------------------------------------------------

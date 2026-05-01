@@ -45,29 +45,66 @@ def get_ts_parser(file_path: Path) -> Parser:
 # Patterns checked in order, first match wins.
 # Tuples of (match_function, classification).
 def _make_classifier():
-    import fnmatch
-
-    def _match(rel_posix: str, pattern: str) -> bool:
-        return fnmatch.fnmatch(rel_posix, pattern)
-
-    _page_names = {"page.ts", "page.tsx", "layout.ts", "layout.tsx"}
+    _page_names  = {"page.ts", "page.tsx", "layout.ts", "layout.tsx"}
     _route_names = {"route.ts", "route.tsx"}
 
     def classify(rel_path: Path) -> str | None:
-        p = rel_path.as_posix()
+        p        = rel_path.as_posix()
         filename = rel_path.name
-        # Check by filename first for files directly inside src/app/ tree
-        if p.startswith("src/app/") and filename in _route_names:
-            return "API_ROUTE"
-        if p.startswith("src/app/") and filename in _page_names:
-            return "PAGE_COMPONENT"
-        # src/components/** (any .ts/.tsx under components/)
+
+        # ── src/app/** ──────────────────────────────────────────────────
+        if p.startswith("src/app/"):
+            if filename in _route_names:
+                return "API_ROUTE"
+            if filename in _page_names:
+                return "PAGE_COMPONENT"
+            return None   # other app/ files (e.g. globals.css shims) unclassified
+
+        # ── React UI components ─────────────────────────────────────────
         if p.startswith("src/components/"):
             return "UI_COMPONENT"
-        if p.startswith("src/lib/") or p.startswith("src/utils/"):
+
+        # ── Client-side React hooks ─────────────────────────────────────
+        # Hooks are front-end only; they belong closer to UI than to server
+        # utility logic — classify alongside UI for traceability routing.
+        if p.startswith("src/hooks/"):
+            return "UI_COMPONENT"
+
+        # ── Client-side state stores (Zustand) ──────────────────────────
+        # Zustand stores manage UI/session state on the client; they are
+        # not backend business logic.  Map to UI_COMPONENT so FR/Design
+        # chunks describing client behaviour can resolve them.
+        if p.startswith("src/lib/stores/"):
+            return "UI_COMPONENT"
+
+        # ── Test helpers and mocks ──────────────────────────────────────
+        # Must come BEFORE the models/ and UTILITY rules below, because
+        # __mocks__/ and __tests__/ subdirectories are nested inside those
+        # paths and would otherwise be misclassified.
+        if (p.startswith("src/lib/test/")
+                or p.startswith("src/lib/db/models/__mocks__/")
+                or p.startswith("src/lib/db/repositories/__tests__/")
+                or p.startswith("src/lib/services/__tests__/")
+                or p.startswith("src/lib/utils/__mocks__/")):
+            return None
+
+        # ── Mongoose schemas / data models ──────────────────────────────
+        # These files define MongoDB document interfaces and Schema objects.
+        # They are the direct subject of SDD "Perancangan Basis Data" sections.
+        # Checked AFTER the __mocks__ exclusion, BEFORE the broad UTILITY rule.
+        if p.startswith("src/lib/db/models/"):
+            return "TYPE_DEFINITION"
+
+        # ── Backend business logic (services + repositories + api helpers
+        #    + utils + db connection) ────────────────────────────────────
+        if p.startswith("src/lib/"):
             return "UTILITY"
+
+        # ── Standalone TypeScript type declaration files ────────────────
         if p.startswith("src/types/"):
             return "TYPE_DEFINITION"
+
+        # ── Anything else (src/config.ts, src/middleware.ts, src/theme/)──
         return None
 
     return classify

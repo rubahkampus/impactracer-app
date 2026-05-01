@@ -41,19 +41,33 @@ RRF_PATH_WEIGHTS: dict[ChangeType, dict[str, float]] = {
 # =========================================================================
 
 LAYER_COMPAT: dict[str | None, dict[str, float]] = {
-    # API routes implement FRs and appear in Design/General process docs.
-    "API_ROUTE":       {"FR": 1.0, "NFR": 0.6, "Design": 0.9, "General": 0.7},
-    # Page and UI components are FR/Design targets; rarely in General/NFR docs.
-    "PAGE_COMPONENT":  {"FR": 1.0, "NFR": 0.5, "Design": 0.9, "General": 0.6},
-    "UI_COMPONENT":    {"FR": 0.9, "NFR": 0.5, "Design": 0.9, "General": 0.6},
-    # Service/repository/utility files directly implement FRs and are the
-    # primary subjects of Design component diagrams and General process flows.
-    # These are the most traceable nodes — all multipliers raised accordingly.
-    "UTILITY":         {"FR": 1.0, "NFR": 0.7, "Design": 1.0, "General": 0.7},
-    # Type definitions are structural contracts — most relevant to Design.
-    "TYPE_DEFINITION": {"FR": 0.7, "NFR": 0.4, "Design": 1.0, "General": 0.5},
-    # Unclassified files (lib internals) behave like UTILITY in practice.
-    None:              {"FR": 0.9, "NFR": 0.5, "Design": 0.9, "General": 0.7},
+    # API_ROUTE: Next.js route handlers — entry points for FRs, described in
+    # SDD endpoint-spec (Design) sections and process flows (General).
+    "API_ROUTE":       {"FR": 1.0, "NFR": 0.6, "Design": 0.9, "General": 0.8},
+
+    # PAGE_COMPONENT: Next.js pages — primary FR/Design targets for UI flows.
+    "PAGE_COMPONENT":  {"FR": 1.0, "NFR": 0.5, "Design": 0.9, "General": 0.7},
+
+    # UI_COMPONENT: React components, client hooks, Zustand stores.
+    # Now also covers src/hooks/ and src/lib/stores/ (client-side state).
+    # General raised to 0.7 — process docs reference UI interactions.
+    "UI_COMPONENT":    {"FR": 0.9, "NFR": 0.5, "Design": 0.9, "General": 0.7},
+
+    # UTILITY: services, repositories, api helpers, utils — the backend
+    # business logic layer.  Directly implements FRs and is the primary
+    # subject of SDD component (Design) and SRS process (General) sections.
+    "UTILITY":         {"FR": 1.0, "NFR": 0.7, "Design": 1.0, "General": 0.8},
+
+    # TYPE_DEFINITION: Mongoose models (src/lib/db/models/**) and TypeScript
+    # type files (src/types/**).  These are the verbatim subject of SDD
+    # "Perancangan Basis Data" (Database Design) sections → 1.0 × Design.
+    # Also relevant to FRs (data structures used by FRs) and General
+    # (process docs reference entity names).  Low NFR relevance.
+    "TYPE_DEFINITION": {"FR": 0.8, "NFR": 0.3, "Design": 1.0, "General": 0.6},
+
+    # None: unclassified files (config.ts, middleware.ts, theme/).
+    # Treated conservatively — plausible match for any doc type.
+    None:              {"FR": 0.8, "NFR": 0.5, "Design": 0.8, "General": 0.6},
 }
 
 

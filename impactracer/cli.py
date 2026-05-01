@@ -59,7 +59,24 @@ def index(
     Implementation entry point:
         impactracer.indexer.runner.run_indexing(repo_path, settings, force)
     """
-    raise NotImplementedError("Sprint 7: offline indexer integration")
+    from impactracer.indexer.runner import run_indexing
+    from impactracer.shared.config import get_settings
+
+    settings = get_settings()
+    stats = run_indexing(repo_path=repo_path, settings=settings, force=force)
+
+    typer.echo(
+        f"\n{'='*50}\n"
+        f"  ImpacTracer Index Complete\n"
+        f"{'='*50}\n"
+        f"  Files scanned    : {stats['files_scanned']}\n"
+        f"  Files reindexed  : {stats['files_reindexed']}\n"
+        f"  Code nodes       : {stats['code_nodes']}\n"
+        f"  Doc chunks       : {stats['doc_chunks']}\n"
+        f"  Structural edges : {stats['edges']}\n"
+        f"  Elapsed          : {stats['elapsed_seconds']}s\n"
+        f"{'='*50}"
+    )
 
 
 @app.command()
