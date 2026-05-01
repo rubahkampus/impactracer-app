@@ -3,14 +3,13 @@
 Output dimension: 1024. Multilingual: Indonesian + English in a shared
 space. Uses FP16 on GPU when available.
 
-Reference: 06_offline_indexer.md §6.
+Reference: master_blueprint.md §3.5.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
+from huggingface_hub import snapshot_download
 
 
 class Embedder:
@@ -22,18 +21,28 @@ class Embedder:
         batch_size: int = 32,
         max_length: int = 512,
     ) -> None:
-        """Load the model, warm the HF cache if needed."""
-        raise NotImplementedError("Sprint 6")
+        from FlagEmbedding import BGEM3FlagModel
+        self.model = BGEM3FlagModel(model_name, use_fp16=True)
+        self.batch_size = batch_size
+        self.max_length = max_length
 
     def embed_batch(self, texts: list[str]) -> np.ndarray:
         """Encode a batch of texts. Returns ``(N, 1024)`` float32 array."""
-        raise NotImplementedError("Sprint 6")
+        out = self.model.encode(
+            texts,
+            batch_size=self.batch_size,
+            max_length=self.max_length,
+            return_dense=True,
+            return_sparse=False,
+            return_colbert_vecs=False,
+        )
+        return out["dense_vecs"].astype(np.float32)
 
     def embed_single(self, text: str) -> list[float]:
         """Encode one text; return a plain Python list (ChromaDB compatible)."""
-        raise NotImplementedError("Sprint 6")
+        return self.embed_batch([text])[0].tolist()
 
 
 def ensure_model_cached(model_name: str) -> None:
     """Pre-warm the Hugging Face cache for a given model name."""
-    raise NotImplementedError("Sprint 6")
+    snapshot_download(repo_id=model_name)

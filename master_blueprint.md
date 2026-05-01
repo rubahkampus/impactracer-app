@@ -15,6 +15,20 @@ These files are the contract. Sessions IMPLEMENT the empty stubs; they do NOT re
 
 ---
 
+## 0. Real Paths and Environment
+
+```
+ImpacTracer repo:    C:\Users\Haidar\Documents\thesis\impactracer-app
+Target repo:         C:\Users\Haidar\Documents\thesis\citrakara
+Target docs:         C:\Users\Haidar\Documents\thesis\citrakara\docs
+Persistent memory:   C:\Users\Haidar\Documents\thesis\impactracer-app\implementation_report.md
+SQLite DB:           C:\Users\Haidar\Documents\thesis\impactracer-app\data\impactracer.db
+ChromaDB store:      C:\Users\Haidar\Documents\thesis\impactracer-app\data\chroma_store
+HF cache:            ~/.cache/huggingface/hub  (default; OS-managed)
+```
+
+---
+
 ## 1. The 21 Atomic FRs and Their Modules
 
 | FR | Name | Module | LLM |
@@ -54,6 +68,7 @@ These files are the contract. Sessions IMPLEMENT the empty stubs; they do NOT re
 7. **9 node types only:** File, Class, Function, Method, Interface, TypeAlias, Enum, ExternalPackage, InterfaceField.
 8. **Forward slashes in all node IDs and file paths**, even on Windows. Use `pathlib.Path.as_posix()`.
 9. **Single statistical test:** V7 vs V5, one-sided paired Wilcoxon, no Bonferroni.
+10. **No git, no managed services.** Edges from AST + file content only. All stores are local files.
 
 ---
 
@@ -373,6 +388,7 @@ Re-sort descending.
 
 ### Step 4 — Validate SIS (LLM #2, FR-C5)
 
+`pipeline/validator.py`:
 Skip if `enable_sis_validation=False`. Otherwise:
 
 **Lost-in-the-middle reorder:** position 0 = highest reranker_score, position N-1 = lowest, middle filled in ascending order.
@@ -420,6 +436,11 @@ When variant disables LLM #2: `sis_ids = [c.node_id for c in candidates]`.
 
 ### Step 5 — Resolve doc-chunk SIS to code seeds (FR-C6)
 
+`pipeline/seed_resolver.py`:
+- Direct code-node SIS entries pass through as `direct_code_seeds`.
+- Doc-chunk SIS entries: query `doc_code_candidates` for top-K code nodes per doc (K = `top_k_traceability`).
+- Return `(resolutions, doc_to_code_map, direct_code_seeds)` where `resolutions = [{doc_id, code_ids}]` and `doc_to_code_map = {doc_id: [code_ids]}`.
+
 ```python
 def resolve_doc_to_code(sis_ids, conn, top_k):
     code_node_set = {r[0] for r in conn.execute("SELECT node_id FROM code_nodes").fetchall()}
@@ -444,11 +465,23 @@ def resolve_doc_to_code(sis_ids, conn, top_k):
 
 ### Step 5b — Validate trace resolution (LLM #3, FR-C7)
 
+`pipeline/traceability_validator.py`:
+- Return `(validated_code_seeds, low_confidence_map)`.
+- `call_name="validate_trace"`.
+
 Skip if `enable_trace_validation=False` → take top-1 of each resolution as code seed (blind resolution).
 
-Otherwise: build prompt presenting each (doc_chunk, candidate code_node) pair with the doc text, the code signature + internal_logic_abstraction. LLM returns `TraceValidationResult` with three-way decision per pair. CONFIRMED → seed admitted. PARTIAL → seed admitted with `low_confidence_seed=True`. REJECTED → dropped.
+Otherwise: build prompt presenting each (doc_chunk, candidate code_node) pair with the doc text, the code signature + internal_logic_abstraction. LLM returns `TraceValidationResult` with three-way decision per pair measuring their relevancy to the doc_chunk and the CRInterpretation object. CONFIRMED → seed admitted. PARTIAL → seed admitted with `low_confidence_seed=True`. REJECTED → dropped.
 
 ### Step 6 — BFS propagation (FR-D1)
+
+`pipeline/graph_bfs.py`:
+1. Build NetworkX `MultiDiGraph` from `structural_edges`.
+2. Compute high-confidence tier: top-N seeds by reranker score (N = `settings.bfs_high_conf_top_n`, default 5). Doc-chunk reranker scores propagate to their resolved code seeds via `dict.setdefault`.
+3. Multi-source BFS. Per edge type, consult `EDGE_CONFIG[edge_type]` for direction (forward/reverse) and max_depth.
+4. **Fix D:** for low-confidence origins (seed marked `low_confidence_seed=True` OR seed not in high-confidence set), CALLS depth is capped to 1 instead of 3 (`LOW_CONF_CAPPED_EDGES = {CALLS}`).
+5. Global cap: `settings.bfs_global_max_depth` (default 3).
+6. Output `CISResult` separating `sis_nodes` (the seeds themselves) from `propagated_nodes`. Each `NodeTrace` records `depth, causal_chain, path, source_seed, low_confidence_seed`.
 
 Skip if `enable_bfs=False` → CIS = SIS only.
 
@@ -470,16 +503,18 @@ cis = bfs_propagate(ctx.graph, all_code_seeds, high_confidence=high_conf, low_co
 
 ### Step 7 — Validate propagation (LLM #4, FR-D2)
 
+`pipeline/traversal_validator.py`:
 Skip if `enable_propagation_validation=False`.
 
 Otherwise: partition `cis.propagated_nodes` into:
 - `auto_kept`: nodes at depth=1 reached via an edge in `PROPAGATION_VALIDATION_EXEMPT_EDGES`.
-- `to_validate`: the rest.
+- `to_validate`: the rest, send the code signature + internal_logic_abstraction.
 
-Send `to_validate` to LLM #4 with their causal chains and the originating SIS seed signatures. Keep only those with `semantically_impacted=True`, plus all `auto_kept`.
+Send `to_validate` to LLM #4 with their causal chains, the originating SIS seed (signature + internal_logic_abstraction),a dn the CRIterpretation object. Keep only those with `semantically_impacted=True`, plus all `auto_kept`, based on their relevancy to their originating SIS seed and the CRInterpretation object.
 
 ### Step 8 — Backlinks + Context (FR-E1, FR-E2)
 
+`pipeline/context_builder.py`:
 ```python
 backlinks = fetch_backlinks(cis.all_node_ids(), conn, top_k_backlinks_per_node)
 snippets = fetch_snippets(cis.all_node_ids(), conn)  # source_code from SQLite
@@ -504,6 +539,23 @@ Output: `ImpactReport` written to `--output` path.
 ---
 
 ## 5. Ablation Harness (V0–V7)
+
+**Variant Matrix (V0..V7):**
+
+Already encoded in `evaluation/variant_flags.py`. Summary (✓ = enabled):
+
+| Variant | BM25 | Dense | RRF | CrossEnc | Dedup | Plaus | LLM#2 | LLM#3 | BFS | LLM#4 |
+|---------|------|-------|-----|----------|-------|-------|-------|-------|-----|-------|
+| V0 | ✓ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ |
+| V1 | ☐ | ✓ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ |
+| V2 | ✓ | ✓ | ✓ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ |
+| V3 | ✓ | ✓ | ✓ | ✓ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ |
+| V4 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ☐ | ☐ |
+| V5 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ☐ |
+| V6 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ |
+| V7 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+LLM #1 (interpret) and LLM #5 (synthesize) run for every variant.
 
 `VariantFlags` factories already exist in `evaluation/variant_flags.py`. The harness:
 
@@ -542,14 +594,27 @@ Tie-break: alphabetic node_id.
 
 ## 6. Evaluation (V7 vs V5 only)
 
+Precision@10, Recall@10, F1@10. K=5 reported descriptively. 
+
+```
+P@K = |ranked[:K] ∩ gt| / K
+R@K = |ranked[:K] ∩ gt| / |gt|
+F1@K = 2PR/(P+R) or 0 if P+R==0
+
+Edge cases: empty ranked → all 0. `|ranked| < K` → denominator is K (penalize under-retrieval).
+
 `evaluation/statistical.py::run_primary_test(df)` — single one-sided paired Wilcoxon on F1@10. No Bonferroni. Output dict: `hypothesis, variant_a, variant_b, p_value, statistic, cliffs_delta, median_diff, n, accepted`.
 
 `build_summary_artifacts` writes:
-- `summary_table.csv` — macro-averaged metrics per variant (all 8).
-- `per_category_table.csv` — per-variant per-category means.
-- `statistical_tests.json` — single test result.
-- `latency_distribution.png` — box plot per variant (matplotlib).
-- `nfr_verification.json` — only when `--verify-nfr`.
+- `per_cr_per_variant_metrics.csv` — one row per (cr_id, variant_id) with all metric columns.
+- `<cr_id>/<variant>.json` — per-variant ImpactReport.
+- `summary_table.csv` — macro-averaged metrics per variant (all 8 variants present, descriptive).
+- `per_category_table.csv` — metrics per variant per CR category (C1..C5).
+- `statistical_tests.json` — single dict (V7 vs V5).
+- `locked_parameters.json` — pre-run snapshot of `Settings`.
+- `latency_distribution.png` — box plot.
+- `llm_audit.jsonl` — append-only line per LLM call, including `config_hash` (NFR-05).
+- (with `--verify-nfr`) `nfr_verification.json` — pass/fail for NFR-01 through NFR-05.
 
 **NFR verification procedures** (in `evaluation/nfr_verify.py`):
 - NFR-01: run V7 twice, compare validated SIS code node sets after Step 5b. Use a `ContextRecorder` snapshotting hook.

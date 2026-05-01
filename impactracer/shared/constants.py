@@ -41,12 +41,19 @@ RRF_PATH_WEIGHTS: dict[ChangeType, dict[str, float]] = {
 # =========================================================================
 
 LAYER_COMPAT: dict[str | None, dict[str, float]] = {
-    "API_ROUTE":       {"FR": 1.0, "NFR": 0.5, "Design": 0.8, "General": 0.5},
-    "PAGE_COMPONENT":  {"FR": 1.0, "NFR": 0.5, "Design": 0.9, "General": 0.5},
-    "UI_COMPONENT":    {"FR": 0.9, "NFR": 0.5, "Design": 0.9, "General": 0.5},
-    "UTILITY":         {"FR": 0.7, "NFR": 0.7, "Design": 0.8, "General": 0.5},
-    "TYPE_DEFINITION": {"FR": 0.6, "NFR": 0.3, "Design": 0.9, "General": 0.5},
-    None:              {"FR": 0.8, "NFR": 0.5, "Design": 0.8, "General": 0.5},
+    # API routes implement FRs and appear in Design/General process docs.
+    "API_ROUTE":       {"FR": 1.0, "NFR": 0.6, "Design": 0.9, "General": 0.7},
+    # Page and UI components are FR/Design targets; rarely in General/NFR docs.
+    "PAGE_COMPONENT":  {"FR": 1.0, "NFR": 0.5, "Design": 0.9, "General": 0.6},
+    "UI_COMPONENT":    {"FR": 0.9, "NFR": 0.5, "Design": 0.9, "General": 0.6},
+    # Service/repository/utility files directly implement FRs and are the
+    # primary subjects of Design component diagrams and General process flows.
+    # These are the most traceable nodes — all multipliers raised accordingly.
+    "UTILITY":         {"FR": 1.0, "NFR": 0.7, "Design": 1.0, "General": 0.7},
+    # Type definitions are structural contracts — most relevant to Design.
+    "TYPE_DEFINITION": {"FR": 0.7, "NFR": 0.4, "Design": 1.0, "General": 0.5},
+    # Unclassified files (lib internals) behave like UTILITY in practice.
+    None:              {"FR": 0.9, "NFR": 0.5, "Design": 0.9, "General": 0.7},
 }
 
 

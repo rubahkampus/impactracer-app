@@ -41,7 +41,7 @@ class Settings(BaseSettings):
 
     # ---- Indexer ----------------------------------------------------
     top_k_traceability: int = 5
-    min_traceability_similarity: float = 0.60
+    min_traceability_similarity: float = 0.40
     degenerate_embed_min_length: int = 50
 
     # ---- Retrieval --------------------------------------------------

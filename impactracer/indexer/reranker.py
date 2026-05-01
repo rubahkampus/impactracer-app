@@ -1,9 +1,9 @@
 """BGE-Reranker-v2-M3 cross-encoder wrapper (FR-C3).
 
-Returns sigmoid-normalized scores in [0, 1]. Used both by the online
-pipeline (Step 3) and optionally during indexing for calibration runs.
+Returns sigmoid-normalized scores in [0, 1]. Used by the online pipeline
+at Step 3 (after RRF, before pre-validation gates).
 
-Reference: 07_online_pipeline.md §5.
+Reference: master_blueprint.md §3.6.
 """
 
 from __future__ import annotations
@@ -15,8 +15,8 @@ class Reranker:
     """Wraps ``FlagEmbedding.FlagReranker``."""
 
     def __init__(self, model_name: str) -> None:
-        """Load the model, warm the HF cache if needed."""
-        raise NotImplementedError("Sprint 6")
+        from FlagEmbedding import FlagReranker
+        self.model = FlagReranker(model_name, use_fp16=True)
 
     def rerank(
         self,
@@ -29,4 +29,10 @@ class Reranker:
         Sets ``reranker_score`` in-place on each candidate and returns
         them sorted descending, truncated to ``top_k``.
         """
-        raise NotImplementedError("Sprint 6")
+        if not candidates:
+            return []
+        pairs = [(query, c.text_snippet) for c in candidates]
+        scores = self.model.compute_score(pairs, normalize=True)
+        for c, s in zip(candidates, scores):
+            c.reranker_score = float(s)
+        return sorted(candidates, key=lambda c: c.reranker_score, reverse=True)[:top_k]

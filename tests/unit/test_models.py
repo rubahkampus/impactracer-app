@@ -272,21 +272,21 @@ def test_severity_for_chain_behavioral_beats_module() -> None:
 
 
 def test_layer_compat_representative_cells() -> None:
-    """Three representative cells from LAYER_COMPAT (blueprint §3.7)."""
+    """Representative cells from LAYER_COMPAT (recalibrated after E2E audit)."""
     assert layer_compat("API_ROUTE", "FR") == 1.0
-    assert layer_compat("TYPE_DEFINITION", "Design") == 0.9
+    assert layer_compat("TYPE_DEFINITION", "Design") == 1.0   # raised: type defs are pure design contracts
     assert layer_compat("UTILITY", "NFR") == 0.7
 
 
 def test_layer_compat_none_classification() -> None:
     """None classification falls back to the None row."""
-    assert layer_compat(None, "FR") == 0.8
-    assert layer_compat(None, "Design") == 0.8
+    assert layer_compat(None, "FR") == 0.9    # raised: unclassified lib/ files behave like UTILITY
+    assert layer_compat(None, "Design") == 0.9
 
 
 def test_layer_compat_unknown_classification() -> None:
     """Unknown classification also falls back to the None row."""
-    assert layer_compat("UNKNOWN_CLASS", "FR") == 0.8
+    assert layer_compat("UNKNOWN_CLASS", "FR") == 0.9
 
 
 # ---------------------------------------------------------------------------
@@ -303,7 +303,7 @@ def test_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.llm_temperature == 0.0
     assert s.llm_seed == 42
     assert s.rrf_k == 60
-    assert s.min_traceability_similarity == 0.60
+    assert s.min_traceability_similarity == 0.40
     assert s.degenerate_embed_min_length == 50
     assert s.bfs_high_conf_top_n == 5
     assert s.min_reranker_score_for_validation == 0.01

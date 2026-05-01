@@ -274,11 +274,21 @@ def compose_file_embed_text(
     """Compose the enriched BGE-M3 input text for a File node.
 
     Blueprint §3.2: {filename} [{classification}] ({rel_dir})\\nexports: {sorted exports}
+    Extended: path components are emitted as space-separated keywords so the
+    embedding model can latch onto domain tokens like "auth", "wallet", "login".
     """
     filename = file_node.get("name") or ""
     classification = file_node.get("file_classification") or "NULL"
     exports_str = ", ".join(exported_names) if exported_names else "(none)"
-    return f"{filename} [{classification}] ({rel_dir})\nexports: {exports_str}"
+    # Expand directory path into individual keyword tokens (e.g. "auth login api")
+    path_keywords = " ".join(
+        p for p in rel_dir.replace("\\", "/").split("/")
+        if p and p not in ("src", "app", "lib", ".")
+    )
+    base = f"{filename} [{classification}] ({rel_dir})\nexports: {exports_str}"
+    if path_keywords:
+        return f"{base}\npath keywords: {path_keywords}"
+    return base
 
 
 # ---------------------------------------------------------------------------
