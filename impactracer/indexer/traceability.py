@@ -67,17 +67,46 @@ def compute_and_store(
     weighted = cos_matrix * compat_matrix
 
     # Step 4 + 5: collect pairs, delete stale rows, insert
+    #
+    # Dual-direction top-K pass (V1 fix):
+    #   Forward pass  — for each CODE node, retain its top-K doc chunks.
+    #   Reverse pass  — for each DOC chunk, retain its top-K code nodes.
+    # Union of both passes ensures that low-LAYER_COMPAT chunk types
+    # (NFR, General) are never silently squeeze-out when they have a
+    # genuinely high cosine similarity to some code node.
+    seen: set[tuple[str, str]] = set()
     rows: list[tuple[str, str, float]] = []
+
+    # --- Forward pass: per-code-node top-K ---
     for i, cid in enumerate(code_ids):
         row = weighted[i]
-        # argsort descending
         order = np.argsort(row)[::-1]
         count = 0
         for j in order:
             score = float(row[j])
             if score < min_similarity:
                 break
-            rows.append((cid, doc_ids[j], score))
+            key = (cid, doc_ids[j])
+            if key not in seen:
+                rows.append((cid, doc_ids[j], score))
+                seen.add(key)
+            count += 1
+            if count >= top_k:
+                break
+
+    # --- Reverse pass: per-doc-chunk top-K ---
+    for j, did in enumerate(doc_ids):
+        col = weighted[:, j]
+        order = np.argsort(col)[::-1]
+        count = 0
+        for i in order:
+            score = float(col[i])
+            if score < min_similarity:
+                break
+            key = (code_ids[i], did)
+            if key not in seen:
+                rows.append((code_ids[i], did, score))
+                seen.add(key)
             count += 1
             if count >= top_k:
                 break

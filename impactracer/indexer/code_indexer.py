@@ -362,6 +362,21 @@ def extract_nodes(
     route_path = derive_route_path(rel_path) if file_classification in ("API_ROUTE", "PAGE_COMPONENT") else None
     rel_dir = str(rel_path.parent.as_posix())
 
+    # Detect Next.js 'use client' / 'use server' directive (must be first statement).
+    client_directive: str | None = None
+    for top_stmt in root.children:
+        if top_stmt.type == "expression_statement":
+            for sc in top_stmt.children:
+                if sc.type == "string":
+                    val = source_bytes[sc.start_byte:sc.end_byte].decode(errors="replace").strip("'\" ")
+                    if val == "use client":
+                        client_directive = "client"
+                    elif val == "use server":
+                        client_directive = "server"
+            break  # directive must be the very first statement if present
+        if top_stmt.type not in ("comment", "hash_bang_line"):
+            break  # non-directive first statement — stop scanning
+
     # Collect exported names for the File embed_text
     exported_names = _collect_exported_names(root, source_bytes)
 
@@ -383,6 +398,7 @@ def extract_nodes(
         "start_line": 1,
         "end_line": source_bytes.count(b"\n") + 1,
         "is_exported": True,
+        "client_directive": client_directive,
     }
     file_node["embed_text"] = compose_file_embed_text(file_node, exported_names, rel_dir)
     nodes.append(file_node)
@@ -524,6 +540,10 @@ def _handle_import_for_external(
     specifier = raw.strip("'\"")
     # Relative imports are handled in Pass 2 (IMPORTS edge); skip here
     if specifier.startswith("."):
+        return
+    # @/ path-alias imports are intra-repo — Pass 2 resolves them as IMPORTS edges.
+    # Creating an ExternalPackage node here would leave a rogue unreachable node.
+    if specifier.startswith("@/"):
         return
     if specifier in external_packages:
         return
@@ -1044,11 +1064,13 @@ def _insert_nodes(nodes: list[dict[str, Any]], conn: sqlite3.Connection) -> None
         INSERT OR REPLACE INTO code_nodes (
             node_id, node_type, name, file_path, file_classification,
             route_path, signature, docstring, internal_logic_abstraction,
-            source_code, embed_text, line_start, line_end, exported
+            source_code, embed_text, line_start, line_end, exported,
+            client_directive
         ) VALUES (
             :node_id, :node_type, :name, :file_path, :file_classification,
             :route_path, :signature, :docstring, :internal_logic_abstraction,
-            :source_code, :embed_text, :line_start, :line_end, :exported
+            :source_code, :embed_text, :line_start, :line_end, :exported,
+            :client_directive
         )
     """
     for n in nodes:
@@ -1067,6 +1089,7 @@ def _insert_nodes(nodes: list[dict[str, Any]], conn: sqlite3.Connection) -> None
             "line_start": n.get("start_line", 1),
             "line_end": n.get("end_line", 1),
             "exported": 1 if n.get("is_exported") else 0,
+            "client_directive": n.get("client_directive"),
         }
         conn.execute(sql, row)
     conn.commit()
@@ -1146,42 +1169,115 @@ def resolve_call_target(
     return None
 
 
+_HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
+
+
+def _route_segments_match(url_segs: list[str], disk_segs: list[str]) -> bool:
+    """Return True if disk route path segments positionally match url segments.
+
+    A disk segment like ``[paramName]`` (any bracket-wrapped name) is treated
+    as a wildcard and matches any single url segment.  Literal segments must
+    match exactly (case-sensitive).
+    """
+    if len(url_segs) != len(disk_segs):
+        return False
+    for u, d in zip(url_segs, disk_segs):
+        if d.startswith("[") and d.endswith("]"):
+            continue  # wildcard — matches any value
+        if u != d:
+            return False
+    return True
+
+
+# Pre-built per-call-site cache: maps normalized segment lists to file_ids.
+# This is intentionally NOT a module-level cache — it is rebuilt for each
+# extract_edges() invocation which is cheap (O(n_routes)) and correct for
+# incremental re-index scenarios.
+
 def resolve_api_route(
     raw_path: str,
     known_node_ids: set[str],
-) -> str | None:
-    """Resolve a /api/... string to an API_ROUTE File node_id.
+) -> list[str]:
+    """Resolve a /api/... string to API_ROUTE node_id(s).
 
-    Normalises ${...} template slots and :param / [param] dynamic segments
-    to [id], then probes src/app/api/.../route.ts first, then
-    src/pages/api/....ts.
-    Blueprint §3.4 CLIENT_API_CALLS rule.
+    Returns a list: prefers the specific HTTP-method Function nodes
+    (e.g. route.ts::GET, route.ts::POST) when they exist, otherwise
+    falls back to the File node itself.  Returns [] when unresolvable.
+
+    Algorithm (V3 fix — positional wildcard matching):
+      1. Strip ${...} template expressions from the URL (they become wildcards).
+      2. Split the url into segments.
+      3. For each known route file (src/app/…/route.ts and src/pages/…),
+         split its path into segments and call _route_segments_match().
+         A disk ``[paramName]`` segment matches any single url segment.
+      4. Among all matches prefer the most-specific one (fewest wildcards).
+
+    Blueprint §3.4 CLIENT_API_CALLS rule.  Sprint 7.9 V3 fix.
     """
-    # Strip query string
+    # Strip query string / fragment
     path = raw_path.split("?")[0].split("#")[0]
-    # Normalize dynamic segments: ${...} → [id]
+    # Replace ${...} template expressions with a placeholder segment so we can
+    # split cleanly.  We do NOT collapse [param] → [id] here.
     path = _TEMPLATE_EXPR_RE.sub("[id]", path)
-    # Normalize :param → [id] and [param] → [id]
-    path = _DYN_SEG_RE.sub("[id]", path)
 
-    # path is e.g. /api/commissions/[id]
-    # App Router: src/app/api/commissions/[id]/route.ts
-    # Pages Router: src/pages/api/commissions/[id].ts
-    # Normalize: remove leading /
-    path_no_slash = path.lstrip("/")  # e.g. "api/commissions/[id]"
+    path_no_slash = path.lstrip("/")          # e.g. "api/proposal/[id]/respond"
+    url_segs = path_no_slash.split("/")
 
-    candidates = [
-        # App Router (Next.js 13+): src/app/<path>/route.ts
-        f"src/app/{path_no_slash}/route.ts",
-        f"src/app/{path_no_slash}/route.tsx",
-        # Pages Router: src/pages/<path>.ts
-        f"src/pages/{path_no_slash}.ts",
-        f"src/pages/{path_no_slash}.tsx",
+    # Collect candidate route file_ids from known_node_ids.
+    # A route file looks like "src/app/.../route.ts" or "src/pages/...".
+    # We pre-filter by segment count to keep the inner loop fast.
+    n = len(url_segs)
+
+    best_file_id: str | None = None
+    best_wildcards = n + 1  # lower is better (more specific match)
+
+    for nid in known_node_ids:
+        # Only consider File nodes (no "::" separator)
+        if "::" in nid:
+            continue
+        # Must be a route file under src/app/ or src/pages/api/
+        if not (nid.startswith("src/app/") or nid.startswith("src/pages/")):
+            continue
+        if not (nid.endswith("/route.ts") or nid.endswith("/route.tsx")
+                or (nid.startswith("src/pages/") and (nid.endswith(".ts") or nid.endswith(".tsx")))):
+            continue
+
+        # Build disk segments: strip "src/app/" prefix + "/route.ts" suffix
+        if nid.startswith("src/app/"):
+            disk_path = nid[len("src/app/"):]              # "api/.../route.ts"
+            if disk_path.endswith("/route.ts"):
+                disk_path = disk_path[:-len("/route.ts")]  # "api/..."
+            elif disk_path.endswith("/route.tsx"):
+                disk_path = disk_path[:-len("/route.tsx")]
+            else:
+                continue  # not a route.ts file under src/app/
+        else:
+            # src/pages/api/...
+            disk_path = nid[len("src/pages/"):]            # "api/....ts"
+            disk_path = disk_path.rsplit(".", 1)[0]        # strip .ts/.tsx
+
+        disk_segs = disk_path.split("/")
+
+        if not _route_segments_match(url_segs, disk_segs):
+            continue
+
+        # Count wildcards in disk route to prefer most-specific match
+        wildcards = sum(1 for s in disk_segs if s.startswith("[") and s.endswith("]"))
+        if wildcards < best_wildcards:
+            best_wildcards = wildcards
+            best_file_id = nid
+
+    if best_file_id is None:
+        return []
+
+    # Fan out to HTTP-method Function nodes when present.
+    fn_targets = [
+        f"{best_file_id}::{m}" for m in _HTTP_METHODS
+        if f"{best_file_id}::{m}" in known_node_ids
     ]
-    for c in candidates:
-        if c in known_node_ids:
-            return c
-    return None
+    if fn_targets:
+        return fn_targets
+    return [best_file_id]
 
 
 def _emit_edge(
@@ -1213,6 +1309,32 @@ def _extract_string_specifier(node: Node, src: bytes) -> str | None:
     return raw.strip("'\"")
 
 
+def _resolve_alias_import(
+    specifier: str,
+    known_node_ids: set[str],
+) -> str | None:
+    """Resolve a TypeScript @/ path-alias specifier to a File node_id.
+
+    @/ maps to src/ by tsconfig.json paths convention in citrakara.
+    Probes .ts / .tsx / /index.ts / /index.tsx in order.
+    Returns None if no indexed node matches (falls through to DEPENDS_ON_EXTERNAL).
+    Blueprint §3.4 — alias imports are intra-repo and must resolve to real IMPORTS edges.
+    """
+    # @/lib/services/auth.service -> src/lib/services/auth.service
+    base = "src/" + specifier[len("@/"):]
+    candidates = [
+        base,
+        base + ".ts",
+        base + ".tsx",
+        base + "/index.ts",
+        base + "/index.tsx",
+    ]
+    for c in candidates:
+        if c in known_node_ids:
+            return c
+    return None
+
+
 def _build_import_map(
     root: Node,
     src: bytes,
@@ -1227,6 +1349,10 @@ def _build_import_map(
         import_map: local_name -> target node_id (for cross-file resolution)
         dep_pairs: list of (dependent_file, target_file) for file_dependencies
     Blueprint §3.4 steps 1-2.
+
+    @/ path aliases (TypeScript tsconfig paths) are treated as intra-repo imports:
+    resolved to src/ File nodes and emitted as IMPORTS edges (not DEPENDS_ON_EXTERNAL).
+    This ensures the full CIA chain API_ROUTE -> service -> repository is traversable by BFS.
     """
     import_map: dict[str, str] = {}
     dep_pairs: list[tuple[str, str]] = []
@@ -1258,8 +1384,20 @@ def _build_import_map(
                 dep_pairs.append((file_posix, target_file_id))
                 # Map imported names to their target node_ids
                 _map_import_names(stmt, src, target_file_id, import_map, known_node_ids)
+        elif specifier.startswith("@/"):
+            # TypeScript path alias (@/ -> src/) — intra-repo, resolve as IMPORTS
+            target_file_id = _resolve_alias_import(specifier, known_node_ids)
+            if target_file_id is not None:
+                _emit_edge(file_posix, target_file_id, "IMPORTS", conn, counter)
+                dep_pairs.append((file_posix, target_file_id))
+                _map_import_names(stmt, src, target_file_id, import_map, known_node_ids)
+            else:
+                # Alias not resolvable (e.g. generated type file) -> DEPENDS_ON_EXTERNAL
+                pkg_id = f"ext::{specifier}"
+                if pkg_id in known_node_ids:
+                    _emit_edge(file_posix, pkg_id, "DEPENDS_ON_EXTERNAL", conn, counter)
         else:
-            # Non-relative -> DEPENDS_ON_EXTERNAL edge
+            # Non-relative, non-alias -> DEPENDS_ON_EXTERNAL edge (real npm package)
             pkg_id = f"ext::{specifier}"
             if pkg_id in known_node_ids:
                 _emit_edge(file_posix, pkg_id, "DEPENDS_ON_EXTERNAL", conn, counter)
@@ -1604,8 +1742,7 @@ def _walk_body(
                     if first_arg is not None:
                         val = _extract_string_value(first_arg, src)
                         if val and _API_PATH_RE.match(val):
-                            target = resolve_api_route(val, known_node_ids)
-                            if target:
+                            for target in resolve_api_route(val, known_node_ids):
                                 _emit_edge(source_id, target, "CLIENT_API_CALLS", conn, counter)
 
         # --- CALLS ---
@@ -1884,9 +2021,25 @@ def _emit_passes_callback(
     conn: sqlite3.Connection,
     counter: list[int],
 ) -> None:
-    """Emit PASSES_CALLBACK for JSX attribute `onX={functionRef}`.
-    Blueprint §3.4.
+    """Emit PASSES_CALLBACK / transitive CALLS for JSX attribute `onX={...}`.
+
+    Three handler forms handled (V4 fix):
+      1. ``onX={importedFn}``   → PASSES_CALLBACK edge to the imported node.
+      2. ``onX={localHandler}`` → localHandler is a const-defined arrow function
+                                   in the same component body; not a known node.
+                                   Walk its body for CALLS to imported fns.
+      3. ``onX={() => doFn()}`` → inline arrow function; walk body for CALLS.
+
+    For cases 2 & 3 we cannot emit PASSES_CALLBACK (there is no target node),
+    but we CAN emit CALLS from source_id to any imported functions called
+    inside the handler body.  This preserves the reachability path
+    source_id → service/utility function even when the handler is not a
+    top-level node.
+
+    Blueprint §3.4.  Sprint 7.9 V4 fix.
     """
+    from impactracer.shared.constants import BUILTIN_PATTERNS, PRIMITIVE_TYPES, HOOK_NAMES
+
     # jsx_attribute -> attr_name, "=", jsx_expression | string
     attr_name_node = None
     attr_value_node = None
@@ -1903,16 +2056,30 @@ def _emit_passes_callback(
     if not re.match(r"^on[A-Z]", attr_name):
         return
 
-    # The jsx_expression should contain an identifier (function reference)
     for c in attr_value_node.children:
         if c.type == "identifier":
             fn_name = src[c.start_byte:c.end_byte].decode(errors="replace")
             target = resolve_call_target(fn_name, import_map, file_posix, known_node_ids)
             if target:
+                # Case 1: known imported function → PASSES_CALLBACK
                 _emit_edge(source_id, target, "PASSES_CALLBACK", conn, counter)
+            # Case 2: local handler identifier — body already walked by _emit_body_edges;
+            # transitive CALLS edges are emitted there.  Nothing extra needed here.
             break
         if c.type == "member_expression":
             # e.g. props.onClick -> skip (not a resolvable local ref)
+            break
+        if c.type in ("arrow_function", "function"):
+            # Case 3: inline handler — walk the function body for CALLS/CLIENT_API_CALLS
+            fn_body = c.child_by_field_name("body")
+            if fn_body is None:
+                # For concise arrow: the whole node IS the body
+                fn_body = c
+            _walk_body(
+                fn_body, src, source_id, file_posix,
+                import_map, known_node_ids, conn, counter,
+                BUILTIN_PATTERNS, PRIMITIVE_TYPES, HOOK_NAMES,
+            )
             break
 
 
@@ -2006,6 +2173,66 @@ def _collect_nested_fn_bodies(
 
 
 # ---------------------------------------------------------------------------
+# CONTAINS edge emitter  (Sprint 7.75 — Intervention 1)
+# ---------------------------------------------------------------------------
+
+def _emit_contains_edges(
+    file_posix: str,
+    known_node_ids: set[str],
+    conn: sqlite3.Connection,
+    counter: list[int],
+) -> None:
+    """Emit CONTAINS edges for every non-degenerate node owned by this file.
+
+    Two kinds of CONTAINS edges are emitted (V2 fix):
+      1. File → {Function, Method, Interface, TypeAlias, Class, Enum, InterfaceField}
+         — bridges the File↔symbol membrane for BFS.
+      2. Interface → InterfaceField
+         — bridges the Interface↔field membrane.  InterfaceField node_ids follow
+           the convention ``file::InterfaceName.fieldName``; the parent Interface
+           node_id is ``file::InterfaceName``.  We derive the parent from the prefix
+           before the last dot.
+    Blueprint §3.4 Sprint 7.75 + Sprint 7.9 V2 fix.
+    """
+    # --- Pass 1: File → direct children (including InterfaceField) ---
+    cur = conn.execute(
+        "SELECT node_id FROM code_nodes WHERE file_path = ? AND node_type IN "
+        "('Function','Method','Interface','TypeAlias','Class','Enum','InterfaceField')",
+        (file_posix,),
+    )
+    for row in cur:
+        child_id = row[0]
+        if child_id in known_node_ids:
+            _emit_edge(file_posix, child_id, "CONTAINS", conn, counter)
+
+    # --- Pass 2: Interface → InterfaceField ---
+    # InterfaceField node_ids have the form  "src/…/file.ts::InterfaceName.fieldName"
+    # The parent Interface node_id is        "src/…/file.ts::InterfaceName"
+    cur2 = conn.execute(
+        "SELECT node_id FROM code_nodes WHERE file_path = ? AND node_type = 'InterfaceField'",
+        (file_posix,),
+    )
+    for row in cur2:
+        field_id: str = row[0]
+        if field_id not in known_node_ids:
+            continue
+        # Derive interface node_id by stripping the ".fieldName" suffix
+        # node_id format: "path/to/file.ts::InterfaceName.fieldName"
+        separator = "::"
+        sep_idx = field_id.rfind(separator)
+        if sep_idx == -1:
+            continue
+        symbol_part = field_id[sep_idx + len(separator):]  # "InterfaceName.fieldName"
+        dot_idx = symbol_part.rfind(".")
+        if dot_idx == -1:
+            continue
+        iface_symbol = symbol_part[:dot_idx]               # "InterfaceName"
+        iface_id = field_id[:sep_idx + len(separator)] + iface_symbol
+        if iface_id in known_node_ids:
+            _emit_edge(iface_id, field_id, "CONTAINS", conn, counter)
+
+
+# ---------------------------------------------------------------------------
 # Pass 2: main entry point
 # ---------------------------------------------------------------------------
 
@@ -2048,6 +2275,10 @@ def extract_edges(
             dep_pairs,
         )
 
+    # Step 2b: CONTAINS edges — File → every co-located Function/Method/Interface/TypeAlias/Class/Enum
+    # Bridges the File ↔ Function membrane so BFS can propagate across the boundary.
+    _emit_contains_edges(file_posix, known_node_ids, conn, counter)
+
     # Step 3: class edges — INHERITS, IMPLEMENTS, DEFINES_METHOD
     _emit_class_edges(
         root, source_bytes, file_posix, import_map, known_node_ids, conn, counter,
@@ -2067,8 +2298,202 @@ def extract_edges(
         root, source_bytes, file_posix, import_map, known_node_ids, conn, counter,
     )
 
+    # Step 4c: Mongoose entity references — model<IFoo>() calls and ref: 'ModelName' literals
+    _emit_mongoose_edges(
+        root, source_bytes, file_posix, import_map, known_node_ids, conn, counter,
+    )
+
+    # Step 4d: Middleware synthetic edges (V5 fix)
+    # For Next.js middleware.ts, parse config.matcher patterns and emit
+    # CALLS edges from the middleware Function to every API_ROUTE it guards.
+    if file_path.name in ("middleware.ts", "middleware.tsx"):
+        _emit_middleware_edges(
+            root, source_bytes, file_posix, known_node_ids, conn, counter,
+        )
+
     conn.commit()
     return counter[0]
+
+
+def _emit_middleware_edges(
+    root: Node,
+    src: bytes,
+    file_posix: str,
+    known_node_ids: set[str],
+    conn: sqlite3.Connection,
+    counter: list[int],
+) -> None:
+    """Emit synthetic CALLS edges from middleware to the API routes it guards.
+
+    Next.js middleware.ts exports a ``config`` object with a ``matcher`` array of
+    path patterns (e.g. ``"/api/:path*"``).  Because middleware has no static
+    import relationship to the route handlers it protects, it is otherwise a BFS
+    dead-end.  This pass:
+      1. Walks the AST to find the exported ``config.matcher`` array literal.
+      2. For each string pattern, enumerates all API_ROUTE file nodes whose
+         file_posix path matches the pattern (treating ``*`` and ``:param``
+         wildcards as segment wildcards).
+      3. Emits CALLS edges: middleware_fn → api_route_file (and its HTTP-method
+         Function children when present).
+
+    The source node is ``file_posix::middleware`` when present in known_node_ids,
+    otherwise the file node itself (file_posix).
+
+    Blueprint §3.4.  Sprint 7.9 V5 fix.
+    """
+    # Identify the source node: prefer the exported "middleware" Function
+    middleware_fn_id = f"{file_posix}::middleware"
+    source_id = middleware_fn_id if middleware_fn_id in known_node_ids else file_posix
+    if source_id not in known_node_ids:
+        return
+
+    # --- Step 1: find config.matcher array in AST ---
+    matcher_patterns: list[str] = []
+    _collect_matcher_patterns(root, src, matcher_patterns)
+
+    if not matcher_patterns:
+        return
+
+    # --- Step 2: for each pattern, find matching API_ROUTE files ---
+    for pattern in matcher_patterns:
+        # Normalise pattern: strip leading "/" and trailing wildcards for matching
+        # Supported forms: "/api/:path*", "/api/users/:id", "/api/**"
+        # Strategy: convert pattern to a list of segment "matchers"
+        clean = pattern.split("?")[0].split("#")[0].lstrip("/")
+        # Replace ":segment*" (zero-or-more) with a trailing wildcard flag
+        trailing_wildcard = clean.endswith(":path*") or clean.endswith("/**") or clean.endswith("*")
+        # Normalise: remove trailing wildcard glob
+        clean = re.sub(r"/:path\*$", "", clean)
+        clean = re.sub(r"/\*\*$", "", clean)
+        clean = re.sub(r"/\*$", "", clean)
+        clean = clean.rstrip("*")
+        pat_segs = [s for s in clean.split("/") if s]
+
+        for nid in known_node_ids:
+            if "::" in nid:
+                continue
+            if not nid.startswith("src/app/") and not nid.startswith("src/pages/"):
+                continue
+            if not (nid.endswith("/route.ts") or nid.endswith("/route.tsx")
+                    or (nid.startswith("src/pages/")
+                        and (nid.endswith(".ts") or nid.endswith(".tsx")))):
+                continue
+
+            # Build disk segments (same logic as resolve_api_route)
+            if nid.startswith("src/app/"):
+                disk_path = nid[len("src/app/"):]
+                if disk_path.endswith("/route.ts"):
+                    disk_path = disk_path[:-len("/route.ts")]
+                elif disk_path.endswith("/route.tsx"):
+                    disk_path = disk_path[:-len("/route.tsx")]
+                else:
+                    continue
+            else:
+                disk_path = nid[len("src/pages/"):]
+                disk_path = disk_path.rsplit(".", 1)[0]
+
+            disk_segs = [s for s in disk_path.split("/") if s]
+
+            # Match: if trailing_wildcard, disk must START with pat_segs prefix
+            # Otherwise, positional match with wildcard segments
+            if trailing_wildcard:
+                if len(disk_segs) < len(pat_segs):
+                    continue
+                # Check prefix
+                match = True
+                for p, d in zip(pat_segs, disk_segs):
+                    if p.startswith(":"):
+                        continue  # wildcard segment
+                    if p != d:
+                        match = False
+                        break
+                if not match:
+                    continue
+            else:
+                if not _route_segments_match(
+                    pat_segs,
+                    [s for s in disk_segs[:len(pat_segs)]] if len(disk_segs) >= len(pat_segs) else disk_segs,
+                ):
+                    # Fall back to prefix-only if lengths differ slightly
+                    if len(disk_segs) != len(pat_segs):
+                        continue
+                    if not _route_segments_match(pat_segs, disk_segs):
+                        continue
+
+            # Emit CALLS: middleware → route file (or HTTP-method Functions)
+            fn_targets = [
+                f"{nid}::{m}" for m in _HTTP_METHODS
+                if f"{nid}::{m}" in known_node_ids
+            ]
+            if fn_targets:
+                for ft in fn_targets:
+                    _emit_edge(source_id, ft, "CALLS", conn, counter)
+            else:
+                _emit_edge(source_id, nid, "CALLS", conn, counter)
+
+
+def _collect_matcher_patterns(node: Node, src: bytes, patterns: list[str]) -> None:
+    """Walk AST to find the ``config`` export's ``matcher`` array and collect string literals.
+
+    Handles:
+        export const config = { matcher: ['/api/:path*', '/dashboard/:path*'] }
+        export const config = { matcher: '/api/:path*' }
+    """
+    # Look for: export_statement → lexical_declaration → variable_declarator
+    # where the variable name is "config" and value is an object_expression
+    # with a "matcher" property.
+    if node.type in ("export_statement", "lexical_declaration", "variable_declaration"):
+        _try_extract_config_matcher(node, src, patterns)
+
+    for child in node.children:
+        _collect_matcher_patterns(child, src, patterns)
+
+
+def _try_extract_config_matcher(node: Node, src: bytes, patterns: list[str]) -> None:
+    """Attempt to extract matcher strings from a variable declaration node."""
+    # Navigate: export_statement → declaration (lexical) → variable_declarator → value
+    decl = node
+    if node.type == "export_statement":
+        for c in node.children:
+            if c.type in ("lexical_declaration", "variable_declaration"):
+                decl = c
+                break
+
+    for vd in decl.children:
+        if vd.type != "variable_declarator":
+            continue
+        # Check name == "config"
+        name_node = vd.child_by_field_name("name")
+        if name_node is None:
+            continue
+        name_text = src[name_node.start_byte:name_node.end_byte].decode(errors="replace")
+        if name_text != "config":
+            continue
+        # Value should be an object_expression
+        val = vd.child_by_field_name("value")
+        if val is None or val.type != "object":
+            continue
+        # Find "matcher" property
+        for prop in val.children:
+            if prop.type not in ("pair", "property_identifier", "shorthand_property_identifier"):
+                continue
+            key = prop.child_by_field_name("key") or prop
+            key_text = src[key.start_byte:key.end_byte].decode(errors="replace").strip("'\"")
+            if key_text != "matcher":
+                continue
+            value = prop.child_by_field_name("value")
+            if value is None:
+                continue
+            if value.type == "array":
+                for elem in value.children:
+                    if elem.type in ("string", "template_string"):
+                        raw = src[elem.start_byte:elem.end_byte].decode(errors="replace").strip("'\"` ")
+                        if raw:
+                            patterns.append(raw)
+            elif value.type in ("string", "template_string"):
+                raw = src[value.start_byte:value.end_byte].decode(errors="replace").strip("'\"` ")
+                if raw:
+                    patterns.append(raw)
 
 
 def _scan_module_dynamic_imports(
@@ -2112,3 +2537,105 @@ def _scan_module_dynamic_imports(
                                             arg, src, file_node_id, file_posix,
                                             import_map, known_node_ids, conn, counter,
                                         )
+
+
+# ---------------------------------------------------------------------------
+# Mongoose entity edge emitter  (Sprint 7.75 — Intervention 4)
+# ---------------------------------------------------------------------------
+
+# Regex to match `model('ModelName', ...)` or `model<IFoo>('ModelName', ...)`
+# capturing the string literal model name.
+_MONGOOSE_REF_RE = re.compile(r"""['"]([A-Z][A-Za-z0-9]*)['"]""")
+
+
+def _emit_mongoose_edges(
+    root: Node,
+    src: bytes,
+    file_posix: str,
+    import_map: dict[str, str],
+    known_node_ids: set[str],
+    conn: sqlite3.Connection,
+    counter: list[int],
+) -> None:
+    """Emit TYPED_BY edges for Mongoose patterns missed by the standard annotation walk.
+
+    Patterns captured:
+    1. `model<IFoo>(...)` or `model<IFoo, IFoo>(...)`  — generic call expression
+       where the function is `model` (imported from mongoose).  The type argument
+       is an Interface name; resolve it and emit TYPED_BY from the File node.
+    2. `ref: 'ModelName'` — string literal inside a Schema object.  Resolve
+       'ModelName' to a TYPE_DEFINITION File node via the import_map / name lookup
+       and emit TYPED_BY from the File node.
+
+    Both edges are attributed to the File node (file_posix) since the schema/model
+    definition is a file-level construct, not inside any single function.
+    Sprint 7.75 §3.4 Mongoose extension.
+    """
+    file_node_id = file_posix
+    if file_node_id not in known_node_ids:
+        return
+    _walk_mongoose(root, src, file_node_id, file_posix, import_map, known_node_ids, conn, counter)
+
+
+def _walk_mongoose(
+    node: Node,
+    src: bytes,
+    source_id: str,
+    file_posix: str,
+    import_map: dict[str, str],
+    known_node_ids: set[str],
+    conn: sqlite3.Connection,
+    counter: list[int],
+) -> None:
+    """Recursive walk for Mongoose-specific TYPED_BY patterns."""
+    # Pattern 1: call_expression where function is 'model' with type_arguments
+    if node.type == "call_expression":
+        fn = node.child_by_field_name("function")
+        if fn is not None:
+            fn_text = src[fn.start_byte:fn.end_byte].decode(errors="replace")
+            # mongoose `model<IUser>(...)` — bare `model` or `mongoose.model`
+            if fn_text == "model" or fn_text.endswith(".model"):
+                type_args = node.child_by_field_name("type_arguments")
+                if type_args:
+                    for arg in type_args.children:
+                        if arg.type in ("type_identifier", "predefined_type"):
+                            type_name = src[arg.start_byte:arg.end_byte].decode(errors="replace")
+                            target = resolve_call_target(type_name, import_map, file_posix, known_node_ids)
+                            if target:
+                                _emit_edge(source_id, target, "TYPED_BY", conn, counter)
+                        elif arg.type == "generic_type":
+                            name_n = arg.child_by_field_name("name")
+                            if name_n:
+                                type_name = src[name_n.start_byte:name_n.end_byte].decode(errors="replace")
+                                target = resolve_call_target(type_name, import_map, file_posix, known_node_ids)
+                                if target:
+                                    _emit_edge(source_id, target, "TYPED_BY", conn, counter)
+
+    # Pattern 2: pair node `ref: 'ModelName'` inside a Schema object
+    if node.type == "pair":
+        key_node = node.child_by_field_name("key")
+        val_node = node.child_by_field_name("value")
+        if key_node and val_node:
+            key_text = src[key_node.start_byte:key_node.end_byte].decode(errors="replace").strip("'\"")
+            if key_text == "ref" and val_node.type == "string":
+                ref_name = src[val_node.start_byte:val_node.end_byte].decode(errors="replace").strip("'\"")
+                if ref_name and ref_name[0].isupper():
+                    # Try to resolve as a TYPE_DEFINITION File: src/lib/db/models/<name>.model.ts
+                    # or as an Interface node imported in this file.
+                    target = resolve_call_target(ref_name, import_map, file_posix, known_node_ids)
+                    if target:
+                        _emit_edge(source_id, target, "TYPED_BY", conn, counter)
+                    else:
+                        # Probe common model file names
+                        lower = ref_name[0].lower() + ref_name[1:]
+                        model_candidates = [
+                            f"src/lib/db/models/{lower}.model.ts",
+                            f"src/lib/db/models/{ref_name}.model.ts",
+                        ]
+                        for mc in model_candidates:
+                            if mc in known_node_ids:
+                                _emit_edge(source_id, mc, "TYPED_BY", conn, counter)
+                                break
+
+    for child in node.children:
+        _walk_mongoose(child, src, source_id, file_posix, import_map, known_node_ids, conn, counter)

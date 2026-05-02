@@ -99,6 +99,11 @@ EDGE_CONFIG: dict[str, dict] = {
     "DEPENDS_ON_EXTERNAL": {"direction": "reverse", "max_depth": 1},
     "CLIENT_API_CALLS":    {"direction": "reverse", "max_depth": 1},
     "DYNAMIC_IMPORT":      {"direction": "reverse", "max_depth": 1},
+    # File ownership (Sprint 7.75 — 14th edge type)
+    # Bridges the File ↔ Function membrane: File→{Function, Method, Interface,
+    # TypeAlias, Class, Enum}.  direction="both" means BFS traverses it in both
+    # directions (forward: File→children; reverse: children→File).
+    "CONTAINS":            {"direction": "both", "max_depth": 1},
 }
 
 LOW_CONF_CAPPED_EDGES: frozenset[str] = frozenset({"CALLS"})
@@ -133,6 +138,8 @@ SEVERITY_BY_EDGE_CHAIN_TYPE: dict[str, Severity] = {
     "DEPENDS_ON_EXTERNAL": "Rendah",
     "CLIENT_API_CALLS": "Rendah",
     "DYNAMIC_IMPORT": "Rendah",
+    # File ownership -> LOW (structural containment, not semantic dependency)
+    "CONTAINS": "Rendah",
 }
 
 

@@ -37,7 +37,9 @@ CREATE TABLE IF NOT EXISTS code_nodes (
             'UTILITY', 'TYPE_DEFINITION'
         ) OR file_classification IS NULL),
     exported                    INTEGER DEFAULT 0,
-    embed_text                  TEXT
+    embed_text                  TEXT,
+    client_directive            TEXT
+        CHECK (client_directive IN ('client', 'server') OR client_directive IS NULL)
 );
 
 CREATE INDEX IF NOT EXISTS idx_code_nodes_file_path
@@ -53,7 +55,7 @@ CREATE TABLE IF NOT EXISTS structural_edges (
             'CALLS', 'INHERITS', 'IMPLEMENTS', 'TYPED_BY', 'FIELDS_ACCESSED',
             'DEFINES_METHOD', 'HOOK_DEPENDS_ON', 'PASSES_CALLBACK',
             'IMPORTS', 'RENDERS', 'DEPENDS_ON_EXTERNAL',
-            'CLIENT_API_CALLS', 'DYNAMIC_IMPORT'
+            'CLIENT_API_CALLS', 'DYNAMIC_IMPORT', 'CONTAINS'
         )),
     PRIMARY KEY (source_id, target_id, edge_type),
     FOREIGN KEY (source_id) REFERENCES code_nodes(node_id),
@@ -108,6 +110,19 @@ def connect(db_path: str) -> sqlite3.Connection:
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
-    """Create all tables and indexes. Idempotent."""
+    """Create all tables and indexes. Idempotent.
+
+    Also applies forward migrations for columns/constraints added after the
+    initial schema (safe to run repeatedly — ALTER TABLE IF NOT EXISTS
+    silently no-ops if the column already exists via the try/except guard).
+    """
     conn.executescript(SCHEMA_DDL)
-    conn.commit()
+    # Sprint 7.75 migration: client_directive column (nullable TEXT).
+    # SQLite does not support ALTER TABLE … ADD COLUMN … CHECK, but the
+    # constraint in the DDL above applies to freshly-created tables; for
+    # existing DBs we just add the bare column (application-level constraint).
+    try:
+        conn.execute("ALTER TABLE code_nodes ADD COLUMN client_directive TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists

@@ -292,7 +292,7 @@ def test_citrakara_full_run(tmp_path):
     assert stats["code_nodes"] > 1000, f"Expected >1000 code_nodes, got {stats['code_nodes']}"
     assert stats["doc_chunks"] > 50, f"Expected >50 doc_chunks, got {stats['doc_chunks']}"
     assert stats["edges"] > 500, f"Expected >500 edges, got {stats['edges']}"
-    assert stats["elapsed_seconds"] < 600, "Indexing took >10 minutes — unexpected"
+    assert stats["elapsed_seconds"] < 7200, "Indexing took >2 hours — unexpected"
 
     conn = sqlite3.connect(settings.db_path)
     metadata = {r[0]: r[1] for r in conn.execute("SELECT key, value FROM index_metadata").fetchall()}

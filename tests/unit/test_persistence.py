@@ -26,7 +26,7 @@ _ALL_NODE_TYPES = (
     "ExternalPackage", "InterfaceField",
 )
 
-_ALL_EDGE_TYPES = tuple(EDGE_CONFIG.keys())  # 13 canonical values
+_ALL_EDGE_TYPES = tuple(EDGE_CONFIG.keys())  # 14 canonical values (Sprint 7.75: +CONTAINS)
 
 
 def _fresh_conn() -> sqlite3.Connection:
@@ -123,7 +123,7 @@ def test_edge_type_check_rejects_invalid() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_all_13_edge_types_accepted() -> None:
+def test_all_14_edge_types_accepted() -> None:
     """Every value in EDGE_CONFIG inserts into structural_edges without error."""
     conn = _fresh_conn()
     src_id = "src/lib/a.ts::source"
@@ -144,9 +144,9 @@ def test_all_13_edge_types_accepted() -> None:
     assert inserted_types == set(_ALL_EDGE_TYPES)
 
 
-def test_edge_config_has_exactly_13_entries() -> None:
-    """EDGE_CONFIG must define exactly 13 edge types (blueprint §2 invariant 6)."""
-    assert len(EDGE_CONFIG) == 13
+def test_edge_config_has_exactly_14_entries() -> None:
+    """EDGE_CONFIG must define exactly 14 edge types (Sprint 7.75: +CONTAINS)."""
+    assert len(EDGE_CONFIG) == 14
 
 
 # ---------------------------------------------------------------------------
