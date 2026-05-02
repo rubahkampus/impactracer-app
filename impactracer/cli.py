@@ -80,6 +80,49 @@ def index(
 
 
 @app.command()
+def report(
+    output: Path = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Write Markdown report to this file (optional, default: stdout).",
+    ),
+) -> None:
+    """Generate a comprehensive indexing quality report.
+
+    Queries SQLite + ChromaDB to report:
+      - Global node / edge counts and type breakdown
+      - Graph topology health (density, orphans, top-degree nodes)
+      - Traceability score distribution and stranded doc chunks
+      - Semantic benchmark top-1 resolution (Sprint 6.5 calibration)
+      - FK integrity checks
+      - ChromaDB ↔ SQLite alignment
+
+    Implementation entry point:
+        impactracer.indexer.auditor.generate_report(settings)
+    """
+    import sys
+    import io
+
+    from impactracer.indexer.auditor import generate_report
+    from impactracer.shared.config import get_settings
+
+    settings = get_settings()
+    md = generate_report(settings)
+
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(md, encoding="utf-8")
+        typer.echo(f"Report written to {output}")
+    else:
+        # Use UTF-8 wrapper so Unicode glyphs don't crash on Windows cp1252
+        out = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        out.write(md)
+        out.write("\n")
+        out.flush()
+
+
+@app.command()
 def analyze(
     cr_text: str = typer.Argument(..., help="Change Request text (Indonesian or English)."),
     output: Path = typer.Option(Path("./impact_report.json"), "--output", "-o"),
