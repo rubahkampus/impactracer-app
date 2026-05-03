@@ -94,7 +94,7 @@ def report(
       - Global node / edge counts and type breakdown
       - Graph topology health (density, orphans, top-degree nodes)
       - Traceability score distribution and stranded doc chunks
-      - Semantic benchmark top-1 resolution (Sprint 6.5 calibration)
+      - Semantic benchmark top-1 resolution
       - FK integrity checks
       - ChromaDB ↔ SQLite alignment
 

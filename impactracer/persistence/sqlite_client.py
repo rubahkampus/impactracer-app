@@ -117,10 +117,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
     silently no-ops if the column already exists via the try/except guard).
     """
     conn.executescript(SCHEMA_DDL)
-    # Sprint 7.75 migration: client_directive column (nullable TEXT).
-    # SQLite does not support ALTER TABLE … ADD COLUMN … CHECK, but the
-    # constraint in the DDL above applies to freshly-created tables; for
-    # existing DBs we just add the bare column (application-level constraint).
+    # Forward migration for the client_directive column. SQLite does not support
+    # ALTER TABLE … ADD COLUMN … CHECK; the constraint in DDL applies only to new
+    # tables. Existing DBs get the bare column (application-level constraint).
     try:
         conn.execute("ALTER TABLE code_nodes ADD COLUMN client_directive TEXT")
         conn.commit()

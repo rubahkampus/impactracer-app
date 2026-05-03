@@ -66,14 +66,10 @@ def compute_and_store(
     # Step 3: weighted scores
     weighted = cos_matrix * compat_matrix
 
-    # Step 4 + 5: collect pairs, delete stale rows, insert
-    #
-    # Dual-direction top-K pass (V1 fix):
-    #   Forward pass  — for each CODE node, retain its top-K doc chunks.
-    #   Reverse pass  — for each DOC chunk, retain its top-K code nodes.
-    # Union of both passes ensures that low-LAYER_COMPAT chunk types
-    # (NFR, General) are never silently squeeze-out when they have a
-    # genuinely high cosine similarity to some code node.
+    # Step 4 + 5: dual-direction top-K pass, then delete + insert.
+    # Forward: per-code-node top-K. Reverse: per-doc-chunk top-K.
+    # Union ensures low-LAYER_COMPAT types (NFR, General) are not
+    # squeeze-out by high-compat competitors despite genuine cosine signal.
     seen: set[tuple[str, str]] = set()
     rows: list[tuple[str, str, float]] = []
 

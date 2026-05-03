@@ -376,8 +376,6 @@ def run_indexing(
         logger.debug("Chunked {} → {} chunks", md_path.name, len(chunks))
 
     # ── Step 5: AST Pass 1 ───────────────────────────────────────────────────
-    # CRITICAL FIX: query file_dependencies using src/... relative paths,
-    # NOT absolute paths. work_ts_rel is already relative.
     if work_ts_rel:
         ph = ",".join("?" * len(work_ts_rel))
         reverse_dep_rows = conn.execute(

@@ -7,25 +7,28 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from impactracer.evaluation.schemas import GTEntry
 from impactracer.shared.config import Settings
 
 
 def run_single_cr_all_variants(
     cr_id: str,
     cr_text: str,
-    gt_node_ids: set[str],
+    gt_entry: GTEntry,
     settings: Settings,
     output_dir: Path,
 ) -> dict[str, dict]:
     """Execute all 8 variants on one CR.
 
     Returns a dict mapping variant_id to per-variant metrics and output paths.
+    Metrics are computed at both file-level (gt_entry.file_paths()) and
+    entity-level (gt_entry.entity_node_ids()) separately.
     """
     raise NotImplementedError("Sprint 11")
 
 
 def run_full_evaluation(
-    cr_dataset: list[dict],
+    cr_dataset: list[GTEntry],
     settings: Settings,
     output_dir: Path,
 ) -> Path:

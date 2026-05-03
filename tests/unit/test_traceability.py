@@ -162,7 +162,10 @@ def test_min_similarity_filter(simple_db):
 
 
 def test_top_k_limit_per_code_node():
-    """top_k=1 means at most 1 doc per code node."""
+    """top_k=1 per direction. With 1 code node and 6 doc nodes:
+    forward pass gives 1 pair (code→top doc); reverse pass gives 6 pairs
+    (each doc→its top code = c0). Union = 6 unique pairs.
+    """
     conn = _make_db()
     code_vecs = {"c0": _unit(0)}
     doc_vecs = {f"d{i}": _unit(i * 5) for i in range(6)}
@@ -173,7 +176,9 @@ def test_top_k_limit_per_code_node():
     compute_and_store(code_vecs, doc_vecs, code_meta, doc_meta,
                       top_k=1, min_similarity=0.0, conn=conn)
     rows = _rows(conn)
-    assert len(rows) == 1
+    # 6 unique (code, doc) pairs — forward contributes 1, reverse contributes 6,
+    # union deduplicates to 6.
+    assert len(rows) == 6
 
 
 def test_idempotent(simple_db):

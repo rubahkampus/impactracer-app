@@ -1,4 +1,4 @@
-"""Offline index quality auditor (Sprint 7.5).
+"""Offline index quality auditor.
 
 Queries SQLite + ChromaDB to generate a comprehensive Markdown report covering:
 - Global node / edge counts
@@ -24,7 +24,6 @@ from typing import Any
 from impactracer.shared.config import Settings
 
 
-# ── Benchmark chunks (established in Sprint 6.5) ────────────────────────────
 _BENCHMARKS: list[tuple[str, str, str]] = [
     (
         "Auth",
@@ -338,7 +337,7 @@ def generate_report(settings: Settings) -> str:
     blank()
 
     # ── Section 4: Semantic Benchmarks ──────────────────────────────────────
-    h2("4. Semantic Benchmarks (Sprint 6.5 Calibration)")
+    h2("4. Semantic Benchmarks")
 
     row("label", "chunk_id", "top-1 code node", "score", "pass?")
     sep(25, 55, 55, 7, 6)

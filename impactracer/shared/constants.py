@@ -99,10 +99,8 @@ EDGE_CONFIG: dict[str, dict] = {
     "DEPENDS_ON_EXTERNAL": {"direction": "reverse", "max_depth": 1},
     "CLIENT_API_CALLS":    {"direction": "reverse", "max_depth": 1},
     "DYNAMIC_IMPORT":      {"direction": "reverse", "max_depth": 1},
-    # File ownership (Sprint 7.75 — 14th edge type)
-    # Bridges the File ↔ Function membrane: File→{Function, Method, Interface,
-    # TypeAlias, Class, Enum}.  direction="both" means BFS traverses it in both
-    # directions (forward: File→children; reverse: children→File).
+    # CONTAINS bridges the File↔symbol membrane. direction="both" so BFS
+    # traverses it forward (File→children) and reverse (children→File).
     "CONTAINS":            {"direction": "both", "max_depth": 1},
 }
 

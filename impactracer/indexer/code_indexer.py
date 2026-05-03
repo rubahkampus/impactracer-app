@@ -64,23 +64,13 @@ def _make_classifier():
         if p.startswith("src/components/"):
             return "UI_COMPONENT"
 
-        # ── Client-side React hooks ─────────────────────────────────────
-        # Hooks are front-end only; they belong closer to UI than to server
-        # utility logic — classify alongside UI for traceability routing.
         if p.startswith("src/hooks/"):
             return "UI_COMPONENT"
 
-        # ── Client-side state stores (Zustand) ──────────────────────────
-        # Zustand stores manage UI/session state on the client; they are
-        # not backend business logic.  Map to UI_COMPONENT so FR/Design
-        # chunks describing client behaviour can resolve them.
         if p.startswith("src/lib/stores/"):
             return "UI_COMPONENT"
 
-        # ── Test helpers and mocks ──────────────────────────────────────
-        # Must come BEFORE the models/ and UTILITY rules below, because
-        # __mocks__/ and __tests__/ subdirectories are nested inside those
-        # paths and would otherwise be misclassified.
+        # Test/mock exclusions must precede the models/ rule.
         if (p.startswith("src/lib/test/")
                 or p.startswith("src/lib/db/models/__mocks__/")
                 or p.startswith("src/lib/db/repositories/__tests__/")
@@ -88,15 +78,9 @@ def _make_classifier():
                 or p.startswith("src/lib/utils/__mocks__/")):
             return None
 
-        # ── Mongoose schemas / data models ──────────────────────────────
-        # These files define MongoDB document interfaces and Schema objects.
-        # They are the direct subject of SDD "Perancangan Basis Data" sections.
-        # Checked AFTER the __mocks__ exclusion, BEFORE the broad UTILITY rule.
         if p.startswith("src/lib/db/models/"):
             return "TYPE_DEFINITION"
 
-        # ── Backend business logic (services + repositories + api helpers
-        #    + utils + db connection) ────────────────────────────────────
         if p.startswith("src/lib/"):
             return "UTILITY"
 
@@ -1200,19 +1184,13 @@ def resolve_api_route(
 ) -> list[str]:
     """Resolve a /api/... string to API_ROUTE node_id(s).
 
-    Returns a list: prefers the specific HTTP-method Function nodes
-    (e.g. route.ts::GET, route.ts::POST) when they exist, otherwise
-    falls back to the File node itself.  Returns [] when unresolvable.
+    Prefers HTTP-method Function nodes (route.ts::GET, route.ts::POST) when
+    they exist; falls back to the File node.  Returns [] when unresolvable.
 
-    Algorithm (V3 fix — positional wildcard matching):
-      1. Strip ${...} template expressions from the URL (they become wildcards).
-      2. Split the url into segments.
-      3. For each known route file (src/app/…/route.ts and src/pages/…),
-         split its path into segments and call _route_segments_match().
-         A disk ``[paramName]`` segment matches any single url segment.
-      4. Among all matches prefer the most-specific one (fewest wildcards).
+    Uses positional wildcard matching: a disk segment ``[paramName]`` matches
+    any single URL segment; selects the most-specific match (fewest wildcards).
 
-    Blueprint §3.4 CLIENT_API_CALLS rule.  Sprint 7.9 V3 fix.
+    Blueprint §3.4 CLIENT_API_CALLS.
     """
     # Strip query string / fragment
     path = raw_path.split("?")[0].split("#")[0]
@@ -2023,20 +2001,12 @@ def _emit_passes_callback(
 ) -> None:
     """Emit PASSES_CALLBACK / transitive CALLS for JSX attribute `onX={...}`.
 
-    Three handler forms handled (V4 fix):
-      1. ``onX={importedFn}``   → PASSES_CALLBACK edge to the imported node.
-      2. ``onX={localHandler}`` → localHandler is a const-defined arrow function
-                                   in the same component body; not a known node.
-                                   Walk its body for CALLS to imported fns.
-      3. ``onX={() => doFn()}`` → inline arrow function; walk body for CALLS.
+    Three handler forms:
+      1. ``onX={importedFn}``   → PASSES_CALLBACK to the imported node.
+      2. ``onX={localHandler}`` → local arrow, not a known node; walk body for CALLS.
+      3. ``onX={() => doFn()}`` → inline arrow; walk body for CALLS.
 
-    For cases 2 & 3 we cannot emit PASSES_CALLBACK (there is no target node),
-    but we CAN emit CALLS from source_id to any imported functions called
-    inside the handler body.  This preserves the reachability path
-    source_id → service/utility function even when the handler is not a
-    top-level node.
-
-    Blueprint §3.4.  Sprint 7.9 V4 fix.
+    Blueprint §3.4.
     """
     from impactracer.shared.constants import BUILTIN_PATTERNS, PRIMITIVE_TYPES, HOOK_NAMES
 
@@ -2173,7 +2143,7 @@ def _collect_nested_fn_bodies(
 
 
 # ---------------------------------------------------------------------------
-# CONTAINS edge emitter  (Sprint 7.75 — Intervention 1)
+# CONTAINS edge emitter
 # ---------------------------------------------------------------------------
 
 def _emit_contains_edges(
@@ -2182,17 +2152,13 @@ def _emit_contains_edges(
     conn: sqlite3.Connection,
     counter: list[int],
 ) -> None:
-    """Emit CONTAINS edges for every non-degenerate node owned by this file.
+    """Emit CONTAINS edges for every node owned by this file.
 
-    Two kinds of CONTAINS edges are emitted (V2 fix):
+    Two passes:
       1. File → {Function, Method, Interface, TypeAlias, Class, Enum, InterfaceField}
-         — bridges the File↔symbol membrane for BFS.
-      2. Interface → InterfaceField
-         — bridges the Interface↔field membrane.  InterfaceField node_ids follow
-           the convention ``file::InterfaceName.fieldName``; the parent Interface
-           node_id is ``file::InterfaceName``.  We derive the parent from the prefix
-           before the last dot.
-    Blueprint §3.4 Sprint 7.75 + Sprint 7.9 V2 fix.
+      2. Interface → InterfaceField  (derived from ``file::Interface.field`` id convention)
+
+    Blueprint §3.4.
     """
     # --- Pass 1: File → direct children (including InterfaceField) ---
     cur = conn.execute(
@@ -2275,8 +2241,7 @@ def extract_edges(
             dep_pairs,
         )
 
-    # Step 2b: CONTAINS edges — File → every co-located Function/Method/Interface/TypeAlias/Class/Enum
-    # Bridges the File ↔ Function membrane so BFS can propagate across the boundary.
+    # Step 2b: CONTAINS edges — bridges the File ↔ symbol membrane for BFS
     _emit_contains_edges(file_posix, known_node_ids, conn, counter)
 
     # Step 3: class edges — INHERITS, IMPLEMENTS, DEFINES_METHOD
@@ -2303,9 +2268,7 @@ def extract_edges(
         root, source_bytes, file_posix, import_map, known_node_ids, conn, counter,
     )
 
-    # Step 4d: Middleware synthetic edges (V5 fix)
-    # For Next.js middleware.ts, parse config.matcher patterns and emit
-    # CALLS edges from the middleware Function to every API_ROUTE it guards.
+    # Step 4d: Middleware edges — parse config.matcher and emit CALLS to guarded routes
     if file_path.name in ("middleware.ts", "middleware.tsx"):
         _emit_middleware_edges(
             root, source_bytes, file_posix, known_node_ids, conn, counter,
@@ -2339,7 +2302,7 @@ def _emit_middleware_edges(
     The source node is ``file_posix::middleware`` when present in known_node_ids,
     otherwise the file node itself (file_posix).
 
-    Blueprint §3.4.  Sprint 7.9 V5 fix.
+    Blueprint §3.4.
     """
     # Identify the source node: prefer the exported "middleware" Function
     middleware_fn_id = f"{file_posix}::middleware"
@@ -2540,7 +2503,7 @@ def _scan_module_dynamic_imports(
 
 
 # ---------------------------------------------------------------------------
-# Mongoose entity edge emitter  (Sprint 7.75 — Intervention 4)
+# Mongoose entity edge emitter
 # ---------------------------------------------------------------------------
 
 # Regex to match `model('ModelName', ...)` or `model<IFoo>('ModelName', ...)`
@@ -2569,7 +2532,7 @@ def _emit_mongoose_edges(
 
     Both edges are attributed to the File node (file_posix) since the schema/model
     definition is a file-level construct, not inside any single function.
-    Sprint 7.75 §3.4 Mongoose extension.
+    Blueprint §3.4.
     """
     file_node_id = file_posix
     if file_node_id not in known_node_ids:
