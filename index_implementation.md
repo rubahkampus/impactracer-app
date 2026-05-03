@@ -225,3 +225,36 @@ Root-level TS files with no `src/` ancestor (e.g. `jest.config.ts`) fall back to
 | DB Design | `sdd__iv_2_…_entitas_wallet` | `wallet.repository.ts` | 0.6840 |
 
 **Full-stack BFS confirmed:** `wallet.model.ts` seed at depth=3 reaches 4 PAGE_COMPONENT nodes (`wallet/page.tsx`, `dashboard/page.tsx`, `contracts/tickets/page.tsx`, `wallet/transactions/page.tsx`). Pre-alias-fix: 0 UI/PAGE nodes reachable.
+
+---
+
+## 10. Dual-Granularity Evaluation Strategy
+
+**Schema:** `evaluation/schemas.py` — `GTEntry`, `ImpactedFile`, `ImpactedEntity`.
+
+Each annotated Change Request carries two independent GT sets:
+
+| Level | Field | Unit of measurement | Purpose |
+|---|---|---|---|
+| **File-level** | `impacted_files` | File path (`src/lib/services/auth.service.ts`) | Baseline routing accuracy — does the system surface the right files? Tolerant of entity-level noise. |
+| **Entity-level** | `impacted_entities` | Node ID (`src/lib/services/auth.service.ts::loginUser`) | AST precision — does the system pinpoint the exact function, interface, or method? |
+
+**Superset rule:** every file path referenced in `impacted_entities` must also appear in `impacted_files`. `impacted_files` may additionally contain file-only impacts (configuration files, barrel exports, etc.).
+
+**Rationale for the split:** a system that retrieves the correct file but misses the specific function still provides useful routing information. Conflating both levels into a single GT set creates metric distortion: entity-level false positives (extra functions in the right file) inflate the denominator and deflate Recall unfairly. Separate evaluation surfaces this distinction cleanly.
+
+**GT JSON format (locked):**
+```json
+{
+  "cr_id": "CR-01",
+  "cr_description": "...",
+  "impacted_files": [
+    { "file_path": "src/components/auth/LoginForm.tsx", "justification": "..." }
+  ],
+  "impacted_entities": [
+    { "node": "src/components/auth/LoginForm.tsx::LoginForm", "justification": "..." }
+  ]
+}
+```
+
+**Metrics (Sprint 11 implementation):** P@K, R@K, F1@K computed **twice per CR per variant** — once against `GTEntry.file_paths()`, once against `GTEntry.entity_node_ids()`. The ranked CIS list is projected to the appropriate granularity before metric computation (file paths extracted from node IDs for the file-level pass). The primary statistical test (V7 vs V5, Wilcoxon on F1@10) runs at **entity-level** — this is the granularity with the most discriminative signal.
