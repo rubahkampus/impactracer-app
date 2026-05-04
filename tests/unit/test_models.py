@@ -310,6 +310,6 @@ def test_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.min_traceability_similarity == 0.40
     assert s.degenerate_embed_min_length == 50
     assert s.bfs_high_conf_top_n == 5
-    assert s.min_reranker_score_for_validation == 0.01
+    assert s.min_reranker_score_for_validation == 0.0
     assert s.plausibility_gate_density_threshold == 0.35
     assert s.plausibility_gate_max_per_file == 2

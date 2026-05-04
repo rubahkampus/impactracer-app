@@ -22,10 +22,31 @@ def get_client(chroma_path: str) -> chromadb.PersistentClient:
     return chromadb.PersistentClient(path=chroma_path)
 
 
+def _assert_cosine_space(col: chromadb.Collection) -> None:
+    """Fail fast if a collection was not created with hnsw:space=cosine.
+
+    Silent score corruption occurs when 1.0-dist is applied to L2 distances;
+    an assertion here surfaces the root cause immediately instead of
+    producing numerically wrong RRF scores for an entire evaluation run.
+    """
+    space = (col.metadata or {}).get("hnsw:space", "l2")
+    if space != "cosine":
+        raise RuntimeError(
+            f"ChromaDB collection '{col.name}' uses hnsw:space='{space}', "
+            f"expected 'cosine'. Re-index with `impactracer index --force` to rebuild."
+        )
+
+
 def init_collections(
     client: chromadb.PersistentClient,
 ) -> tuple[chromadb.Collection, chromadb.Collection]:
-    """Return ``(doc_chunks, code_units)``, creating if absent."""
+    """Return ``(doc_chunks, code_units)``, creating if absent.
+
+    Asserts both collections use cosine distance (ED-2 / reproducibility
+    requirement: thesis methodology section cites cosine similarity).
+    """
     doc = client.get_or_create_collection(name="doc_chunks", metadata=COLLECTION_CONFIG)
     code = client.get_or_create_collection(name="code_units", metadata=COLLECTION_CONFIG)
+    _assert_cosine_space(doc)
+    _assert_cosine_space(code)
     return doc, code

@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_validator, field_validator
 
 
 # =========================================================================
@@ -162,6 +162,21 @@ class CRInterpretation(BaseModel):
         max_length=4,
     )
 
+    @model_validator(mode="after")
+    def _check_actionable_fields(self) -> "CRInterpretation":
+        """Enforce that actionable CRs have at least one affected layer.
+
+        A zero-length affected_layers on an actionable CR causes all four
+        retrieval paths to be skipped, producing zero candidates and a
+        hallucinated synthesis result (FF-5).
+        """
+        if self.is_actionable and len(self.affected_layers) == 0:
+            # Coerce to a safe default rather than crashing — the LLM may
+            # legitimately omit layers for ambiguous CRs. Default to all layers
+            # so retrieval casts the widest net (maximum inclusivity mandate).
+            self.affected_layers = ["requirement", "design", "code"]  # type: ignore[assignment]
+        return self
+
 
 # =========================================================================
 # LLM #2: SIS Validation
@@ -195,7 +210,7 @@ class CandidateVerdict(TruncatingModel):
     )
 
 
-class SISValidationResult(BaseModel):
+class SISValidationResult(TruncatingModel):
     """Envelope for LLM Call #2 response."""
 
     verdicts: list[CandidateVerdict]
@@ -224,7 +239,7 @@ class TraceVerdict(TruncatingModel):
     )
 
 
-class TraceValidationResult(BaseModel):
+class TraceValidationResult(TruncatingModel):
     """Envelope for LLM Call #3 response."""
 
     verdicts: list[TraceVerdict]
@@ -251,7 +266,7 @@ class PropagationVerdict(TruncatingModel):
     )
 
 
-class PropagationValidationResult(BaseModel):
+class PropagationValidationResult(TruncatingModel):
     """Envelope for LLM Call #4 response."""
 
     verdicts: list[PropagationVerdict]
@@ -298,6 +313,14 @@ class ImpactReport(TruncatingModel):
         ),
     )
     estimated_scope: Scope
+    analysis_mode: Literal["retrieval_only", "retrieval_plus_propagation"] = Field(
+        default="retrieval_only",
+        description=(
+            "retrieval_only: SIS seeds only (BFS not applied). "
+            "retrieval_plus_propagation: BFS propagation was applied. "
+            "Set by the pipeline runner, not by the LLM."
+        ),
+    )
 
 
 # =========================================================================
@@ -346,12 +369,23 @@ class Candidate:
     collection: str                     # "doc_chunks" or "code_units"
     rrf_score: float
     reranker_score: float = 0.0
+    # raw_reranker_score: the cross-encoder score BEFORE min-max normalization.
+    # Preserved so the score floor gate operates on absolute quality, not rank
+    # position within the top-15 window (B4).
+    raw_reranker_score: float = 0.0
     file_path: str = ""
     file_classification: str | None = None
     chunk_type: str | None = None
     name: str = ""
     text_snippet: str = ""
     internal_logic_abstraction: str | None = None
+    # merged_doc_ids: node IDs of doc chunks deduplicated into this code node
+    # during Step 3.6 (semantic dedup).
     merged_doc_ids: list[str] = field(default_factory=list)
+    # merged_doc_contexts: parallel list of (section_title, text) tuples for
+    # each merged doc chunk.  Injected into the LLM #2 validator prompt as
+    # "Business Context" blocks so the LLM sees the requirement that makes
+    # this code node relevant (B1).
+    merged_doc_contexts: list[tuple[str, str]] = field(default_factory=list)
     bm25_score: float = 0.0
     cosine_score: float = 0.0

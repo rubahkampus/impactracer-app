@@ -11,7 +11,7 @@ from impactracer.indexer.embedder import Embedder, ensure_model_cached
 class _FakeBGEM3:
     """Fake BGEM3FlagModel: returns deterministic unit vectors."""
 
-    def __init__(self, model_name, use_fp16=True):
+    def __init__(self, model_name, use_fp16=True, devices=None, **kwargs):
         self._dim = 1024
 
     def encode(self, texts, batch_size, max_length, return_dense, return_sparse, return_colbert_vecs):

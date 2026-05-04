@@ -152,6 +152,15 @@ class LLMClient:
                 )
                 time.sleep(backoff)
 
+    def close(self) -> None:
+        """Release the underlying httpx connection pool.
+
+        Call this when the LLMClient will no longer be used (e.g. after each
+        run_analysis call in the evaluation harness) to avoid accumulating
+        open connection pools across 160 evaluation runs (ED-6).
+        """
+        self._http_client.close()
+
     def _append_audit_entry(self, call_name: str) -> None:
         """Append one JSONL line to the audit log (NFR-05)."""
         entry = json.dumps(

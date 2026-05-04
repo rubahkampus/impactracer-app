@@ -136,7 +136,39 @@ def analyze(
     Implementation entry point:
         impactracer.pipeline.runner.run_analysis(cr_text, settings, flags)
     """
-    raise NotImplementedError("Sprint 8-10: online pipeline")
+    import json as _json
+    import sys
+
+    from impactracer.evaluation.variant_flags import VariantFlags
+    from impactracer.pipeline.runner import run_analysis
+    from impactracer.shared.config import get_settings
+
+    variant_upper = variant.upper()
+    if variant_upper not in VariantFlags.ALL_VARIANTS:
+        typer.echo(f"Unknown variant '{variant}'. Choose from {VariantFlags.ALL_VARIANTS}.", err=True)
+        raise typer.Exit(1)
+
+    settings = get_settings()
+    flags = VariantFlags.for_id(variant_upper)
+
+    typer.echo(f"Analyzing CR with variant {variant_upper}...", err=True)
+
+    report = run_analysis(cr_text=cr_text, settings=settings, variant_flags=flags)
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        report.model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+
+    # Print interpreter output summary to stderr for inclusivity evaluation
+    typer.echo(f"\nReport written to {output}", err=True)
+    typer.echo(f"Impacted nodes : {len(report.impacted_nodes)}", err=True)
+    typer.echo(f"Estimated scope: {report.estimated_scope}", err=True)
+
+    # Also print the JSON to stdout so it can be piped
+    out = _json.loads(output.read_text(encoding="utf-8"))
+    print(_json.dumps({"impacted": len(out["impacted_nodes"]), "scope": out["estimated_scope"]}))
 
 
 @app.command()

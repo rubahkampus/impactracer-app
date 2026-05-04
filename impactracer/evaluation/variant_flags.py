@@ -2,14 +2,20 @@
 
 Each variant is a prefix of an additive chain:
 
-    V0 BM25 only                         + blind resolution
-    V1 Dense only                        + blind resolution
-    V2 V1 + RRF fusion                   + blind resolution
-    V3 V2 + cross-encoder rerank         + blind resolution
-    V4 V3 + LLM #2 SIS validation        + blind resolution
-    V5 V4 + LLM #3 trace validation      + validated SIS
-    V6 V5 + BFS propagation              + blind propagation
-    V7 V6 + LLM #4 propagation validation + full system
+    V0   BM25 only                         + blind resolution
+    V1   Dense only                        + blind resolution
+    V2   V1 + RRF fusion                   + blind resolution
+    V3   V2 + cross-encoder rerank         + blind resolution
+    V3.5 V3 + pre-validation gates only    + blind resolution (no LLM #2)
+    V4   V3 + gates + LLM #2 SIS validation + blind resolution
+    V5   V4 + LLM #3 trace validation      + validated SIS
+    V6   V5 + BFS propagation              + blind propagation
+    V7   V6 + LLM #4 propagation validation + full system
+
+V3.5 is an isolation variant that enables all three deterministic gates
+(score floor, semantic dedup, plausibility+affinity) WITHOUT LLM #2
+validation.  This isolates the gates' independent contribution to
+precision/recall from the LLM #2 contribution in V4 (N7/AV-7).
 
 Reference: 09_ablation_harness.md.
 """
@@ -33,6 +39,7 @@ class VariantFlags:
     enable_cross_encoder: bool
 
     # Gates (FR-C4)
+    enable_score_floor: bool           # calibrated min reranker score (AV-2)
     enable_dedup_gate: bool
     enable_plausibility_gate: bool
 
@@ -46,7 +53,9 @@ class VariantFlags:
     run_llm_1: bool = True                # Interpret
     run_llm_5: bool = True                # Synthesize
 
-    ALL_VARIANTS: ClassVar[list[str]] = ["V0", "V1", "V2", "V3", "V4", "V5", "V6", "V7"]
+    ALL_VARIANTS: ClassVar[list[str]] = [
+        "V0", "V1", "V2", "V3", "V3.5", "V4", "V5", "V6", "V7"
+    ]
 
     @classmethod
     def v0(cls) -> "VariantFlags":
@@ -54,6 +63,7 @@ class VariantFlags:
             variant_id="V0",
             enable_bm25=True, enable_dense=False, enable_rrf=False,
             enable_cross_encoder=False,
+            enable_score_floor=False,
             enable_dedup_gate=False, enable_plausibility_gate=False,
             enable_sis_validation=False, enable_trace_validation=False,
             enable_bfs=False, enable_propagation_validation=False,
@@ -65,6 +75,7 @@ class VariantFlags:
             variant_id="V1",
             enable_bm25=False, enable_dense=True, enable_rrf=False,
             enable_cross_encoder=False,
+            enable_score_floor=False,
             enable_dedup_gate=False, enable_plausibility_gate=False,
             enable_sis_validation=False, enable_trace_validation=False,
             enable_bfs=False, enable_propagation_validation=False,
@@ -76,6 +87,7 @@ class VariantFlags:
             variant_id="V2",
             enable_bm25=True, enable_dense=True, enable_rrf=True,
             enable_cross_encoder=False,
+            enable_score_floor=False,
             enable_dedup_gate=False, enable_plausibility_gate=False,
             enable_sis_validation=False, enable_trace_validation=False,
             enable_bfs=False, enable_propagation_validation=False,
@@ -87,7 +99,28 @@ class VariantFlags:
             variant_id="V3",
             enable_bm25=True, enable_dense=True, enable_rrf=True,
             enable_cross_encoder=True,
+            enable_score_floor=False,
             enable_dedup_gate=False, enable_plausibility_gate=False,
+            enable_sis_validation=False, enable_trace_validation=False,
+            enable_bfs=False, enable_propagation_validation=False,
+        )
+
+    @classmethod
+    def v3_5(cls) -> "VariantFlags":
+        """V3.5: gates only (no LLM #2).
+
+        N7/AV-7: isolation variant to measure the independent contribution
+        of the three deterministic gates (score floor, semantic dedup,
+        plausibility+affinity) to precision/recall WITHOUT LLM #2.
+        Comparing V3.5 vs V3 isolates gate contribution; V4 vs V3.5 isolates
+        LLM #2 contribution — separating concerns for the thesis ablation table.
+        """
+        return cls(
+            variant_id="V3.5",
+            enable_bm25=True, enable_dense=True, enable_rrf=True,
+            enable_cross_encoder=True,
+            enable_score_floor=True,
+            enable_dedup_gate=True, enable_plausibility_gate=True,
             enable_sis_validation=False, enable_trace_validation=False,
             enable_bfs=False, enable_propagation_validation=False,
         )
@@ -98,6 +131,7 @@ class VariantFlags:
             variant_id="V4",
             enable_bm25=True, enable_dense=True, enable_rrf=True,
             enable_cross_encoder=True,
+            enable_score_floor=True,   # Sprint 9: calibrated floor applied
             enable_dedup_gate=True, enable_plausibility_gate=True,
             enable_sis_validation=True, enable_trace_validation=False,
             enable_bfs=False, enable_propagation_validation=False,
@@ -109,6 +143,7 @@ class VariantFlags:
             variant_id="V5",
             enable_bm25=True, enable_dense=True, enable_rrf=True,
             enable_cross_encoder=True,
+            enable_score_floor=True,
             enable_dedup_gate=True, enable_plausibility_gate=True,
             enable_sis_validation=True, enable_trace_validation=True,
             enable_bfs=False, enable_propagation_validation=False,
@@ -120,6 +155,7 @@ class VariantFlags:
             variant_id="V6",
             enable_bm25=True, enable_dense=True, enable_rrf=True,
             enable_cross_encoder=True,
+            enable_score_floor=True,
             enable_dedup_gate=True, enable_plausibility_gate=True,
             enable_sis_validation=True, enable_trace_validation=True,
             enable_bfs=True, enable_propagation_validation=False,
@@ -131,6 +167,7 @@ class VariantFlags:
             variant_id="V7",
             enable_bm25=True, enable_dense=True, enable_rrf=True,
             enable_cross_encoder=True,
+            enable_score_floor=True,
             enable_dedup_gate=True, enable_plausibility_gate=True,
             enable_sis_validation=True, enable_trace_validation=True,
             enable_bfs=True, enable_propagation_validation=True,
@@ -138,12 +175,13 @@ class VariantFlags:
 
     @classmethod
     def for_id(cls, variant_id: str) -> "VariantFlags":
-        """Return the VariantFlags instance for a given V0..V7 id."""
+        """Return the VariantFlags instance for a given V0..V7 (or V3.5) id."""
         return {
             "V0": cls.v0(),
             "V1": cls.v1(),
             "V2": cls.v2(),
             "V3": cls.v3(),
+            "V3.5": cls.v3_5(),
             "V4": cls.v4(),
             "V5": cls.v5(),
             "V6": cls.v6(),

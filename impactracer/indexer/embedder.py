@@ -21,8 +21,16 @@ class Embedder:
         batch_size: int = 32,
         max_length: int = 512,
     ) -> None:
+        import torch
         from FlagEmbedding import BGEM3FlagModel
-        self.model = BGEM3FlagModel(model_name, use_fp16=True)
+        # Use CUDA if available; fp16 is only beneficial on GPU.
+        # BGEM3FlagModel uses ``devices`` (plural) not ``device``.
+        use_cuda = torch.cuda.is_available()
+        self.model = BGEM3FlagModel(
+            model_name,
+            use_fp16=use_cuda,
+            devices=["cuda:0"] if use_cuda else ["cpu"],
+        )
         self.batch_size = batch_size
         self.max_length = max_length
 

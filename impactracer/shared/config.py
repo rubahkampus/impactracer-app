@@ -45,13 +45,16 @@ class Settings(BaseSettings):
     degenerate_embed_min_length: int = 50
 
     # ---- Retrieval --------------------------------------------------
-    max_candidates_per_query: int = 15
-    max_candidates_post_rrf: int = 15
-    max_candidates_post_rerank: int = 15
+    # top_k_per_query: per individual dense/BM25 query call (4 paths × N queries)
+    top_k_per_query: int = 15
+    # top_k_rrf_pool: candidates entering cross-encoder after RRF fusion (FF-1)
+    top_k_rrf_pool: int = 50
+    # max_admitted_seeds: hard cap on seeds admitted to CIS after reranking
+    max_admitted_seeds: int = 15
     rrf_k: int = 60
 
     # ---- Pre-Validation Gates (FR-C4) ------------------------------
-    min_reranker_score_for_validation: float = 0.01
+    min_reranker_score_for_validation: float = 0.0
     plausibility_gate_density_threshold: float = 0.35
     plausibility_gate_max_per_file: int = 2
 
