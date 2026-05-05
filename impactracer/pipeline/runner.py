@@ -173,7 +173,7 @@ def _minimal_rejection_report(reason: str) -> ImpactReport:
     )
 
 
-def _compute_scope(cis: CISResult) -> str:
+def _compute_scope(cis: CISResult, settings: "Settings | None" = None) -> str:
     """Deterministically compute estimated_scope from CIS node counts.
 
     N8 fix: estimated_scope must NOT be hallucinated by LLM #5 from a pruned
@@ -181,17 +181,22 @@ def _compute_scope(cis: CISResult) -> str:
     counting nodes from the full CIS gives a provably correct scope that is
     reproducible and thesis-defensible.
 
-    Thresholds (thesis-calibrated, matches Scope Literal values):
-        terlokalisasi  : ≤ 5 total CIS nodes
-        menengah       : 6–15 total CIS nodes
-        ekstensif      : > 15 total CIS nodes
+    Phase 2.9 (F-NEW-5): thresholds are now read from Settings so they can
+    be calibrated post-evaluation without changing source code.
+
+    Thresholds (default, from Settings.scope_local_max / scope_medium_max):
+        terlokalisasi  : ≤ scope_local_max total CIS nodes   (default 10)
+        menengah       : scope_local_max+1 – scope_medium_max (default 11-30)
+        ekstensif      : > scope_medium_max                   (default >30)
 
     Returns one of "terlokalisasi", "menengah", "ekstensif".
     """
+    local_max = getattr(settings, "scope_local_max", 10) if settings else 10
+    medium_max = getattr(settings, "scope_medium_max", 30) if settings else 30
     n_nodes = len(cis.combined())
-    if n_nodes <= 5:
+    if n_nodes <= local_max:
         return "terlokalisasi"
-    if n_nodes <= 15:
+    if n_nodes <= medium_max:
         return "menengah"
     return "ekstensif"
 
@@ -374,10 +379,25 @@ def run_analysis(
         logger.warning("[runner] Zero admitted candidates after gates — returning empty report")
         return _minimal_rejection_report("All candidates rejected by validation gates")
 
-    resolutions, doc_to_code_map, direct_code_seeds = resolve_doc_to_code(
+    # Phase 1 (E-6): Build code_node_ids set once and pass it to the resolver
+    # so resolve_doc_to_code can skip the full table scan on every call.
+    # During a 20-CR ablation run (8 variants × 20 CRs = 160 calls), this
+    # eliminates 160 full-table scans. We build it here in runner.py because
+    # the runner already has the SQLite connection and this set is stable for
+    # the lifetime of a single pipeline context.
+    _code_node_ids: set[str] = {
+        row[0]
+        for row in ctx.conn.execute("SELECT node_id FROM code_nodes").fetchall()
+    }
+
+    # Phase 1 (E-NEW-3): resolve_doc_to_code now returns (resolutions,
+    # direct_code_seeds) — the previously dead doc_to_code_map third return
+    # value has been removed from the function signature.
+    resolutions, direct_code_seeds = resolve_doc_to_code(
         sis_ids=sis_ids,
         conn=ctx.conn,
         top_k=settings.top_k_traceability,
+        code_node_ids=_code_node_ids,
     )
     logger.info(
         "[runner] Step 5: {} direct code seeds, {} doc-chunk resolutions",
@@ -466,6 +486,16 @@ def run_analysis(
     if variant_flags.enable_bfs and all_code_seeds:
         logger.info("[runner] Step 6: BFS propagation")
         from impactracer.pipeline.graph_bfs import bfs_propagate, compute_confidence_tiers
+
+        # Phase 1 fix (E-NEW-4 / E-7): BFS now receives a VIEW of the shared
+        # graph rather than the shared graph itself. bfs_propagate no longer
+        # calls graph.add_node(), so the shared ctx.graph is never mutated.
+        # We pass ctx.graph directly — the graph_bfs fix ensures no mutation
+        # occurs during BFS. For the ablation harness, load_pipeline_context
+        # constructs a fresh graph per context, so ctx.graph is already
+        # isolated across variant runs when shared_* objects are NOT reused.
+        # If shared_* ARE reused (the ablation fast-path), the graph loaded
+        # once at context-creation time is read-only during BFS — safe.
 
         # Build reranker score map for confidence tiering.
         # doc-chunk reranker scores propagate to resolved code seeds via setdefault.
@@ -644,11 +674,27 @@ def run_analysis(
     # set.  The synthesizer is instructed NOT to override it.
     # ------------------------------------------------------------------
     logger.info("[runner] Step 9: Synthesize report")
-    report = synthesize_report(context, ctx.llm_client)
+    # Phase 3.3 (A-4): forced-inclusion variant bypasses LLM #5.
+    if getattr(variant_flags, "force_include_all_cis_nodes", False):
+        from impactracer.pipeline.synthesizer import build_forced_inclusion_report
+        logger.info(
+            "[runner] Step 9: FORCED INCLUSION — skipping LLM #5, "
+            "building report from all {} CIS nodes", len(cis.combined()),
+        )
+        computed_scope = _compute_scope(cis, settings)
+        report = build_forced_inclusion_report(
+            cis=cis,
+            node_types=node_types,
+            node_file_paths=node_file_paths,
+            estimated_scope=computed_scope,
+        )
+    else:
+        report = synthesize_report(context, ctx.llm_client)
 
     # N8: override estimated_scope with deterministic computation
+    # Phase 2.9: pass settings so thresholds come from calibrated config.
     report = report.model_copy(update={
-        "estimated_scope": _compute_scope(cis),
+        "estimated_scope": _compute_scope(cis, settings),
     })
 
     # AV-5: set analysis_mode based on whether BFS actually ran

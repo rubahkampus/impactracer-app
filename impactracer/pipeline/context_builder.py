@@ -189,10 +189,14 @@ def _apply_hard_limit(
     3. Drop until the rough total is within char_limit.
     4. If the limit is already satisfied, return unchanged.
     """
-    # Quick check: build a rough total using a fixed per-node char estimate.
-    # We use 500 chars/node as a safe lower bound (real blocks are larger,
-    # so this won't over-drop).
-    if len(sorted_ids) * 500 <= char_limit:
+    # Phase 1 fix (F-2/E-3): raise proxy from 500→2000 chars/node.
+    # The previous 500-char early-exit underestimated real block size (which
+    # averages 2000-4000 chars including source snippet, backlinks, metadata).
+    # At 500 chars/node the guard almost never triggered before the LLM
+    # received an oversize context. Using 2000 chars/node is a conservative
+    # lower bound that fires well before the actual overflow point.
+    _PROXY_CHARS_PER_NODE = 2000
+    if len(sorted_ids) * _PROXY_CHARS_PER_NODE <= char_limit:
         return sorted_ids, ""
 
     # Separate immune nodes (depth=0 SIS seeds) from droppable (depth>0).
@@ -212,9 +216,10 @@ def _apply_hard_limit(
 
     # Allow up to char_limit chars; reserve space for immune nodes.
     # Each immune node gets a guaranteed budget slot.
-    immune_budget = len(immune) * 800  # generous per-seed estimate
+    # Per-node budget raised 800→2000 to match the corrected proxy above.
+    immune_budget = len(immune) * _PROXY_CHARS_PER_NODE
     available_for_droppable = max(char_limit - immune_budget, 0)
-    per_node_budget = 800  # chars per droppable node (conservative estimate)
+    per_node_budget = _PROXY_CHARS_PER_NODE  # chars per droppable node
 
     max_keep = available_for_droppable // per_node_budget
     kept_droppable = droppable[:max_keep]  # shallowest max_keep nodes
@@ -296,17 +301,32 @@ def build_context(
             "retrieval_score": _candidate_scores.get(nid, 0.0),
         }
 
-    # AV-4: sort for inclusion
-    # Group 1: BFS-propagated nodes (has_chain=True) — sort by severity, depth, id
-    # Group 2: SIS seeds (has_chain=False) — sort by retrieval score desc, depth, id
+    # AV-4 / Phase 1 (E-NEW-6): sort for inclusion — HIGHEST PRIORITY FIRST.
+    #
+    # CORRECTED GROUP ASSIGNMENT (previous code had groups inverted):
+    #   Group 0 (highest priority = included first, last to be truncated):
+    #     SIS seeds — direct retrieval hits; depth=0; empty causal_chain.
+    #     Sorted within group by retrieval score DESC (best match first).
+    #   Group 1 (lower priority = included after seeds, first to be truncated):
+    #     BFS-propagated nodes — structural inferences; has_chain=True.
+    #     Sorted within group by severity rank ASC, then depth ASC, then id.
+    #
+    # Rationale: SIS seeds have the highest semantic certainty (they matched
+    # the CR directly by dense + BM25 search and passed LLM #2). Propagated
+    # nodes are structural inferences whose relevance diminishes with depth.
+    # If the token budget forces truncation, we MUST preserve seeds over
+    # propagated nodes — the opposite of what the previous code did.
     def _sort_key(nid: str) -> tuple:
         m = node_meta[nid]
-        if m["has_chain"]:
-            # Group 1 first (0), then severity rank, then depth, then id
-            return (0, _SEVERITY_RANK[m["severity"]], m["depth"], nid)
+        if not m["has_chain"]:
+            # Group 0: SIS seeds — priority placement.
+            # Inverted retrieval score: higher score → smaller sort key → earlier.
+            return (0, -m["retrieval_score"], m["depth"], nid)
         else:
-            # Group 2 (1), then inverted retrieval score (higher score = lower sort key)
-            return (1, -m["retrieval_score"], m["depth"], nid)
+            # Group 1: BFS-propagated — after all seeds.
+            # Severity rank ASC (Tinggi=0 before Menengah=1 before Rendah=2),
+            # then depth ASC (shallower first), then id for determinism.
+            return (1, _SEVERITY_RANK[m["severity"]], m["depth"], nid)
 
     sorted_ids = sorted(combined.keys(), key=_sort_key)
 

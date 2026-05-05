@@ -126,44 +126,47 @@ def test_ila_node_types_are_function_and_method():
 # ---------------------------------------------------------------------------
 
 def test_compute_scope_terlokalisasi_small():
-    """≤5 nodes → terlokalisasi."""
+    """≤10 nodes → terlokalisasi (Phase 2.9: default scope_local_max=10)."""
     cis = _make_cis(["n1", "n2", "n3"])
     assert _compute_scope(cis) == "terlokalisasi"
 
 
 def test_compute_scope_terlokalisasi_boundary():
-    """Exactly 5 nodes → terlokalisasi."""
-    cis = _make_cis([f"n{i}" for i in range(5)])
+    """Exactly 10 nodes → terlokalisasi (at the local_max boundary)."""
+    cis = _make_cis([f"n{i}" for i in range(10)])
     assert _compute_scope(cis) == "terlokalisasi"
 
 
 def test_compute_scope_menengah_lower_bound():
-    """6 nodes → menengah."""
-    cis = _make_cis([f"n{i}" for i in range(6)])
+    """11 nodes → menengah (one above scope_local_max=10)."""
+    cis = _make_cis([f"n{i}" for i in range(11)])
     assert _compute_scope(cis) == "menengah"
 
 
 def test_compute_scope_menengah_upper_bound():
-    """Exactly 15 nodes → menengah."""
-    cis = _make_cis([f"n{i}" for i in range(15)])
+    """Exactly 30 nodes → menengah (at scope_medium_max=30)."""
+    cis = _make_cis([f"n{i}" for i in range(30)])
     assert _compute_scope(cis) == "menengah"
 
 
 def test_compute_scope_ekstensif():
-    """>15 nodes → ekstensif."""
-    cis = _make_cis([f"n{i}" for i in range(16)])
+    """>30 nodes → ekstensif."""
+    cis = _make_cis([f"n{i}" for i in range(31)])
     assert _compute_scope(cis) == "ekstensif"
 
 
 def test_compute_scope_includes_propagated_nodes():
-    """Propagated nodes also count toward scope."""
+    """Propagated nodes also count toward scope.
+
+    Phase 2.9: with default thresholds (10/30), 1+30=31 → ekstensif.
+    """
     sis = {"n1": NodeTrace(depth=0, causal_chain=[], path=["n1"], source_seed="n1")}
     propagated = {
         f"p{i}": NodeTrace(depth=1, causal_chain=["CALLS"], path=["n1", f"p{i}"], source_seed="n1")
-        for i in range(15)
+        for i in range(30)
     }
     cis = CISResult(sis_nodes=sis, propagated_nodes=propagated)
-    # 1 + 15 = 16 nodes → ekstensif
+    # 1 + 30 = 31 nodes → ekstensif
     assert _compute_scope(cis) == "ekstensif"
 
 
@@ -171,6 +174,20 @@ def test_compute_scope_empty_cis():
     """Empty CIS → terlokalisasi (no nodes = no scope)."""
     cis = CISResult(sis_nodes={}, propagated_nodes={})
     assert _compute_scope(cis) == "terlokalisasi"
+
+
+def test_compute_scope_custom_thresholds():
+    """Phase 2.9 (F-NEW-5): _compute_scope respects custom settings thresholds."""
+    class _FakeSettings2:
+        scope_local_max = 5
+        scope_medium_max = 15
+
+    # 5 nodes → terlokalisasi (≤5)
+    assert _compute_scope(_make_cis([f"n{i}" for i in range(5)]), _FakeSettings2()) == "terlokalisasi"
+    # 6 nodes → menengah (6-15)
+    assert _compute_scope(_make_cis([f"n{i}" for i in range(6)]), _FakeSettings2()) == "menengah"
+    # 16 nodes → ekstensif (>15)
+    assert _compute_scope(_make_cis([f"n{i}" for i in range(16)]), _FakeSettings2()) == "ekstensif"
 
 
 # ---------------------------------------------------------------------------
@@ -206,56 +223,66 @@ def test_apply_hard_limit_no_op_when_under_limit() -> None:
 
 
 def test_apply_hard_limit_drops_deepest_first() -> None:
-    """When limit is tight, deepest nodes are dropped first; shallowest are kept."""
-    # char_limit=1600:
-    #   immune_budget = 1 seed * 800 = 800
-    #   available_for_droppable = 1600 - 800 = 800
-    #   max_keep = 800 // 800 = 1
-    #   droppable sorted ascending: [(1, n1), (2, n2), (3, n3)]
-    #   kept = [(1, n1)], dropped = [(2, n2), (3, n3)]
+    """When limit is tight, deepest nodes are dropped first; shallowest are kept.
+
+    Phase 1 (F-2/E-3): proxy raised to 2000 chars/node.
+    With char_limit=6000:
+      early-exit check: 4 * 2000 = 8000 > 6000 → proceeds to trim logic.
+      immune (seed, depth=0): immune_budget = 1 * 2000 = 2000
+      available_for_droppable = 6000 - 2000 = 4000
+      max_keep = 4000 // 2000 = 2
+      droppable sorted ascending by depth: [(1,n1), (2,n2), (3,n3)]
+      kept = [(1,n1), (2,n2)], dropped = [(3,n3)]
+    """
     nodes = [("seed", 0), ("n1", 1), ("n2", 2), ("n3", 3)]
     combined = _make_combined(nodes)
     sorted_ids = ["seed", "n1", "n2", "n3"]
-    trimmed, warning = _apply_hard_limit(sorted_ids, combined, char_limit=1600)
-    assert "seed" in trimmed   # depth-0 is immune
-    assert "n1" in trimmed     # shallowest propagated — kept
-    assert "n2" not in trimmed  # deeper — dropped
+    trimmed, warning = _apply_hard_limit(sorted_ids, combined, char_limit=6000)
+    assert "seed" in trimmed    # depth-0 is immune
+    assert "n1" in trimmed      # shallowest propagated — kept
+    assert "n2" in trimmed      # second-shallowest — kept
     assert "n3" not in trimmed  # deepest — dropped
-    assert warning != ""        # warning emitted
+    assert warning != ""         # warning emitted
 
 
 def test_apply_hard_limit_seed_always_survives() -> None:
-    """SIS seeds (depth=0) are immune to hard-limit truncation."""
-    # 10 seeds, each depth-0 — they're all immune; no drops expected
-    # because immune_budget = 10 * 800 = 8000 > char_limit of 4000
-    # → available_for_droppable = 0 → max_droppable = 0
+    """SIS seeds (depth=0) are immune to hard-limit truncation.
+
+    Phase 1 (F-2/E-3): with 2000 chars/node proxy and 10 seeds:
+      immune_budget = 10 * 2000 = 20000 > any droppable budget → all survive.
+    """
     nodes = [(f"seed{i}", 0) for i in range(10)]
     combined = _make_combined(nodes)
     sorted_ids = [f"seed{i}" for i in range(10)]
-    # Even with tiny limit, depth-0 nodes survive
+    # Even with a tiny char_limit, depth-0 nodes survive (immune).
     trimmed, warning = _apply_hard_limit(sorted_ids, combined, char_limit=100)
     for nid in sorted_ids:
         assert nid in trimmed
 
 
 def test_apply_hard_limit_returns_warning_with_max_depth() -> None:
-    """Warning message mentions the max depth of surviving nodes."""
-    # char_limit=1600: immune_budget=800, available=800, max_keep=1
-    # droppable sorted asc: [(1,n1),(2,n2),(3,n3)] → keep n1, drop n2+n3
+    """Warning message mentions the max depth of surviving nodes.
+
+    Phase 1 (F-2/E-3): char_limit=6000 keeps n1 and n2, drops n3.
+    Warning must include 'SYSTEM WARNING' and the truncation notice.
+    """
     nodes = [("seed", 0), ("n1", 1), ("n2", 2), ("n3", 3)]
     combined = _make_combined(nodes)
     sorted_ids = ["seed", "n1", "n2", "n3"]
-    trimmed, warning = _apply_hard_limit(sorted_ids, combined, char_limit=1600)
+    trimmed, warning = _apply_hard_limit(sorted_ids, combined, char_limit=6000)
     assert "SYSTEM WARNING" in warning
     assert "truncated" in warning.lower() or "Truncated" in warning
     assert "n1" in trimmed   # n1 kept (depth 1)
+    assert "n2" in trimmed   # n2 kept (depth 2)
 
 
 def test_apply_hard_limit_no_propagated_nodes() -> None:
-    """Only SIS seeds (all depth=0) — no drops possible."""
+    """Only SIS seeds (all depth=0) — no drops possible regardless of limit."""
     nodes = [("s1", 0), ("s2", 0), ("s3", 0)]
     combined = _make_combined(nodes)
     sorted_ids = ["s1", "s2", "s3"]
+    # 3 * 2000 = 6000 > 500 → would normally enter trim logic,
+    # but all are depth-0 (immune) → available_for_droppable = 0 → no drops.
     trimmed, warning = _apply_hard_limit(sorted_ids, combined, char_limit=500)
     assert set(trimmed) == {"s1", "s2", "s3"}
     assert warning == ""
@@ -266,6 +293,124 @@ def test_apply_hard_limit_preserves_original_order() -> None:
     nodes = [("seed", 0), ("a", 1), ("b", 2), ("c", 3)]
     combined = _make_combined(nodes)
     sorted_ids = ["b", "a", "seed", "c"]  # arbitrary order
-    # Use a limit large enough that everything fits
+    # Use a limit large enough that everything fits (4 * 2000 = 8000 <= 240000)
     trimmed, _ = _apply_hard_limit(sorted_ids, combined, char_limit=_HARD_CHAR_LIMIT)
     assert trimmed == sorted_ids  # order preserved when no drops
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: context sort order — SIS seeds must come before propagated nodes
+# ---------------------------------------------------------------------------
+
+
+from impactracer.pipeline.context_builder import build_context
+from impactracer.shared.models import CRInterpretation
+
+
+def _make_cr_interp() -> CRInterpretation:
+    return CRInterpretation(
+        is_actionable=True,
+        primary_intent="Change X",
+        change_type="MODIFICATION",
+        affected_layers=["code"],
+        domain_concepts=["auth"],
+        search_queries=["auth change", "auth modification"],
+    )
+
+
+class _FakeSettings:
+    llm_max_context_tokens = 100_000
+    synthesis_system_prompt_tokens = 3_000
+    output_reserve_tokens = 200
+    top_k_backlinks_per_node = 3
+
+
+def test_context_sort_seeds_before_propagated() -> None:
+    """Phase 1 (E-NEW-6): SIS seeds (group 0) appear BEFORE propagated nodes (group 1).
+
+    The previous code had this inverted — propagated nodes got sort key (0, ...)
+    and seeds got (1, ...), meaning seeds were truncated first under budget pressure.
+    The corrected code must place all SIS seeds before any propagated node.
+    """
+    # Build a CIS with 1 seed and 2 propagated nodes of varying severity.
+    seed_trace = NodeTrace(depth=0, causal_chain=[], path=["seed1"], source_seed="seed1")
+    prop_high = NodeTrace(
+        depth=1, causal_chain=["IMPLEMENTS"], path=["seed1", "prop_high"],
+        source_seed="seed1",
+    )
+    prop_low = NodeTrace(
+        depth=1, causal_chain=["IMPORTS"], path=["seed1", "prop_low"],
+        source_seed="seed1",
+    )
+
+    cis = CISResult(
+        sis_nodes={"seed1": seed_trace},
+        propagated_nodes={"prop_high": prop_high, "prop_low": prop_low},
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE code_nodes (node_id TEXT PRIMARY KEY, node_type TEXT, "
+        "internal_logic_abstraction TEXT, source_code TEXT)"
+    )
+    for nid in ["seed1", "prop_high", "prop_low"]:
+        conn.execute(
+            "INSERT INTO code_nodes VALUES (?, ?, ?, ?)",
+            (nid, "Function", None, f"// source of {nid}"),
+        )
+    conn.commit()
+
+    context = build_context(
+        cr_text="Change X",
+        cr_interp=_make_cr_interp(),
+        cis=cis,
+        backlinks={},
+        snippets={"seed1": "seed code", "prop_high": "prop high code", "prop_low": "prop low code"},
+        settings=_FakeSettings(),
+    )
+
+    # Find positions of each node block in the assembled context string.
+    pos_seed = context.find("--- NODE: seed1 ---")
+    pos_prop_high = context.find("--- NODE: prop_high ---")
+    pos_prop_low = context.find("--- NODE: prop_low ---")
+
+    # The seed must appear BEFORE both propagated nodes.
+    assert pos_seed != -1, "seed1 not in context"
+    assert pos_prop_high != -1, "prop_high not in context"
+    assert pos_prop_low != -1, "prop_low not in context"
+    assert pos_seed < pos_prop_high, "seed1 must appear before prop_high"
+    assert pos_seed < pos_prop_low, "seed1 must appear before prop_low"
+
+
+def test_context_sort_high_severity_propagated_before_low() -> None:
+    """Phase 1 (E-NEW-6): among propagated nodes, higher severity appears first."""
+    seed_trace = NodeTrace(depth=0, causal_chain=[], path=["seed1"], source_seed="seed1")
+    prop_tinggi = NodeTrace(
+        depth=1, causal_chain=["IMPLEMENTS"], path=["seed1", "prop_tinggi"],
+        source_seed="seed1",
+    )
+    prop_rendah = NodeTrace(
+        depth=1, causal_chain=["IMPORTS"], path=["seed1", "prop_rendah"],
+        source_seed="seed1",
+    )
+
+    cis = CISResult(
+        sis_nodes={"seed1": seed_trace},
+        propagated_nodes={"prop_tinggi": prop_tinggi, "prop_rendah": prop_rendah},
+    )
+
+    context = build_context(
+        cr_text="Change X",
+        cr_interp=_make_cr_interp(),
+        cis=cis,
+        backlinks={},
+        snippets={},
+        settings=_FakeSettings(),
+    )
+
+    pos_tinggi = context.find("--- NODE: prop_tinggi ---")
+    pos_rendah = context.find("--- NODE: prop_rendah ---")
+
+    assert pos_tinggi != -1 and pos_rendah != -1
+    # Tinggi severity → sort key (1, 0, 1, "prop_tinggi") < (1, 2, 1, "prop_rendah")
+    assert pos_tinggi < pos_rendah, "Tinggi severity node must appear before Rendah"

@@ -135,17 +135,37 @@ def bfs_propagate(
             source_seed=seed,
             low_confidence_seed=is_low_conf,
         )
-        # Add seed to graph as an isolated node if absent; ensures that
-        # graph.predecessors/successors does not raise NetworkXError for
-        # seeds that exist in SQLite but have no edges (pure terminal nodes).
+        # Phase 1 fix (E-NEW-4 / E-7): Do NOT mutate the shared graph.
+        # Previously graph.add_node(seed) was called unconditionally, which
+        # contaminated the shared ctx.graph across sequential ablation runs —
+        # seeds from run N were permanently visible in run N+1's graph,
+        # producing non-reproducible BFS results.
+        #
+        # Pure terminal nodes (in SQLite but with no edges) are simply absent
+        # from the graph. BFS over an absent node produces no neighbors, which
+        # is the correct behaviour: a node with no structural edges propagates
+        # to nothing. NetworkX graph.predecessors/successors on a node NOT in
+        # the graph raises NetworkXError, so we skip BFS expansion for absent
+        # seeds rather than adding them.
         if seed not in graph:
-            graph.add_node(seed)
+            # Absent from graph → no edges → no BFS expansion, only seed itself.
+            logger.debug(
+                "[graph_bfs] Seed '{}' not in graph (pure terminal node) — "
+                "included as SIS seed, no BFS expansion",
+                seed,
+            )
         queue.append((seed, 0, [], [seed], seed))
 
     visited: set[str] = set(unique_seeds)
 
     while queue:
         node_id, depth, causal_chain, path, source_seed = queue.popleft()
+
+        # Skip BFS expansion for nodes absent from the graph (pure terminal
+        # nodes or seeds not yet indexed). They are already recorded in
+        # sis_nodes / propagated_nodes; they simply produce no neighbors.
+        if node_id not in graph:
+            continue
 
         # Determine if this origin seed is low-confidence for CALLS cap.
         # The low_confidence_seed_map may have direct_code_seeds too.
@@ -188,12 +208,40 @@ def bfs_propagate(
                             break
 
             for nbr in neighbors:
-                if nbr in visited:
-                    continue
-                visited.add(nbr)
                 new_chain = causal_chain + [edge_type]
                 new_path = path + [nbr]
                 new_depth = depth + 1
+
+                if nbr in visited:
+                    # Phase 2.1 (E-1): best-path semantics for multi-seed paths.
+                    # First-visit-wins (old behaviour) was arbitrary: whichever
+                    # seed happened to reach a node first won, regardless of
+                    # semantic quality. We now compare the NEW candidate trace
+                    # against the EXISTING trace and keep the higher-severity one.
+                    # If the new trace is strictly better, re-enqueue the node so
+                    # BFS can continue propagating from it with the improved chain.
+                    existing = propagated_nodes.get(nbr)
+                    if existing is None:
+                        # nbr is a SIS seed — seeds always keep depth=0, skip.
+                        continue
+                    from impactracer.shared.constants import severity_for_chain
+                    _RANK = {"Tinggi": 0, "Menengah": 1, "Rendah": 2}
+                    existing_rank = _RANK[severity_for_chain(existing.causal_chain)]
+                    new_rank = _RANK[severity_for_chain(new_chain)]
+                    if new_rank < existing_rank:
+                        # New trace has higher severity — replace and re-enqueue.
+                        propagated_nodes[nbr] = NodeTrace(
+                            depth=new_depth,
+                            causal_chain=new_chain,
+                            path=new_path,
+                            source_seed=source_seed,
+                            low_confidence_seed=origin_is_low_conf,
+                        )
+                        # Re-enqueue so BFS propagates from this improved trace.
+                        queue.append((nbr, new_depth, new_chain, new_path, source_seed))
+                    continue
+
+                visited.add(nbr)
                 propagated_nodes[nbr] = NodeTrace(
                     depth=new_depth,
                     causal_chain=new_chain,
@@ -204,6 +252,9 @@ def bfs_propagate(
                 queue.append((nbr, new_depth, new_chain, new_path, source_seed))
 
     # Invariant assertion: must hold or there is a visited-set bug.
+    # Phase 2.1: best-path re-enqueuing does not change the visited set size —
+    # a re-enqueued node was already in visited; only its NodeTrace is updated.
+    # So the invariant len(sis+prop) == len(visited) still holds exactly.
     assert len(sis_nodes) + len(propagated_nodes) == len(visited), (
         f"BFS invariant violated: "
         f"{len(sis_nodes)} sis + {len(propagated_nodes)} prop != {len(visited)} visited"
@@ -227,8 +278,12 @@ _CONTAINS_PARENT_TYPES: frozenset[str] = frozenset({
 })
 
 #: Node types that are collapsed into their parent (leaf children).
+# Phase 1 fix (E-2): "EnumMember" removed. It is not one of the 9 canonical
+# NodeType values (see models.py NodeType Literal) and has never appeared in
+# any indexed graph. Keeping it was dead code that silently implied the system
+# handles a node type it does not actually produce.
 _CONTAINS_CHILD_TYPES: frozenset[str] = frozenset({
-    "InterfaceField", "EnumMember",
+    "InterfaceField",
 })
 
 

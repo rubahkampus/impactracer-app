@@ -89,7 +89,12 @@ EDGE_CONFIG: dict[str, dict] = {
     "TYPED_BY":            {"direction": "reverse", "max_depth": 3},
     "FIELDS_ACCESSED":     {"direction": "reverse", "max_depth": 2},
     # Structural ownership (forward direction)
-    "DEFINES_METHOD":      {"direction": "forward", "max_depth": 3},
+    # Phase 1 fix (F-1/F-NEW-2): max_depth reduced 3→1. DEFINES_METHOD is a
+    # containment relation (Class owns its Methods); it is NOT a semantic
+    # propagation pathway. Allowing depth-3 forward traversal caused Class →
+    # Method → anything-3-hops-deep explosions that are architecturally
+    # unjustifiable. Depth-1 means a class reaches only its own direct methods.
+    "DEFINES_METHOD":      {"direction": "forward", "max_depth": 1},
     "PASSES_CALLBACK":     {"direction": "forward", "max_depth": 1},
     # Reactive
     "HOOK_DEPENDS_ON":     {"direction": "reverse", "max_depth": 1},
@@ -99,9 +104,16 @@ EDGE_CONFIG: dict[str, dict] = {
     "DEPENDS_ON_EXTERNAL": {"direction": "reverse", "max_depth": 1},
     "CLIENT_API_CALLS":    {"direction": "reverse", "max_depth": 1},
     "DYNAMIC_IMPORT":      {"direction": "reverse", "max_depth": 1},
-    # CONTAINS bridges the File↔symbol membrane. direction="both" so BFS
-    # traverses it forward (File→children) and reverse (children→File).
-    "CONTAINS":            {"direction": "both", "max_depth": 1},
+    # CONTAINS bridges the File↔symbol membrane.
+    # Phase 1 fix (E-NEW-8/A-NEW-7): direction changed "both"→"reverse".
+    # Forward traversal (File→all-children) caused a BFS explosion that reached
+    # every InterfaceField and Method in any touched file, producing 372+ nodes
+    # on live CRs and a 97K-token synthesis timeout. The academically correct
+    # direction is reverse only: given a changed symbol, we want to know which
+    # files CONTAIN it (i.e. which files are affected), NOT to enumerate all
+    # other symbols that live in the same file. Forward CONTAINS is structural
+    # noise, not semantic propagation.
+    "CONTAINS":            {"direction": "reverse", "max_depth": 1},
 }
 
 LOW_CONF_CAPPED_EDGES: frozenset[str] = frozenset({"CALLS"})
@@ -142,17 +154,21 @@ SEVERITY_BY_EDGE_CHAIN_TYPE: dict[str, Severity] = {
 
 
 def severity_for_chain(causal_chain: list[str]) -> Severity:
-    """Severity = highest (most-severe) category across the edge chain.
+    """Severity = the edge type of the LAST hop in the causal chain.
 
-    SIS seeds (empty chain) are ``Tinggi`` by convention.
+    Phase 1 fix (F-NEW-4): the previous implementation used min(rank) across
+    the entire chain, which caused "severity laundering" — a node reached via
+    CALLS → CALLS → IMPLEMENTS inherited Tinggi severity from the final
+    IMPLEMENTS edge even though the intervening CALLS hops were speculative.
+    The last hop is the proximate structural dependency; its edge type is the
+    correct indicator of *why* the node is impacted.
+
+    SIS seeds (empty chain) are ``Tinggi`` by convention: they are the direct
+    retrieval targets of the CR and have the highest semantic certainty.
     """
     if not causal_chain:
         return "Tinggi"
-    rank = {"Tinggi": 0, "Menengah": 1, "Rendah": 2}
-    return min(
-        (SEVERITY_BY_EDGE_CHAIN_TYPE.get(e, "Rendah") for e in causal_chain),
-        key=lambda s: rank[s],
-    )
+    return SEVERITY_BY_EDGE_CHAIN_TYPE.get(causal_chain[-1], "Rendah")
 
 
 # =========================================================================

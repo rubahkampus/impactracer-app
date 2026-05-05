@@ -54,7 +54,14 @@ class Settings(BaseSettings):
     rrf_k: int = 60
 
     # ---- Pre-Validation Gates (FR-C4) ------------------------------
-    min_reranker_score_for_validation: float = 0.0
+    # Phase 2.6 (F-NEW-1/F-5): raised from 0.0 → 0.15.
+    # 0.0 was a permanently-disabled gate: every candidate passes a floor of 0.0.
+    # 0.15 is calibrated against BGE-reranker-v2-m3 cross-encoder logit
+    # distribution: scores below 0.15 on the raw (pre-normalization) scale
+    # correspond to candidates the model considers weakly relevant or irrelevant.
+    # This value should be re-evaluated against the 20-CR evaluation set
+    # during Sprint 11 calibration (see evaluation/gt_protocol.md).
+    min_reranker_score_for_validation: float = 0.15
     plausibility_gate_density_threshold: float = 0.35
     plausibility_gate_max_per_file: int = 2
 
@@ -67,6 +74,15 @@ class Settings(BaseSettings):
     synthesis_system_prompt_tokens: int = 1200
     output_reserve_tokens: int = 2000
     top_k_backlinks_per_node: int = 3
+
+    # ---- Scope thresholds (F-NEW-5) ---------------------------------
+    # Phase 2.9: _compute_scope thresholds are now calibrated parameters
+    # rather than hardcoded magic numbers. Defaults match the thesis-defined
+    # thresholds but can be overridden via env vars post-evaluation.
+    # The indexed citrakara codebase has ~400 code nodes; 5/15 (old) was
+    # too tight. These wider defaults better reflect a real-world codebase.
+    scope_local_max: int = 10    # ≤10 nodes → terlokalisasi
+    scope_medium_max: int = 30   # 11-30 nodes → menengah; >30 → ekstensif
 
     # ---- Audit and Evaluation ---------------------------------------
     llm_audit_log_path: str = "./data/llm_audit.jsonl"

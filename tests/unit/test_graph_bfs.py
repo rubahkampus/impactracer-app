@@ -413,9 +413,20 @@ def test_collapse_preserves_non_contains_reachable_children() -> None:
     assert result.propagated_nodes["iface"].collapsed_children == []
 
 
-def test_collapse_enum_members() -> None:
-    """EnumMember children of an Enum parent are collapsed."""
+def test_collapse_enum_member_not_in_child_types() -> None:
+    """Phase 1 (E-2): EnumMember was removed from _CONTAINS_CHILD_TYPES.
+
+    EnumMember is not one of the 9 canonical NodeType values and has never
+    appeared in any indexed graph. This test asserts that nodes typed as
+    'EnumMember' are NOT collapsed — they remain in propagated_nodes unchanged.
+    """
     import networkx as nx
+    from impactracer.pipeline.graph_bfs import _CONTAINS_CHILD_TYPES
+
+    # Verify the constant no longer contains EnumMember.
+    assert "EnumMember" not in _CONTAINS_CHILD_TYPES
+    assert "InterfaceField" in _CONTAINS_CHILD_TYPES
+
     g = nx.MultiDiGraph()
     g.add_edge("my_enum", "member1", edge_type="CONTAINS")
 
@@ -428,14 +439,13 @@ def test_collapse_enum_members() -> None:
     )
     meta = {
         "my_enum": {"node_type": "Enum"},
-        "member1": {"node_type": "EnumMember"},
+        "member1": {"node_type": "EnumMember"},  # not in _CONTAINS_CHILD_TYPES
         "seed": {"node_type": "Function"},
     }
     result = collapse_contains_subtrees(cis, g, meta)
-    assert "member1" not in result.propagated_nodes
-    assert "member1" in result.propagated_nodes.get("my_enum", NodeTrace(0, [], [], "")).collapsed_children or \
-        "member1" in result.propagated_nodes.get("my_enum", _make_trace(0, [])).collapsed_children
-    assert result.propagated_nodes["my_enum"].collapsed_children == ["member1"]
+    # EnumMember is not a collapsible type → member1 stays in propagated_nodes.
+    assert "member1" in result.propagated_nodes
+    assert result.propagated_nodes["my_enum"].collapsed_children == []
 
 
 def test_collapse_no_op_when_parent_not_in_cis() -> None:
@@ -487,3 +497,87 @@ def test_collapse_empty_propagated_nodes_no_op() -> None:
     )
     result = collapse_contains_subtrees(cis, g, {})
     assert result is cis  # same object returned
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: graph isolation — bfs_propagate must NOT mutate the shared graph
+# ---------------------------------------------------------------------------
+
+
+def test_bfs_does_not_add_absent_seed_to_graph() -> None:
+    """Phase 1 (E-NEW-4): a seed absent from the graph must NOT be added.
+
+    Previously bfs_propagate called graph.add_node(seed) for absent seeds,
+    contaminating the shared ctx.graph across sequential ablation runs.
+    Post-fix: graph size is unchanged after BFS with absent seeds.
+    """
+    import networkx as nx
+    g = nx.MultiDiGraph()
+    # Graph starts empty.
+    assert g.number_of_nodes() == 0
+
+    cis = bfs_propagate(g, seeds=["ghost_seed"])
+
+    # ghost_seed must appear in sis_nodes (it's a valid SIS entry).
+    assert "ghost_seed" in cis.sis_nodes
+    # But the GRAPH must remain empty — no mutation.
+    assert g.number_of_nodes() == 0
+
+
+def test_bfs_does_not_mutate_graph_with_real_seed() -> None:
+    """BFS over an existing seed does not add extra nodes to the graph."""
+    import networkx as nx
+    g = nx.MultiDiGraph()
+    g.add_edge("caller", "seed", edge_type="CALLS")
+    node_count_before = g.number_of_nodes()
+
+    bfs_propagate(g, seeds=["seed"])
+
+    # Graph node count must be unchanged after BFS.
+    assert g.number_of_nodes() == node_count_before
+
+
+def test_bfs_sequential_runs_independent() -> None:
+    """Two sequential BFS runs on the same graph produce identical results.
+
+    This is the ablation isolation regression test: if run N mutated the
+    graph, run N+1 would see different nodes and produce different results
+    for the same seed set.
+    """
+    import networkx as nx
+    g = nx.MultiDiGraph()
+    g.add_edge("caller", "seed", edge_type="CALLS")
+
+    cis1 = bfs_propagate(g, seeds=["seed"])
+    cis2 = bfs_propagate(g, seeds=["seed"])
+
+    # Both runs must produce identical node sets.
+    assert set(cis1.sis_nodes.keys()) == set(cis2.sis_nodes.keys())
+    assert set(cis1.propagated_nodes.keys()) == set(cis2.propagated_nodes.keys())
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: CONTAINS direction = reverse (E-NEW-8)
+# ---------------------------------------------------------------------------
+
+
+def test_bfs_contains_reverse_only() -> None:
+    """Phase 1 (E-NEW-8): CONTAINS is direction=reverse.
+
+    Given edge: parent --CONTAINS--> child
+    BFS from seed=child (via reverse CONTAINS) should reach parent.
+    BFS from seed=parent (which would use forward CONTAINS) must NOT reach child.
+    """
+    import networkx as nx
+    g = nx.MultiDiGraph()
+    # parent CONTAINS child (stored as parent→child edge)
+    g.add_edge("parent_file", "child_field", edge_type="CONTAINS")
+
+    # Seed = child_field → reverse CONTAINS → should reach parent_file
+    cis_from_child = bfs_propagate(g, seeds=["child_field"])
+    assert "parent_file" in cis_from_child.propagated_nodes
+
+    # Seed = parent_file → forward CONTAINS was removed → must NOT reach child_field
+    # (CONTAINS is now direction=reverse, so forward traversal is disabled)
+    cis_from_parent = bfs_propagate(g, seeds=["parent_file"])
+    assert "child_field" not in cis_from_parent.propagated_nodes

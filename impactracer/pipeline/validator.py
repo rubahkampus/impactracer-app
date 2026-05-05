@@ -55,6 +55,12 @@ RULES FOR ADDITION CRs:
 - Do NOT require that an existing function already contains the logic —
   for ADDITION CRs, absence of logic IS the reason to confirm it (it will
   need to be added).
+- Phase 2.5 ADDITION SCOPING CONSTRAINT: a node is impacted ONLY if it
+  DIRECTLY exposes, accepts, or processes the new feature — not merely
+  because it belongs to the same service or shares a related domain concept.
+  Generic utility functions, shared middleware, and unrelated service modules
+  that happen to be in the same codebase are NOT impacted unless they must
+  explicitly handle the new feature.
 
 OUTPUT FORMAT:
 Return exactly one JSON object with this structure:

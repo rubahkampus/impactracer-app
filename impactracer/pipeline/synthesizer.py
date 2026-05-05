@@ -3,13 +3,19 @@
 Severity per node is precomputed from the causal chain; the LLM must not
 override it. The prompt enforces this constraint.
 
+Phase 3.3 (A-4): ``build_forced_inclusion_report`` constructs an ImpactReport
+directly from the CIS without calling LLM #5. This is the "oracle output"
+variant used to separate pipeline CIA recall from LLM #5 selection quality.
+When ``force_include_all_cis_nodes=True`` in VariantFlags, runner.py calls
+this function instead of ``synthesize_report``.
+
 Reference: 07_online_pipeline.md §13.
 """
 
 from __future__ import annotations
 
 from impactracer.pipeline.llm_client import LLMClient
-from impactracer.shared.models import ImpactReport
+from impactracer.shared.models import CISResult, ImpactReport, ImpactedNode
 
 
 SYSTEM_PROMPT = """You are a software change impact analysis report generator.
@@ -67,4 +73,55 @@ def synthesize_report(context: str, client: LLMClient) -> ImpactReport:
         user=context,
         response_schema=ImpactReport,
         call_name="synthesize",
+    )
+
+
+def build_forced_inclusion_report(
+    cis: CISResult,
+    node_types: dict[str, str],
+    node_file_paths: dict[str, str],
+    estimated_scope: str,
+) -> ImpactReport:
+    """Build an ImpactReport from all CIS nodes without calling LLM #5.
+
+    Phase 3.3 (A-4): the "oracle" or forced-inclusion variant. Used to
+    measure the pipeline's raw CIA recall without LLM #5 selection bias.
+
+    When LLM #5 selects only 7 of 208 CIS nodes, it is unclear whether:
+    (a) the pipeline correctly identified 208 nodes but LLM #5 under-reports,
+    or (b) the pipeline over-identified and LLM #5 correctly filters.
+
+    This variant produces a deterministic report from the FULL CIS, allowing
+    evaluation against ground truth at the CIS level. Comparing forced-inclusion
+    F1 vs LLM-synthesized F1 quantifies LLM #5's contribution.
+
+    All nodes are included as ImpactedNode records with severity computed
+    from their causal chain. The executive_summary is a placeholder;
+    this variant is for metric computation only, not for user presentation.
+    """
+    from impactracer.shared.constants import severity_for_chain
+
+    combined = cis.combined()
+    impacted: list[ImpactedNode] = []
+
+    for node_id, trace in combined.items():
+        impacted.append(ImpactedNode(
+            node_id=node_id,
+            node_type=node_types.get(node_id, "Unknown"),
+            file_path=node_file_paths.get(node_id, ""),
+            severity=severity_for_chain(trace.causal_chain),
+            causal_chain=trace.causal_chain,
+            structural_justification=f"Included via forced-inclusion variant (depth={trace.depth})",
+            traceability_backlinks=[],
+        ))
+
+    return ImpactReport(
+        executive_summary=(
+            f"[FORCED INCLUSION] All {len(impacted)} CIS nodes included for "
+            "evaluation. This variant bypasses LLM #5 synthesis."
+        ),
+        impacted_nodes=impacted,
+        documentation_conflicts=[],
+        estimated_scope=estimated_scope,  # type: ignore[arg-type]
+        analysis_mode="retrieval_plus_propagation" if cis.propagated_nodes else "retrieval_only",
     )

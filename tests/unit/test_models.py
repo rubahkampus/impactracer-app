@@ -10,8 +10,10 @@ from pydantic import Field, ValidationError
 from impactracer.shared.models import (
     CRInterpretation,
     CandidateVerdict,
+    CISResult,
     ImpactReport,
     ImpactedNode,
+    NodeTrace,
     PropagationVerdict,
     PropagationValidationResult,
     SISValidationResult,
@@ -239,30 +241,52 @@ def test_severity_for_chain_empty_is_tinggi() -> None:
 
 
 def test_severity_for_chain_contract_edges_are_tinggi() -> None:
-    """Contract edges IMPLEMENTS, TYPED_BY, FIELDS_ACCESSED → Tinggi."""
+    """Contract edges IMPLEMENTS, TYPED_BY, FIELDS_ACCESSED → Tinggi (last-hop rule)."""
     assert severity_for_chain(["IMPLEMENTS"]) == "Tinggi"
     assert severity_for_chain(["TYPED_BY"]) == "Tinggi"
     assert severity_for_chain(["FIELDS_ACCESSED"]) == "Tinggi"
-    # Mixed: contract edge dominates
+    # Phase 1 (F-NEW-4): last-hop rule — CALLS → IMPLEMENTS: last hop is
+    # IMPLEMENTS → Tinggi (previously this was also Tinggi under min(), but
+    # now the semantics are explicit: the *final* dependency type determines
+    # severity, not the minimum across the entire chain).
     assert severity_for_chain(["CALLS", "IMPLEMENTS"]) == "Tinggi"
 
 
 def test_severity_for_chain_behavioral_only_is_menengah() -> None:
-    """Behavioral-only chains → Menengah."""
+    """Behavioral-only chains → Menengah (last-hop rule)."""
     assert severity_for_chain(["CALLS"]) == "Menengah"
     assert severity_for_chain(["INHERITS"]) == "Menengah"
     assert severity_for_chain(["CALLS", "DEFINES_METHOD"]) == "Menengah"
 
 
 def test_severity_for_chain_module_only_is_rendah() -> None:
-    """Module-composition-only chains → Rendah."""
+    """Module-composition-only chains → Rendah (last-hop rule)."""
     assert severity_for_chain(["IMPORTS"]) == "Rendah"
     assert severity_for_chain(["RENDERS"]) == "Rendah"
     assert severity_for_chain(["IMPORTS", "DYNAMIC_IMPORT"]) == "Rendah"
 
 
+def test_severity_for_chain_last_hop_determines_severity() -> None:
+    """Phase 1 (F-NEW-4): LAST edge in chain determines severity, not minimum.
+
+    Under the old min() rule, IMPORTS→CALLS→IMPLEMENTS would yield Tinggi
+    (minimum rank). Under the last-hop rule, the same chain yields Tinggi only
+    because the last edge IS IMPLEMENTS. But IMPLEMENTS→CALLS→IMPORTS must
+    yield Rendah (last hop = IMPORTS), NOT Tinggi.
+
+    This test verifies the anti-laundering property: a high-severity first hop
+    does NOT elevate a low-severity last hop.
+    """
+    # Last hop is IMPLEMENTS → Tinggi
+    assert severity_for_chain(["IMPORTS", "CALLS", "IMPLEMENTS"]) == "Tinggi"
+    # Last hop is IMPORTS → Rendah (not elevated by earlier IMPLEMENTS)
+    assert severity_for_chain(["IMPLEMENTS", "CALLS", "IMPORTS"]) == "Rendah"
+    # Last hop is CALLS → Menengah (not elevated by earlier IMPLEMENTS)
+    assert severity_for_chain(["IMPLEMENTS", "CALLS"]) == "Menengah"
+
+
 def test_severity_for_chain_behavioral_beats_module() -> None:
-    """Behavioral edge elevates a module-only chain to Menengah."""
+    """Last-hop CALLS after IMPORTS → Menengah (CALLS is the proximate dep)."""
     assert severity_for_chain(["IMPORTS", "CALLS"]) == "Menengah"
 
 
@@ -298,6 +322,65 @@ def test_layer_compat_unknown_classification() -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# CISResult — Phase 1 invariants (E-4)
+# ---------------------------------------------------------------------------
+
+
+def _make_node_trace(depth: int, chain: list[str], seed: str = "s1") -> NodeTrace:
+    return NodeTrace(
+        depth=depth,
+        causal_chain=chain,
+        path=[seed] + [f"n{i}" for i in range(depth)],
+        source_seed=seed,
+    )
+
+
+def test_combined_sis_overwrites_propagated() -> None:
+    """Phase 1 (E-4): when same node_id appears in both dicts, SIS trace wins.
+
+    Invariant: combined()[node_id] is sis_nodes[node_id], not the propagated trace.
+    This matters because seeds have depth=0 / empty causal_chain; using the
+    propagated trace would misrepresent them as structurally inferred nodes.
+    """
+    seed_trace = _make_node_trace(depth=0, chain=[], seed="A")
+    propagated_trace = _make_node_trace(depth=2, chain=["CALLS", "IMPORTS"], seed="A")
+
+    cis = CISResult(
+        sis_nodes={"A": seed_trace},
+        propagated_nodes={"A": propagated_trace, "B": _make_node_trace(1, ["CALLS"])},
+    )
+    combined = cis.combined()
+
+    # A must use the SIS trace (depth=0), not the propagated one (depth=2).
+    assert combined["A"].depth == 0
+    assert combined["A"].causal_chain == []
+    assert combined["A"] is seed_trace
+
+    # B (propagated only) appears unchanged.
+    assert combined["B"].depth == 1
+
+
+def test_combined_all_node_ids_complete() -> None:
+    """all_node_ids() returns every unique node_id in SIS + propagated."""
+    cis = CISResult(
+        sis_nodes={"s1": _make_node_trace(0, [])},
+        propagated_nodes={
+            "p1": _make_node_trace(1, ["CALLS"]),
+            "p2": _make_node_trace(2, ["CALLS", "IMPLEMENTS"]),
+        },
+    )
+    ids = cis.all_node_ids()
+    assert set(ids) == {"s1", "p1", "p2"}
+
+
+def test_combined_empty_cis() -> None:
+    """Empty CIS combined() returns empty dict."""
+    cis = CISResult()
+    assert cis.combined() == {}
+    assert cis.all_node_ids() == []
+
+
 def test_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     """Settings instantiates with expected defaults when API key is provided."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-abc")
@@ -310,6 +393,6 @@ def test_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.min_traceability_similarity == 0.40
     assert s.degenerate_embed_min_length == 50
     assert s.bfs_high_conf_top_n == 5
-    assert s.min_reranker_score_for_validation == 0.0
+    assert s.min_reranker_score_for_validation == 0.15  # Phase 2.6: raised from 0.0
     assert s.plausibility_gate_density_threshold == 0.35
     assert s.plausibility_gate_max_per_file == 2

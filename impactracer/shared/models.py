@@ -351,8 +351,20 @@ class CISResult:
     propagated_nodes: dict[str, NodeTrace] = field(default_factory=dict)
 
     def combined(self) -> dict[str, NodeTrace]:
-        """Return a merged view of SIS seeds and propagated nodes."""
-        return {**self.sis_nodes, **self.propagated_nodes}
+        """Return a merged view of SIS seeds and propagated nodes.
+
+        Merge contract (Phase 1 — E-4): SIS seeds take priority over
+        propagated traces for the same node_id.  The dict unpacking order
+        ``{**propagated, **sis}`` means sis_nodes keys overwrite any matching
+        propagated_nodes key, preserving the seed's depth=0 / empty causal_chain
+        attributes instead of a BFS-derived trace that would misrepresent the
+        node as a propagated result.
+
+        Invariant: for any node_id that appears in both dicts,
+        ``combined()[node_id] is self.sis_nodes[node_id]``.
+        """
+        # propagated_nodes written first so sis_nodes overwrites on collision.
+        return {**self.propagated_nodes, **self.sis_nodes}
 
     def all_node_ids(self) -> list[str]:
         """Return all node IDs as a flat list."""

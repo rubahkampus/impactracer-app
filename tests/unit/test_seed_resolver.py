@@ -57,19 +57,19 @@ def conn() -> sqlite3.Connection:
 
 def test_direct_code_seed_passthrough(conn: sqlite3.Connection) -> None:
     """A SIS entry that is already a code node bypasses doc resolution."""
-    resolutions, doc_to_code_map, direct_code_seeds = resolve_doc_to_code(
+    # Phase 1: resolve_doc_to_code now returns (resolutions, direct_code_seeds)
+    resolutions, direct_code_seeds = resolve_doc_to_code(
         sis_ids=["src/lib/services/auth.service.ts::loginUser"],
         conn=conn,
         top_k=5,
     )
     assert direct_code_seeds == ["src/lib/services/auth.service.ts::loginUser"]
     assert resolutions == []
-    assert doc_to_code_map == {}
 
 
 def test_doc_chunk_resolves_to_code(conn: sqlite3.Connection) -> None:
     """A doc-chunk SIS entry resolves via doc_code_candidates."""
-    resolutions, doc_to_code_map, direct_code_seeds = resolve_doc_to_code(
+    resolutions, direct_code_seeds = resolve_doc_to_code(
         sis_ids=["sdd__v_1_auth"],
         conn=conn,
         top_k=5,
@@ -79,12 +79,11 @@ def test_doc_chunk_resolves_to_code(conn: sqlite3.Connection) -> None:
     assert resolutions[0]["doc_id"] == "sdd__v_1_auth"
     # Both code nodes should be present, ordered by score desc.
     assert resolutions[0]["code_ids"][0] == "src/lib/services/auth.service.ts::loginUser"
-    assert "sdd__v_1_auth" in doc_to_code_map
 
 
 def test_top_k_limits_resolution(conn: sqlite3.Connection) -> None:
     """top_k=1 returns only the highest-scored code node per doc chunk."""
-    resolutions, doc_to_code_map, _ = resolve_doc_to_code(
+    resolutions, _ = resolve_doc_to_code(
         sis_ids=["sdd__v_1_auth"],
         conn=conn,
         top_k=1,
@@ -95,19 +94,18 @@ def test_top_k_limits_resolution(conn: sqlite3.Connection) -> None:
 
 def test_stranded_doc_chunk_skipped(conn: sqlite3.Connection) -> None:
     """A doc chunk with no candidates produces no resolution entry."""
-    resolutions, doc_to_code_map, direct_code_seeds = resolve_doc_to_code(
+    resolutions, direct_code_seeds = resolve_doc_to_code(
         sis_ids=["srs__i_1_general_description"],
         conn=conn,
         top_k=5,
     )
     assert resolutions == []
-    assert doc_to_code_map == {}
     assert direct_code_seeds == []
 
 
 def test_mixed_sis_ids(conn: sqlite3.Connection) -> None:
     """Mix of direct code node and doc chunk in one call."""
-    resolutions, doc_to_code_map, direct_code_seeds = resolve_doc_to_code(
+    resolutions, direct_code_seeds = resolve_doc_to_code(
         sis_ids=[
             "src/lib/services/auth.service.ts::loginUser",
             "sdd__v_1_auth",
@@ -122,23 +120,26 @@ def test_mixed_sis_ids(conn: sqlite3.Connection) -> None:
 
 def test_empty_sis_ids(conn: sqlite3.Connection) -> None:
     """Empty input returns empty outputs."""
-    resolutions, doc_to_code_map, direct_code_seeds = resolve_doc_to_code(
+    resolutions, direct_code_seeds = resolve_doc_to_code(
         sis_ids=[],
         conn=conn,
         top_k=5,
     )
     assert resolutions == []
-    assert doc_to_code_map == {}
     assert direct_code_seeds == []
 
 
-def test_doc_to_code_map_matches_resolutions(conn: sqlite3.Connection) -> None:
-    """doc_to_code_map has identical entries as resolutions."""
-    resolutions, doc_to_code_map, _ = resolve_doc_to_code(
-        sis_ids=["sdd__v_1_auth"],
+def test_code_node_ids_cache_bypasses_table_scan(conn: sqlite3.Connection) -> None:
+    """Phase 1 (E-6): passing code_node_ids skips the full table scan."""
+    # Pre-supply the set; resolver must honour it without hitting the DB.
+    prebuilt = {"src/lib/services/auth.service.ts::loginUser"}
+    resolutions, direct_code_seeds = resolve_doc_to_code(
+        sis_ids=["src/lib/services/auth.service.ts::loginUser", "sdd__v_1_auth"],
         conn=conn,
         top_k=5,
+        code_node_ids=prebuilt,
     )
-    for r in resolutions:
-        assert r["doc_id"] in doc_to_code_map
-        assert doc_to_code_map[r["doc_id"]] == r["code_ids"]
+    assert "src/lib/services/auth.service.ts::loginUser" in direct_code_seeds
+    # The doc chunk sdd__v_1_auth should still resolve (not in prebuilt set).
+    assert len(resolutions) == 1
+    assert resolutions[0]["doc_id"] == "sdd__v_1_auth"

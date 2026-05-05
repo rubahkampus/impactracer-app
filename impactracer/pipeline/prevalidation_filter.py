@@ -80,11 +80,24 @@ def step_3_5_score_filter(
     Blueprint §4 Step 3.5.
     """
     def _effective_score(c: Candidate) -> float:
-        # raw_reranker_score is set only after Step 3 reranking.
-        # For V0-V2 (no reranker), it stays at 0.0 default — fall back to
-        # reranker_score (also 0.0 in that case) so all candidates pass the
-        # default 0.0 threshold and nothing is incorrectly dropped.
-        return c.raw_reranker_score if c.raw_reranker_score > 0.0 else c.reranker_score
+        # Phase 2.6 (F-NEW-1/F-5): use raw_reranker_score as the authoritative
+        # quality signal. If raw_reranker_score is None-equivalent (0.0, which
+        # is the default for V0-V2 where the reranker was not run), return 0.0
+        # directly — do NOT fall back to the normalized reranker_score.
+        #
+        # The previous fall-back to reranker_score was the bug: min-max
+        # normalization always maps the lowest candidate in a batch to 0.0,
+        # so the normalized score of a genuinely poor candidate could equal
+        # 0.0 and still pass a 0.0 floor — the gate was permanently disabled.
+        # With raw_reranker_score, a score of 0.0 means "reranker not run"
+        # (V0-V2), which correctly passes a 0.0 default threshold.
+        # For V3+ where the reranker IS run, raw_reranker_score is the
+        # absolute cross-encoder logit — negative values indicate poor quality
+        # and will fail a properly calibrated positive threshold (e.g. 0.15).
+        if c.raw_reranker_score != 0.0:
+            return c.raw_reranker_score
+        # Reranker not run (V0-V2): treat as 0.0 so everything passes default floor.
+        return 0.0
 
     return [c for c in candidates if _effective_score(c) >= threshold]
 
@@ -108,6 +121,29 @@ def step_3_6_semantic_dedup(
         c.node_id: c for c in candidates if c.collection == "code_units"
     }
 
+    # Phase 2.8 (E-NEW-1): batch SQLite query for all doc chunk top-1 resolutions.
+    # The previous implementation issued one SELECT per doc candidate in a loop —
+    # N sequential round-trips for N doc chunks. With 15 candidates this is 15
+    # sequential queries. Replace with a single WHERE doc_id IN (...) batch query
+    # that returns all top-1 mappings at once, then build a lookup dict.
+    doc_candidates = [c for c in candidates if c.collection == "doc_chunks"]
+    doc_top1_map: dict[str, str] = {}  # doc_id → top-1 code_id
+
+    if doc_candidates:
+        doc_ids = [c.node_id for c in doc_candidates]
+        placeholders = ",".join("?" * len(doc_ids))
+        # Fetch all rows for these doc_ids, ordered by score desc per doc_id.
+        rows = conn.execute(
+            f"SELECT doc_id, code_id FROM doc_code_candidates "
+            f"WHERE doc_id IN ({placeholders}) "
+            f"ORDER BY doc_id, weighted_similarity_score DESC",
+            doc_ids,
+        ).fetchall()
+        # Keep only the first (highest-score) code_id per doc_id.
+        for doc_id, code_id in rows:
+            if doc_id not in doc_top1_map:
+                doc_top1_map[doc_id] = code_id
+
     merged: set[str] = set()
     result: list[Candidate] = []
 
@@ -116,23 +152,14 @@ def step_3_6_semantic_dedup(
             result.append(c)
             continue
 
-        # Look up top-1 code resolution for this doc chunk
-        row = conn.execute(
-            "SELECT code_id FROM doc_code_candidates "
-            "WHERE doc_id = ? ORDER BY weighted_similarity_score DESC LIMIT 1",
-            (c.node_id,),
-        ).fetchone()
-
-        if row is not None and row[0] in code_candidate_idx:
+        top1_code = doc_top1_map.get(c.node_id)
+        if top1_code is not None and top1_code in code_candidate_idx:
             # Merge: append this doc's ID to the code candidate and drop the doc candidate
-            target_code = code_candidate_idx[row[0]]
+            target_code = code_candidate_idx[top1_code]
             target_code.merged_doc_ids.append(c.node_id)
 
             # B1: carry (section_title, text) so the validator prompt can show
             # "Business Context" explaining WHY this code node is relevant.
-            # Use the doc Candidate's node_id as the section title and
-            # text_snippet as the content — both are pre-hydrated from ChromaDB
-            # during retrieval and are always available.
             section_title = c.name or c.node_id
             source_text = c.text_snippet or ""
             target_code.merged_doc_contexts.append((section_title, source_text))
@@ -140,7 +167,7 @@ def step_3_6_semantic_dedup(
             merged.add(c.node_id)
             logger.debug(
                 "[gates 3.6] Merged doc {} -> code {} (merged_doc_ids={})",
-                c.node_id, row[0], target_code.merged_doc_ids,
+                c.node_id, top1_code, target_code.merged_doc_ids,
             )
         else:
             result.append(c)

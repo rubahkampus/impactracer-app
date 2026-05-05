@@ -38,8 +38,14 @@ def _tokenize_for_bm25(text: str) -> list[str]:
     text = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", text)
     # Lowercase and split on non-alphanumeric characters
     tokens = re.split(r"[^a-z0-9]+", text.lower())
-    # Drop tokens shorter than 2 chars and pure-numeric tokens
-    return [t for t in tokens if len(t) >= 2 and not t.isdigit()]
+    # Phase 2.7 (E-NEW-2): raised minimum token length from 2 → 3.
+    # 2-char tokens admit high-frequency English stop-words ("to", "up",
+    # "in", "of", "is", "at", "by", "be") that consume BM25 posting-list
+    # budget without adding discriminative power. Indonesian 2-char tokens
+    # ("di", "ke", "ya") are similarly non-discriminative. 3-char minimum
+    # eliminates these while preserving meaningful short identifiers
+    # (e.g. "get", "set", "api", "url", "jwt").
+    return [t for t in tokens if len(t) >= 3 and not t.isdigit()]
 
 
 # ---------------------------------------------------------------------------
