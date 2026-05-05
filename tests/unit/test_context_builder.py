@@ -171,3 +171,101 @@ def test_compute_scope_empty_cis():
     """Empty CIS → terlokalisasi (no nodes = no scope)."""
     cis = CISResult(sis_nodes={}, propagated_nodes={})
     assert _compute_scope(cis) == "terlokalisasi"
+
+
+# ---------------------------------------------------------------------------
+# Sprint 10.1 — Strategy 2: _apply_hard_limit tests
+# ---------------------------------------------------------------------------
+
+
+from impactracer.pipeline.context_builder import _apply_hard_limit, _HARD_CHAR_LIMIT
+
+
+def _make_combined(nodes: list[tuple[str, int]]) -> dict:
+    """Build a {node_id: NodeTrace} dict from (node_id, depth) pairs."""
+    result = {}
+    for nid, depth in nodes:
+        chain = ["CALLS"] * depth if depth > 0 else []
+        result[nid] = NodeTrace(
+            depth=depth,
+            causal_chain=chain,
+            path=["seed"] + [f"n{i}" for i in range(depth)],
+            source_seed="seed",
+        )
+    return result
+
+
+def test_apply_hard_limit_no_op_when_under_limit() -> None:
+    """Small node list well within limit — no nodes dropped, no warning."""
+    nodes = [("n1", 0), ("n2", 1), ("n3", 2)]
+    combined = _make_combined(nodes)
+    sorted_ids = ["n1", "n2", "n3"]
+    trimmed, warning = _apply_hard_limit(sorted_ids, combined, char_limit=_HARD_CHAR_LIMIT)
+    assert trimmed == sorted_ids
+    assert warning == ""
+
+
+def test_apply_hard_limit_drops_deepest_first() -> None:
+    """When limit is tight, deepest nodes are dropped first; shallowest are kept."""
+    # char_limit=1600:
+    #   immune_budget = 1 seed * 800 = 800
+    #   available_for_droppable = 1600 - 800 = 800
+    #   max_keep = 800 // 800 = 1
+    #   droppable sorted ascending: [(1, n1), (2, n2), (3, n3)]
+    #   kept = [(1, n1)], dropped = [(2, n2), (3, n3)]
+    nodes = [("seed", 0), ("n1", 1), ("n2", 2), ("n3", 3)]
+    combined = _make_combined(nodes)
+    sorted_ids = ["seed", "n1", "n2", "n3"]
+    trimmed, warning = _apply_hard_limit(sorted_ids, combined, char_limit=1600)
+    assert "seed" in trimmed   # depth-0 is immune
+    assert "n1" in trimmed     # shallowest propagated — kept
+    assert "n2" not in trimmed  # deeper — dropped
+    assert "n3" not in trimmed  # deepest — dropped
+    assert warning != ""        # warning emitted
+
+
+def test_apply_hard_limit_seed_always_survives() -> None:
+    """SIS seeds (depth=0) are immune to hard-limit truncation."""
+    # 10 seeds, each depth-0 — they're all immune; no drops expected
+    # because immune_budget = 10 * 800 = 8000 > char_limit of 4000
+    # → available_for_droppable = 0 → max_droppable = 0
+    nodes = [(f"seed{i}", 0) for i in range(10)]
+    combined = _make_combined(nodes)
+    sorted_ids = [f"seed{i}" for i in range(10)]
+    # Even with tiny limit, depth-0 nodes survive
+    trimmed, warning = _apply_hard_limit(sorted_ids, combined, char_limit=100)
+    for nid in sorted_ids:
+        assert nid in trimmed
+
+
+def test_apply_hard_limit_returns_warning_with_max_depth() -> None:
+    """Warning message mentions the max depth of surviving nodes."""
+    # char_limit=1600: immune_budget=800, available=800, max_keep=1
+    # droppable sorted asc: [(1,n1),(2,n2),(3,n3)] → keep n1, drop n2+n3
+    nodes = [("seed", 0), ("n1", 1), ("n2", 2), ("n3", 3)]
+    combined = _make_combined(nodes)
+    sorted_ids = ["seed", "n1", "n2", "n3"]
+    trimmed, warning = _apply_hard_limit(sorted_ids, combined, char_limit=1600)
+    assert "SYSTEM WARNING" in warning
+    assert "truncated" in warning.lower() or "Truncated" in warning
+    assert "n1" in trimmed   # n1 kept (depth 1)
+
+
+def test_apply_hard_limit_no_propagated_nodes() -> None:
+    """Only SIS seeds (all depth=0) — no drops possible."""
+    nodes = [("s1", 0), ("s2", 0), ("s3", 0)]
+    combined = _make_combined(nodes)
+    sorted_ids = ["s1", "s2", "s3"]
+    trimmed, warning = _apply_hard_limit(sorted_ids, combined, char_limit=500)
+    assert set(trimmed) == {"s1", "s2", "s3"}
+    assert warning == ""
+
+
+def test_apply_hard_limit_preserves_original_order() -> None:
+    """Surviving nodes preserve their relative order from sorted_ids."""
+    nodes = [("seed", 0), ("a", 1), ("b", 2), ("c", 3)]
+    combined = _make_combined(nodes)
+    sorted_ids = ["b", "a", "seed", "c"]  # arbitrary order
+    # Use a limit large enough that everything fits
+    trimmed, _ = _apply_hard_limit(sorted_ids, combined, char_limit=_HARD_CHAR_LIMIT)
+    assert trimmed == sorted_ids  # order preserved when no drops

@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     llm_model: str = "google/gemini-2.5-flash"
     llm_temperature: float = 0.0
     llm_seed: int = 42
-    llm_max_output_tokens: int = 4096
+    llm_max_output_tokens: int = 65536
     llm_retry_max_attempts: int = 10
     llm_retry_base_backoff: float = 2.0
 

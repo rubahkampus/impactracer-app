@@ -153,6 +153,95 @@ def _estimate_tokens(text: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Sprint 10.1 — Strategy 2: depth-based hard-limit failsafe
+# ---------------------------------------------------------------------------
+
+# Hard ceiling enforced BEFORE the per-token-budget soft truncation.
+# ~60 K tokens × 4 chars/token = 240 000 chars.
+_HARD_CHAR_LIMIT: int = 240_000
+
+# Warning block injected into the context when the hard limit activates.
+_TRUNCATION_WARNING_TEMPLATE = (
+    "[SYSTEM WARNING: The impact graph was too massive. "
+    "Nodes beyond Depth {max_depth} were truncated from this context "
+    "({n_dropped} nodes dropped). "
+    "Explicitly mention this depth-based truncation limitation in your "
+    "report scope section.]"
+)
+
+
+def _apply_hard_limit(
+    sorted_ids: list[str],
+    combined: dict,
+    *,
+    char_limit: int = _HARD_CHAR_LIMIT,
+) -> tuple[list[str], str]:
+    """Return (trimmed_ids, warning_text) after applying the hard char limit.
+
+    Drops highest-depth propagated nodes first.  SIS seeds (depth=0) are
+    immune and always survive the trim.
+
+    Algorithm:
+    1. Estimate rough per-node char cost = len(node_id) * 10 (conservative
+       proxy — the real block is built later; we just need to pick which
+       nodes to drop, not the exact budget).
+    2. Sort candidates-for-dropping by depth descending, then node_id.
+    3. Drop until the rough total is within char_limit.
+    4. If the limit is already satisfied, return unchanged.
+    """
+    # Quick check: build a rough total using a fixed per-node char estimate.
+    # We use 500 chars/node as a safe lower bound (real blocks are larger,
+    # so this won't over-drop).
+    if len(sorted_ids) * 500 <= char_limit:
+        return sorted_ids, ""
+
+    # Separate immune nodes (depth=0 SIS seeds) from droppable (depth>0).
+    immune: list[str] = []
+    droppable: list[tuple[int, str]] = []  # (depth, node_id) for sorting
+    for nid in sorted_ids:
+        trace = combined.get(nid)
+        depth = trace.depth if trace is not None else 0
+        if depth == 0:
+            immune.append(nid)
+        else:
+            droppable.append((depth, nid))
+
+    # Sort droppable by depth ascending so the shallowest (highest priority)
+    # nodes are kept first.  Deepest nodes appear at the end and are dropped.
+    droppable.sort(key=lambda t: (t[0], t[1]))
+
+    # Allow up to char_limit chars; reserve space for immune nodes.
+    # Each immune node gets a guaranteed budget slot.
+    immune_budget = len(immune) * 800  # generous per-seed estimate
+    available_for_droppable = max(char_limit - immune_budget, 0)
+    per_node_budget = 800  # chars per droppable node (conservative estimate)
+
+    max_keep = available_for_droppable // per_node_budget
+    kept_droppable = droppable[:max_keep]  # shallowest max_keep nodes
+    dropped = droppable[max_keep:]         # deepest nodes — these are dropped
+
+    if not dropped:
+        return sorted_ids, ""
+
+    # Reconstruct sorted_ids preserving the original order among survivors.
+    kept_set: set[str] = set(immune) | {nid for _, nid in kept_droppable}
+    trimmed_ids = [nid for nid in sorted_ids if nid in kept_set]
+
+    # max_kept_depth = the deepest surviving node's depth → the cutoff threshold.
+    max_kept_depth = max((d for d, _ in kept_droppable), default=0)
+    warning = _TRUNCATION_WARNING_TEMPLATE.format(
+        max_depth=max_kept_depth,
+        n_dropped=len(dropped),
+    )
+    logger.warning(
+        "[context_builder] Hard-limit failsafe activated: dropped {} nodes "
+        "(depth > {}), {} nodes remain",
+        len(dropped), max_kept_depth, len(trimmed_ids),
+    )
+    return trimmed_ids, warning
+
+
+# ---------------------------------------------------------------------------
 # FR-E2: Context assembly
 # ---------------------------------------------------------------------------
 
@@ -221,6 +310,11 @@ def build_context(
 
     sorted_ids = sorted(combined.keys(), key=_sort_key)
 
+    # Sprint 10.1 — Strategy 2: apply hard char-limit failsafe BEFORE
+    # the per-token-budget soft truncation.  Drops highest-depth propagated
+    # nodes first; SIS seeds (depth=0) are immune.
+    sorted_ids, hard_limit_warning = _apply_hard_limit(sorted_ids, combined)
+
     # Build the fixed header
     header_parts = [
         "=== CHANGE REQUEST ===",
@@ -255,6 +349,16 @@ def build_context(
             f"Path from seed: {' → '.join(meta['path']) if meta['path'] else nid}",
             f"Source seed: {meta['source_seed']}",
         ]
+        # Sprint 10.1 — render collapsed CONTAINS children inline.
+        trace_obj = combined.get(nid)
+        if trace_obj is not None and trace_obj.collapsed_children:
+            collapsed = trace_obj.collapsed_children
+            child_preview = ", ".join(collapsed[:20])
+            if len(collapsed) > 20:
+                child_preview += f" ... (+{len(collapsed) - 20} more)"
+            block_lines.append(
+                f"Collapsed CONTAINS children ({len(collapsed)}): {child_preview}"
+            )
         if bl:
             block_lines.append(
                 "Traceability backlinks: " + ", ".join(f"{d}({s:.3f})" for d, s in bl[:3])
@@ -298,6 +402,10 @@ def build_context(
             "[context_builder] Truncated {} nodes (budget={} tokens, used={})",
             truncated, budget, used_tokens,
         )
+
+    # Sprint 10.1 — prepend hard-limit warning if the failsafe activated.
+    if hard_limit_warning:
+        context_parts.insert(0, hard_limit_warning + "\n")
 
     result = "\n".join(context_parts)
     logger.info(

@@ -36,7 +36,10 @@ from impactracer.pipeline.retriever import (
     build_metadata_cache,
     hybrid_search,
 )
+from impactracer.pipeline.seed_resolver import resolve_doc_to_code
 from impactracer.pipeline.synthesizer import synthesize_report
+from impactracer.pipeline.traceability_validator import validate_trace_resolutions
+from impactracer.pipeline.traversal_validator import validate_propagation
 from impactracer.pipeline.validator import validate_sis_candidates_batched
 from impactracer.shared.config import Settings
 from impactracer.shared.constants import severity_for_chain
@@ -72,15 +75,14 @@ class PipelineContext:
 
 
 def _build_graph_from_sqlite(conn: Any) -> nx.MultiDiGraph:
-    """Materialize the structural edge graph from SQLite (Step 0)."""
-    g = nx.MultiDiGraph()
-    rows = conn.execute(
-        "SELECT source_id, target_id, edge_type FROM structural_edges"
-    ).fetchall()
-    for src, tgt, etype in rows:
-        g.add_edge(src, tgt, edge_type=etype)
-    logger.info("[runner] Graph loaded: {} nodes, {} edges", g.number_of_nodes(), g.number_of_edges())
-    return g
+    """Materialize the structural edge graph from SQLite (Step 0).
+
+    Delegates to graph_bfs.build_graph_from_sqlite — kept here so
+    load_pipeline_context does not import graph_bfs at module level
+    (avoids circular import).
+    """
+    from impactracer.pipeline.graph_bfs import build_graph_from_sqlite
+    return build_graph_from_sqlite(conn)
 
 
 def load_pipeline_context(
@@ -355,10 +357,10 @@ def run_analysis(
         logger.info("[runner] Step 4: SIS validation DISABLED — {} seeds", len(sis_ids))
 
     # ------------------------------------------------------------------
-    # Step 5 — Resolve doc-chunk SIS to code seeds (Sprint 10 — gated)
+    # Step 5 — Resolve doc-chunk SIS to code seeds (FR-C6)
     # N9: Preserve score order within admitted set for metric ranking.
     # ------------------------------------------------------------------
-    logger.info("[runner] Step 5: Seed resolution (blind passthrough this sprint)")
+    logger.info("[runner] Step 5: Seed resolution")
     sis_id_set = set(sis_ids)
     # Sort admitted candidates by raw_reranker_score desc (absolute quality);
     # fall back to rrf_score for V0-V2 where reranker was disabled.
@@ -372,26 +374,221 @@ def run_analysis(
         logger.warning("[runner] Zero admitted candidates after gates — returning empty report")
         return _minimal_rejection_report("All candidates rejected by validation gates")
 
-    # ------------------------------------------------------------------
-    # Step 5b — Trace validation (LLM #3, Sprint 10 — gated)
-    # ------------------------------------------------------------------
-    if variant_flags.enable_trace_validation:
-        logger.info("[runner] Step 5b: Trace validation (stub — Sprint 10)")
+    resolutions, doc_to_code_map, direct_code_seeds = resolve_doc_to_code(
+        sis_ids=sis_ids,
+        conn=ctx.conn,
+        top_k=settings.top_k_traceability,
+    )
+    logger.info(
+        "[runner] Step 5: {} direct code seeds, {} doc-chunk resolutions",
+        len(direct_code_seeds), len(resolutions),
+    )
 
     # ------------------------------------------------------------------
-    # Step 6 — BFS propagation (Sprint 10 — gated)
+    # Step 5b — Trace validation (LLM #3, FR-C7)
     # ------------------------------------------------------------------
-    if variant_flags.enable_bfs:
-        logger.info("[runner] Step 6: BFS propagation (stub — Sprint 10)")
+    # low_conf tracks which resolved code seeds have PARTIAL decision.
+    low_conf: dict[str, bool] = {}
 
-    cis = _candidates_to_cis(admitted_candidates)
-    logger.info("[runner] CIS: {} SIS seeds, 0 propagated", len(cis.sis_nodes))
+    if variant_flags.enable_trace_validation and resolutions:
+        logger.info("[runner] Step 5b: Trace validation (LLM #3, batched max 5)")
+
+        # Hydrate doc texts from ChromaDB doc_meta_cache (pre-cached in ctx).
+        doc_text_by_id: dict[str, str] = {}
+        for r in resolutions:
+            doc_id = r["doc_id"]
+            if doc_id in ctx.doc_meta_cache:
+                doc_text_by_id[doc_id] = ctx.doc_meta_cache[doc_id].get("document", "")
+            else:
+                # Fallback: fetch from ChromaDB directly.
+                try:
+                    res = ctx.doc_col.get(ids=[doc_id], include=["documents"])
+                    if res["documents"]:
+                        doc_text_by_id[doc_id] = res["documents"][0]
+                except Exception:
+                    doc_text_by_id[doc_id] = ""
+
+        # Collect all resolved code IDs and fetch their metadata from SQLite.
+        all_resolved_code_ids: set[str] = set()
+        for r in resolutions:
+            all_resolved_code_ids.update(r["code_ids"])
+
+        code_meta_by_id: dict[str, dict] = {}
+        if all_resolved_code_ids:
+            placeholders = ",".join("?" * len(all_resolved_code_ids))
+            rows = ctx.conn.execute(
+                f"SELECT node_id, node_type, file_path, "
+                f"internal_logic_abstraction, source_code "
+                f"FROM code_nodes WHERE node_id IN ({placeholders})",
+                list(all_resolved_code_ids),
+            ).fetchall()
+            for row in rows:
+                code_meta_by_id[row[0]] = {
+                    "node_type": row[1],
+                    "file_path": row[2],
+                    "internal_logic_abstraction": row[3],
+                    "source_code": row[4],
+                }
+
+        validated_code_seeds, low_conf = validate_trace_resolutions(
+            resolutions=resolutions,
+            doc_text_by_id=doc_text_by_id,
+            code_meta_by_id=code_meta_by_id,
+            client=ctx.llm_client,
+            cr_interp=cr_interp,
+        )
+        logger.info(
+            "[runner] Step 5b: {} validated seeds ({} low-conf)",
+            len(validated_code_seeds), sum(1 for v in low_conf.values() if v),
+        )
+    elif resolutions:
+        # Blind resolution: take top-1 of each resolution as seed (no LLM #3).
+        validated_code_seeds = []
+        for r in resolutions:
+            if r["code_ids"]:
+                top_id = r["code_ids"][0]
+                validated_code_seeds.append(top_id)
+                low_conf[top_id] = True  # Blind = low confidence
+        logger.info(
+            "[runner] Step 5b: Trace validation DISABLED — {} blind seeds",
+            len(validated_code_seeds),
+        )
+    else:
+        validated_code_seeds = []
+
+    # Merge all code seeds (deduplicated, preserving direct_code_seeds order).
+    all_code_seeds = list(dict.fromkeys(direct_code_seeds + validated_code_seeds))
+    logger.info("[runner] Combined code seeds: {}", len(all_code_seeds))
 
     # ------------------------------------------------------------------
-    # Step 7 — Propagation validation (LLM #4, Sprint 10 — gated)
+    # Step 6 — BFS propagation (FR-D1)
     # ------------------------------------------------------------------
-    if variant_flags.enable_propagation_validation:
-        logger.info("[runner] Step 7: Propagation validation (stub — Sprint 10)")
+    if variant_flags.enable_bfs and all_code_seeds:
+        logger.info("[runner] Step 6: BFS propagation")
+        from impactracer.pipeline.graph_bfs import bfs_propagate, compute_confidence_tiers
+
+        # Build reranker score map for confidence tiering.
+        # doc-chunk reranker scores propagate to resolved code seeds via setdefault.
+        sis_reranker_map: dict[str, float] = {
+            c.node_id: c.reranker_score
+            for c in admitted_candidates
+            if c.node_id in set(all_code_seeds)
+        }
+        for r in resolutions:
+            for cid in r["code_ids"]:
+                sis_reranker_map.setdefault(cid, 0.0)
+
+        high_conf = compute_confidence_tiers(
+            all_code_seeds, sis_reranker_map, settings.bfs_high_conf_top_n
+        )
+        logger.info(
+            "[runner] High-confidence seeds (top-{}): {}",
+            settings.bfs_high_conf_top_n,
+            len(high_conf),
+        )
+
+        cis = bfs_propagate(
+            ctx.graph,
+            all_code_seeds,
+            high_confidence=high_conf,
+            low_confidence_seed_map=low_conf,
+        )
+        logger.info(
+            "[runner] BFS: {} SIS seeds, {} propagated nodes",
+            len(cis.sis_nodes), len(cis.propagated_nodes),
+        )
+    elif all_code_seeds:
+        # BFS disabled: CIS = seeds only.
+        cis = _candidates_to_cis(admitted_candidates)
+        if validated_code_seeds:
+            # Add validated code seeds that aren't already in admitted_candidates.
+            existing = set(cis.sis_nodes.keys())
+            for code_id in validated_code_seeds:
+                if code_id not in existing:
+                    cis.sis_nodes[code_id] = NodeTrace(
+                        depth=0,
+                        causal_chain=[],
+                        path=[code_id],
+                        source_seed=code_id,
+                        low_confidence_seed=low_conf.get(code_id, True),
+                    )
+        logger.info("[runner] Step 6: BFS DISABLED — {} SIS seeds", len(cis.sis_nodes))
+    else:
+        cis = _candidates_to_cis(admitted_candidates)
+        logger.info("[runner] Step 6: No code seeds — CIS from admitted candidates")
+
+    # ------------------------------------------------------------------
+    # Step 6.5 — Graph Collapse: CONTAINS sub-tree aggregation (Sprint 10.1)
+    # Must run AFTER BFS and BEFORE LLM #4 to reduce prompt token count.
+    # Only applies when BFS was enabled (propagated_nodes is non-empty).
+    # ------------------------------------------------------------------
+    if variant_flags.enable_bfs and cis.propagated_nodes:
+        from impactracer.pipeline.graph_bfs import collapse_contains_subtrees
+
+        # We need node_meta_by_id to check parent/child types.  Build a
+        # lightweight version from the SQLite code_nodes table for all CIS ids.
+        _collapse_ids = cis.all_node_ids()
+        _collapse_meta: dict[str, dict] = {}
+        if _collapse_ids:
+            _placeholders = ",".join("?" * len(_collapse_ids))
+            _rows = ctx.conn.execute(
+                f"SELECT node_id, node_type FROM code_nodes "
+                f"WHERE node_id IN ({_placeholders})",
+                _collapse_ids,
+            ).fetchall()
+            for _row in _rows:
+                _collapse_meta[_row[0]] = {"node_type": _row[1]}
+
+        pre_collapse_propagated = len(cis.propagated_nodes)
+        cis = collapse_contains_subtrees(cis, ctx.graph, _collapse_meta)
+        logger.info(
+            "[runner] Step 6.5: Graph collapse reduced propagated_nodes "
+            "from {} to {} (removed {} CONTAINS-only leaves)",
+            pre_collapse_propagated,
+            len(cis.propagated_nodes),
+            pre_collapse_propagated - len(cis.propagated_nodes),
+        )
+
+    # ------------------------------------------------------------------
+    # Step 7 — Propagation validation (LLM #4, FR-D2)
+    # ------------------------------------------------------------------
+    if variant_flags.enable_propagation_validation and cis.propagated_nodes:
+        logger.info(
+            "[runner] Step 7: Propagation validation (LLM #4, {} propagated nodes)",
+            len(cis.propagated_nodes),
+        )
+        # Fetch node metadata for all CIS nodes (SIS + propagated).
+        all_cis_ids = cis.all_node_ids()
+        node_meta_by_id: dict[str, dict] = {}
+        if all_cis_ids:
+            placeholders = ",".join("?" * len(all_cis_ids))
+            rows = ctx.conn.execute(
+                f"SELECT node_id, node_type, file_path, "
+                f"internal_logic_abstraction, source_code "
+                f"FROM code_nodes WHERE node_id IN ({placeholders})",
+                all_cis_ids,
+            ).fetchall()
+            for row in rows:
+                node_meta_by_id[row[0]] = {
+                    "node_type": row[1],
+                    "file_path": row[2],
+                    "internal_logic_abstraction": row[3],
+                    "source_code": row[4],
+                }
+
+        cis = validate_propagation(
+            cis=cis,
+            cr_interp=cr_interp,
+            node_meta_by_id=node_meta_by_id,
+            client=ctx.llm_client,
+        )
+        logger.info(
+            "[runner] Post-LLM #4 CIS: {} SIS + {} propagated = {} total",
+            len(cis.sis_nodes), len(cis.propagated_nodes),
+            len(cis.sis_nodes) + len(cis.propagated_nodes),
+        )
+    elif variant_flags.enable_propagation_validation:
+        logger.info("[runner] Step 7: Propagation validation SKIPPED (no propagated nodes)")
 
     # ------------------------------------------------------------------
     # Step 8 — Backlinks + Context (FR-E1, FR-E2)
@@ -399,12 +596,26 @@ def run_analysis(
     logger.info("[runner] Step 8: Build context")
     all_node_ids = cis.all_node_ids()
 
-    # Build node_types map from admitted candidates (needed for FF-3 routing)
+    # Build node_types map from admitted candidates (needed for FF-3 routing).
+    # Also query SQLite for propagated nodes not in admitted_candidates.
     node_types: dict[str, str] = {}
     node_file_paths: dict[str, str] = {}
     for c in admitted_candidates:
         node_types[c.node_id] = c.node_type
         node_file_paths[c.node_id] = c.file_path or ""
+
+    # Propagated nodes may not be in admitted_candidates — fetch from SQLite.
+    missing_ids = [nid for nid in all_node_ids if nid not in node_types]
+    if missing_ids:
+        placeholders = ",".join("?" * len(missing_ids))
+        rows = ctx.conn.execute(
+            f"SELECT node_id, node_type, file_path FROM code_nodes "
+            f"WHERE node_id IN ({placeholders})",
+            missing_ids,
+        ).fetchall()
+        for row in rows:
+            node_types[row[0]] = row[1]
+            node_file_paths[row[0]] = row[2] or ""
 
     # FF-3: bidirectional backlink routing by node type
     backlinks = fetch_backlinks(all_node_ids, node_types, ctx.conn, settings.top_k_backlinks_per_node)

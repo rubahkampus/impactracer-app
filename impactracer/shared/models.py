@@ -337,6 +337,10 @@ class NodeTrace:
     path: list[str]
     source_seed: str
     low_confidence_seed: bool = False
+    # Sprint 10.1 — Graph Collapse (Strategy 1): after BFS, parent nodes whose
+    # CONTAINS-only children are in the CIS receive those children's IDs here.
+    # The children are removed from propagated_nodes to avoid token explosion.
+    collapsed_children: list[str] = field(default_factory=list)
 
 
 @dataclass
