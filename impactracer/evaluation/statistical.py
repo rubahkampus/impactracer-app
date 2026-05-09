@@ -1,55 +1,38 @@
-"""Single pre-registered Wilcoxon test: V7 vs V5 on F1@10.
+"""Single pre-registered Wilcoxon test: V7 vs V5 on Total F1 (set-level).
 
-Per thesis Bab III.7.5, the formal statistical test is restricted to one
-paired comparison. V0..V4, V6, and V6.5 are retained for descriptive
-ablation plotting but are not part of the hypothesis test. No
-multiple-comparison correction is applied because exactly one test is
-performed.
+Crucible Fix 4 (AV-1): primary metric changed from F1@10 to ``f1_set``.
+F1@10 is structurally unable to distinguish a graph flood (V6's 372-node
+CIS) from a focused result (V4's 8-node CIS). Total F1 (set-level) is
+unbounded and therefore correctly attributes precision collapse to V6
+and precision recovery to V7.
 
-Phase 3.4 Protocol (A-6/A-5):
+PROTOCOL (pre-registered):
+  - Test:    one-sided paired Wilcoxon signed-rank.
+  - Pair:    one CR with valid f1_set under both V5 and V7.
+  - Metric:  ``f1_set`` (set-level F1 against ground-truth entity set).
+  - N_min:   15 complete pairs. Below this, decline to report p-value.
+  - Alpha:   0.05.
+  - Effect:  Cliff's δ as non-parametric effect-size companion.
+  - No multiple-comparison correction (one and only one test is run).
+  - Incomplete-pair protocol: rows missing either V5 or V7 f1_set are
+    excluded from the test. Substituting 0 or filling-forward is
+    forbidden.
 
-PAIRED-TEST PROTOCOL
---------------------
-1. The unit of pairing is a single CR. For each CR, both V5 and V7 must
-   produce a valid F1@10 score. If EITHER run fails (infrastructure error,
-   API timeout, empty CIS), that CR is EXCLUDED from the paired test.
-   Substituting 0 or filling-forward is forbidden.
-
-2. Minimum paired N: ``MIN_PAIRED_N = 15``. If fewer than 15 complete
-   pairs are available after exclusion, ``run_primary_test`` raises
-   ``InsufficientPairsError`` and declines to report a p-value. The
-   thesis must report the achieved N and acknowledge the limitation.
-
-3. EXPECTED POWER ANALYSIS (pre-registered):
-   - N=20 pairs (target), one-sided α=0.05
-   - Expected effect size δ ≈ 0.2 (small-to-medium, based on literature
-     comparing retrieval-only vs retrieval+propagation CIA systems)
-   - Expected power ≈ 0.60 under the Wilcoxon signed-rank test
-   - This is acknowledged as moderate power. The thesis reports the
-     power estimate and acknowledges it as a limitation of N=20.
-   - If achieved N < 20 due to exclusions, power may drop to < 0.50.
-
-4. METRICS TARGET: F1@K is computed against ``cis.all_node_ids()`` order
-   (Phase 3.2 / A-NEW-2), NOT against ``report.impacted_nodes``.
-   See metrics.py for the invariant.
-
-5. INCOMPLETE-PAIR HANDLING:
-   - Collect results for all 20 CRs × all variants in a DataFrame.
-   - Filter to rows where BOTH V5 and V7 f1_at_10 are non-null and non-NaN.
-   - Rows failing this filter are logged with reason (timeout/error/empty-CIS).
-   - The paired test runs on the filtered set only.
-
-Reference: 10_evaluation_protocol.md §4.
+Reference: 10_evaluation_protocol.md §4 (revised under Crucible Plan).
 """
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
+from scipy.stats import wilcoxon
 
 ALPHA: float = 0.05
 PRIMARY_COMPARISON: tuple[str, str] = ("V7", "V5")
-MIN_PAIRED_N: int = 15  # below this, decline to report p-value (A-6)
+PRIMARY_METRIC: str = "f1_set"
+MIN_PAIRED_N: int = 15
 
 
 class InsufficientPairsError(RuntimeError):
@@ -57,41 +40,109 @@ class InsufficientPairsError(RuntimeError):
 
 
 def cliffs_delta(a: np.ndarray, b: np.ndarray) -> float:
-    """Non-parametric effect size in [-1, 1].
+    """Cliff's δ effect size: ``(#(a > b) - #(a < b)) / (n_a * n_b)``.
 
-    Cliff's δ = (# pairs where a > b) - (# pairs where a < b) / n²
-    Positive δ means a tends to be larger than b.
+    Range: [-1, 1]. Positive δ means group ``a`` tends to score higher.
+    Returns 0.0 when both arrays are empty (degenerate).
     """
-    raise NotImplementedError("Sprint 11")
+    a_arr = np.asarray(a, dtype=float)
+    b_arr = np.asarray(b, dtype=float)
+    if a_arr.size == 0 or b_arr.size == 0:
+        return 0.0
+    greater = 0
+    less = 0
+    for x in a_arr:
+        greater += int(np.sum(x > b_arr))
+        less += int(np.sum(x < b_arr))
+    return (greater - less) / (a_arr.size * b_arr.size)
 
 
 def pairwise_wilcoxon(
     df: pd.DataFrame,
     var_a: str,
     var_b: str,
+    metric: str = PRIMARY_METRIC,
 ) -> dict[str, float | int]:
-    """One-sided paired Wilcoxon signed-rank test on F1@10.
+    """One-sided paired Wilcoxon signed-rank test on ``metric``.
 
-    Phase 3.4: respects the incomplete-pair protocol — only complete pairs
-    (both var_a and var_b non-null) are included.
+    Expected DataFrame layout: rows = CRs, columns include
+    ``f"{variant_id}_{metric}"`` (e.g. ``"V5_f1_set"``, ``"V7_f1_set"``).
 
-    Returns a dict with p_value, statistic, n, cliffs_delta, median_diff.
+    Args:
+        df: per-CR results table.
+        var_a, var_b: variant IDs (e.g. "V7", "V5"). Test is "var_a > var_b".
+        metric: metric name suffix (default 'f1_set').
 
-    Raises InsufficientPairsError if complete n < MIN_PAIRED_N.
+    Returns dict with: p_value, statistic, n, cliffs_delta, median_diff.
+
+    Raises InsufficientPairsError if fewer than MIN_PAIRED_N complete pairs.
     """
-    raise NotImplementedError("Sprint 11")
+    col_a = f"{var_a}_{metric}"
+    col_b = f"{var_b}_{metric}"
+    if col_a not in df.columns or col_b not in df.columns:
+        raise KeyError(f"Missing columns: need {col_a} and {col_b}")
+
+    pairs = df[[col_a, col_b]].dropna()
+    pairs = pairs[
+        ~pairs[col_a].apply(lambda x: isinstance(x, float) and math.isnan(x))
+        & ~pairs[col_b].apply(lambda x: isinstance(x, float) and math.isnan(x))
+    ]
+    n = len(pairs)
+    if n < MIN_PAIRED_N:
+        raise InsufficientPairsError(
+            f"Only {n} complete pairs for {var_a} vs {var_b} on {metric}; "
+            f"need >= {MIN_PAIRED_N}. Reporting suppressed per protocol."
+        )
+
+    a = pairs[col_a].to_numpy(dtype=float)
+    b = pairs[col_b].to_numpy(dtype=float)
+    diff = a - b
+
+    # One-sided alternative: var_a is greater than var_b.
+    res = wilcoxon(diff, alternative="greater", zero_method="wilcox", correction=False)
+    statistic = float(res.statistic)
+    p_value = float(res.pvalue)
+
+    median_diff = float(np.median(diff))
+    delta = cliffs_delta(a, b)
+
+    return {
+        "p_value": p_value,
+        "statistic": statistic,
+        "n": n,
+        "cliffs_delta": delta,
+        "median_diff": median_diff,
+    }
 
 
 def run_primary_test(df: pd.DataFrame) -> dict[str, float | int | str | bool]:
-    """Execute the single pre-registered V7 vs V5 test.
+    """Execute the single pre-registered V7 vs V5 test on f1_set.
 
-    Phase 3.4 protocol:
-    - Filters to complete pairs (V5 and V7 both have valid f1_at_10).
-    - Raises InsufficientPairsError if n < MIN_PAIRED_N.
-    - Reports achieved N alongside p-value and effect size.
+    Returns a dict with keys: hypothesis, variant_a, variant_b, metric,
+    p_value, statistic, cliffs_delta, median_diff, n, accepted,
+    achieved_power_note.
 
-    Returns a dict with keys:
-        hypothesis, variant_a, variant_b, p_value, statistic,
-        cliffs_delta, median_diff, n, accepted, achieved_power_note.
+    Raises InsufficientPairsError if n < MIN_PAIRED_N.
     """
-    raise NotImplementedError("Sprint 11")
+    var_a, var_b = PRIMARY_COMPARISON
+    res = pairwise_wilcoxon(df, var_a, var_b, metric=PRIMARY_METRIC)
+    accepted = res["p_value"] < ALPHA
+    return {
+        "hypothesis": (
+            f"{var_a}.{PRIMARY_METRIC} > {var_b}.{PRIMARY_METRIC} "
+            f"(one-sided paired Wilcoxon)"
+        ),
+        "variant_a": var_a,
+        "variant_b": var_b,
+        "metric": PRIMARY_METRIC,
+        "p_value": res["p_value"],
+        "statistic": res["statistic"],
+        "cliffs_delta": res["cliffs_delta"],
+        "median_diff": res["median_diff"],
+        "n": res["n"],
+        "accepted": accepted,
+        "achieved_power_note": (
+            f"N={res['n']} complete pairs at alpha={ALPHA}; "
+            "pre-registered moderate-power design (~0.60 at delta=0.2)."
+        ),
+    }

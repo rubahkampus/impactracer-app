@@ -170,6 +170,9 @@ _TRUNCATION_WARNING_TEMPLATE = (
 )
 
 
+_SEVERITY_RANK_MAP = {"Tinggi": 0, "Menengah": 1, "Rendah": 2}
+
+
 def _apply_hard_limit(
     sorted_ids: list[str],
     combined: dict,
@@ -178,70 +181,74 @@ def _apply_hard_limit(
 ) -> tuple[list[str], str]:
     """Return (trimmed_ids, warning_text) after applying the hard char limit.
 
-    Drops highest-depth propagated nodes first.  SIS seeds (depth=0) are
-    immune and always survive the trim.
+    Crucible Fix 7 (AV-6) — severity-aware truncation.
+
+    Sort key for droppable nodes: (severity_rank ASC, depth DESC, node_id).
+    Tinggi (contract dependencies) always survive even at depth 3; Rendah
+    (composition) at depth 2 is dropped before Tinggi at depth 3.
+
+    SIS seeds (depth=0) remain immune (highest priority).
 
     Algorithm:
-    1. Estimate rough per-node char cost = len(node_id) * 10 (conservative
-       proxy — the real block is built later; we just need to pick which
-       nodes to drop, not the exact budget).
-    2. Sort candidates-for-dropping by depth descending, then node_id.
-    3. Drop until the rough total is within char_limit.
-    4. If the limit is already satisfied, return unchanged.
+    1. Proxy per-node cost = 2000 chars (matches typical block size).
+    2. If full set fits, return unchanged.
+    3. Sort droppable by (severity_rank ASC, depth DESC, node_id) so the
+       lowest-severity / deepest nodes are dropped first.
+    4. Keep as many as the budget allows; report the worst surviving
+       severity in the warning text so the LLM #5 prompt acknowledges it.
     """
-    # Phase 1 fix (F-2/E-3): raise proxy from 500→2000 chars/node.
-    # The previous 500-char early-exit underestimated real block size (which
-    # averages 2000-4000 chars including source snippet, backlinks, metadata).
-    # At 500 chars/node the guard almost never triggered before the LLM
-    # received an oversize context. Using 2000 chars/node is a conservative
-    # lower bound that fires well before the actual overflow point.
     _PROXY_CHARS_PER_NODE = 2000
     if len(sorted_ids) * _PROXY_CHARS_PER_NODE <= char_limit:
         return sorted_ids, ""
 
-    # Separate immune nodes (depth=0 SIS seeds) from droppable (depth>0).
     immune: list[str] = []
-    droppable: list[tuple[int, str]] = []  # (depth, node_id) for sorting
+    droppable: list[tuple[int, int, str]] = []  # (severity_rank, depth, node_id)
     for nid in sorted_ids:
         trace = combined.get(nid)
-        depth = trace.depth if trace is not None else 0
-        if depth == 0:
+        if trace is None or trace.depth == 0:
             immune.append(nid)
-        else:
-            droppable.append((depth, nid))
+            continue
+        sev_rank = _SEVERITY_RANK_MAP.get(severity_for_chain(trace.causal_chain), 2)
+        droppable.append((sev_rank, trace.depth, nid))
 
-    # Sort droppable by depth ascending so the shallowest (highest priority)
-    # nodes are kept first.  Deepest nodes appear at the end and are dropped.
-    droppable.sort(key=lambda t: (t[0], t[1]))
+    # Sort ascending by (severity_rank, depth, nid). Lowest severity_rank
+    # = highest priority = head; deepest = tail. Among equal severity,
+    # shallowest comes first (kept first), deepest is dropped first. Among
+    # equal severity AND depth, alphabetical by node_id is the tie-breaker.
+    droppable.sort(key=lambda t: (t[0], t[1], t[2]))
 
-    # Allow up to char_limit chars; reserve space for immune nodes.
-    # Each immune node gets a guaranteed budget slot.
-    # Per-node budget raised 800→2000 to match the corrected proxy above.
     immune_budget = len(immune) * _PROXY_CHARS_PER_NODE
     available_for_droppable = max(char_limit - immune_budget, 0)
-    per_node_budget = _PROXY_CHARS_PER_NODE  # chars per droppable node
+    per_node_budget = _PROXY_CHARS_PER_NODE
 
     max_keep = available_for_droppable // per_node_budget
-    kept_droppable = droppable[:max_keep]  # shallowest max_keep nodes
-    dropped = droppable[max_keep:]         # deepest nodes — these are dropped
+    kept_droppable = droppable[:max_keep]
+    dropped = droppable[max_keep:]
 
     if not dropped:
         return sorted_ids, ""
 
-    # Reconstruct sorted_ids preserving the original order among survivors.
-    kept_set: set[str] = set(immune) | {nid for _, nid in kept_droppable}
+    kept_set: set[str] = set(immune) | {nid for _, _, nid in kept_droppable}
     trimmed_ids = [nid for nid in sorted_ids if nid in kept_set]
 
-    # max_kept_depth = the deepest surviving node's depth → the cutoff threshold.
-    max_kept_depth = max((d for d, _ in kept_droppable), default=0)
-    warning = _TRUNCATION_WARNING_TEMPLATE.format(
-        max_depth=max_kept_depth,
-        n_dropped=len(dropped),
+    # Report the worst surviving severity and the count dropped.
+    if kept_droppable:
+        worst_sev_rank_kept = max(d[0] for d in kept_droppable)
+    else:
+        worst_sev_rank_kept = 0
+    sev_label = {0: "Tinggi", 1: "Menengah", 2: "Rendah"}[worst_sev_rank_kept]
+    warning = (
+        f"[SYSTEM WARNING: The impact graph was too massive for the LLM "
+        f"prompt. {len(dropped)} nodes were truncated from this prompt "
+        f"(severity-aware: lowest-severity, deepest-first). The deepest "
+        f"surviving severity tier is '{sev_label}'. Note: the FULL impact "
+        f"set is still emitted in ImpactReport.impacted_nodes — this "
+        f"truncation only affects the prompt window, not the report.]"
     )
     logger.warning(
-        "[context_builder] Hard-limit failsafe activated: dropped {} nodes "
-        "(depth > {}), {} nodes remain",
-        len(dropped), max_kept_depth, len(trimmed_ids),
+        "[context_builder] Hard-limit failsafe (severity-aware): dropped {} "
+        "nodes, {} nodes remain in prompt; worst surviving severity={}",
+        len(dropped), len(trimmed_ids), sev_label,
     )
     return trimmed_ids, warning
 
@@ -250,7 +257,10 @@ def _apply_hard_limit(
 # FR-E2: Context assembly
 # ---------------------------------------------------------------------------
 
-_SEVERITY_RANK = {"Tinggi": 0, "Menengah": 1, "Rendah": 2}
+# Severity rank used by the pre-truncation prompt-priority sort (group 1).
+# Identical to _SEVERITY_RANK_MAP defined earlier in the module — kept as a
+# named alias so the existing _sort_key reads idiomatically.
+_SEVERITY_RANK = _SEVERITY_RANK_MAP
 
 
 def build_context(
@@ -335,6 +345,23 @@ def build_context(
     # nodes first; SIS seeds (depth=0) are immune.
     sorted_ids, hard_limit_warning = _apply_hard_limit(sorted_ids, combined)
 
+    # Crucible E2E Schema Alignment: emit the canonical file set so LLM #5
+    # knows EXACTLY which files it must produce justifications for.
+    file_set: list[str] = []
+    seen_fp: set[str] = set()
+    for nid in sorted_ids:
+        fp = (node_file_paths or {}).get(nid, "")
+        if fp and fp not in seen_fp:
+            seen_fp.add(fp)
+            file_set.append(fp)
+
+    file_block_lines = [
+        "",
+        "=== IMPACTED FILES (write a file_justifications row for EACH of these) ===",
+    ]
+    for fp in file_set:
+        file_block_lines.append(f"  - {fp}")
+
     # Build the fixed header
     header_parts = [
         "=== CHANGE REQUEST ===",
@@ -344,6 +371,7 @@ def build_context(
         json.dumps(cr_interp.model_dump(), ensure_ascii=False, indent=2),
         "",
         f"=== IMPACTED NODE COUNT: {len(sorted_ids)} ===",
+        *file_block_lines,
         "",
     ]
     header = "\n".join(header_parts)
@@ -355,22 +383,32 @@ def build_context(
         meta = node_meta[nid]
         bl = backlinks.get(nid, [])
         snippet = snippets.get(nid, "")
-        chain_display = " → ".join(meta["causal_chain"]) if meta["causal_chain"] else "[]"
+        chain_display = " -> ".join(meta["causal_chain"]) if meta["causal_chain"] else "[]"
         file_path = (node_file_paths or {}).get(nid, "")
         node_type = (node_types or {}).get(nid, "DocChunk")
+        trace_obj = combined.get(nid)
         block_lines = [
             f"--- NODE: {nid} ---",
             f"node_type: {node_type}",
-            f"file_path: {file_path if file_path else '(doc chunk — no source file)'}",
+            f"file_path: {file_path if file_path else '(doc chunk - no source file)'}",
             f"Severity: {meta['severity']}",
             f"Depth: {meta['depth']}",
-            f"Causal chain (JSON array for output): {json.dumps(meta['causal_chain'])}",
             f"Causal chain (readable): {chain_display}",
-            f"Path from seed: {' → '.join(meta['path']) if meta['path'] else nid}",
+            f"Path from seed: {' -> '.join(meta['path']) if meta['path'] else nid}",
             f"Source seed: {meta['source_seed']}",
         ]
-        # Sprint 10.1 — render collapsed CONTAINS children inline.
-        trace_obj = combined.get(nid)
+        # Crucible Fix 3: render the pre-recorded validator justification so
+        # LLM #5 can ground its executive summary in real validator
+        # reasoning (not hallucinated retrospective justification).
+        if trace_obj is not None and trace_obj.justification:
+            src_label = trace_obj.justification_source or "validator"
+            block_lines.append(
+                f"Justification ({src_label}): {trace_obj.justification}"
+            )
+        if trace_obj is not None and trace_obj.mechanism_of_impact:
+            block_lines.append(
+                f"Mechanism of impact (LLM #2): {trace_obj.mechanism_of_impact}"
+            )
         if trace_obj is not None and trace_obj.collapsed_children:
             collapsed = trace_obj.collapsed_children
             child_preview = ", ".join(collapsed[:20])

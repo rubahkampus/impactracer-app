@@ -183,24 +183,21 @@ def step_3_7_plausibility_and_affinity(
     cr_interp: CRInterpretation,
     settings: object,
 ) -> list[Candidate]:
-    """Rescore by layer affinity, then enforce file-density gate.
+    """Rescore by layer affinity, then enforce density-only plausibility gate.
 
     Phase A: multiply reranker_score by _affinity_factor(c, cr_interp).
-    Phase B: cap per-file admissions at plausibility_gate_max_per_file
-             for files whose fraction exceeds plausibility_gate_density_threshold,
-             exempting candidates whose name matches any named_entry_points pattern.
+    Phase B (Crucible Fix 9): drop CODE candidates from files whose fraction
+    of total code candidates exceeds plausibility_gate_density_threshold.
+    Named-entry-point matches are exempt. The previous per-file admission
+    cap (max_per_file=2) was removed because it arbitrarily rejected genuine
+    multi-symbol impacts; density-based protection alone catches the
+    pathological "one over-indexed file dominates retrieval" case.
 
     B3 fix: doc chunk candidates are ALWAYS exempt from the file-density cap.
-    Before the B3 fix, all doc chunks that had a populated file_path (e.g.,
-    "docs/sdd.md") would group together and potentially trigger the density cap
-    as a false positive.  Doc chunks are documentation artefacts, not source
-    code files — the density cap exists to prevent one over-indexed TypeScript
-    file from flooding the SIS, not to filter documentation.
 
     Blueprint §4 Step 3.7.
     """
     density_threshold: float = settings.plausibility_gate_density_threshold  # type: ignore[attr-defined]
-    max_per_file: int = settings.plausibility_gate_max_per_file  # type: ignore[attr-defined]
 
     # Phase A: affinity rescoring (all candidates, including doc chunks)
     for c in candidates:
@@ -210,52 +207,47 @@ def step_3_7_plausibility_and_affinity(
     # Re-sort descending after rescoring
     candidates = sorted(candidates, key=lambda c: c.reranker_score, reverse=True)
 
-    # Phase B: file-density gate (code candidates only)
-    total = len(candidates)
-    if total == 0:
+    if not candidates:
         return candidates
 
     # B3: only count CODE candidates toward the density denominator.
-    # Doc chunk candidates are always admitted from the density gate.
     code_candidates = [c for c in candidates if c.collection == "code_units"]
     total_code = len(code_candidates)
 
     named_patterns = [p.lower() for p in cr_interp.named_entry_points]
 
+    if total_code == 0:
+        return candidates
+
+    file_density = Counter(c.file_path for c in code_candidates)
+    flooded_files: set[str] = {
+        fp for fp, count in file_density.items()
+        if count / total_code > density_threshold
+    }
+
+    if not flooded_files:
+        return candidates
+
     result: list[Candidate] = []
-    admitted_per_file: Counter = Counter()
-
-    if total_code > 0:
-        file_density = Counter(c.file_path for c in code_candidates)
-
     for c in candidates:
-        # B3: doc chunks always pass the density gate
         if c.collection == "doc_chunks":
             result.append(c)
             continue
 
-        # Named entry point exemption: admit unconditionally
+        if c.file_path not in flooded_files:
+            result.append(c)
+            continue
+
         if named_patterns and _matches_any_named(c.name, named_patterns):
             result.append(c)
-            admitted_per_file[c.file_path] += 1
             continue
 
-        # Check density gate using code-only denominator
-        file_frac = file_density[c.file_path] / total_code if total_code > 0 else 0.0
-        if (
-            file_frac > density_threshold
-            and admitted_per_file[c.file_path] >= max_per_file
-        ):
-            logger.debug(
-                "[gates 3.7] Dropped {} (file_frac={:.2f} > threshold={}, "
-                "admitted={}/{})",
-                c.node_id, file_frac, density_threshold,
-                admitted_per_file[c.file_path], max_per_file,
-            )
-            continue
-
-        result.append(c)
-        admitted_per_file[c.file_path] += 1
+        logger.debug(
+            "[gates 3.7] Dropped {} (file {} contains {:.0%} of code "
+            "candidates, exceeds density threshold {:.0%})",
+            c.node_id, c.file_path,
+            file_density[c.file_path] / total_code, density_threshold,
+        )
 
     return result
 

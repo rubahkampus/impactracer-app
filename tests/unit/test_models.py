@@ -109,15 +109,19 @@ def test_candidate_verdict_round_trip() -> None:
 
 
 def test_candidate_verdict_truncation() -> None:
-    """function_purpose > 150 chars is silently truncated."""
+    """function_purpose > 200 chars is silently truncated.
+
+    Crucible Fix 3: max_length raised 150 -> 200 to allow richer
+    function purposes for distributed-justification rendering.
+    """
     v = CandidateVerdict(
         node_id="x",
-        function_purpose="X" * 200,
+        function_purpose="X" * 300,
         mechanism_of_impact="",
         justification="Rejected.",
         confirmed=False,
     )
-    assert len(v.function_purpose) == 150
+    assert len(v.function_purpose) == 200
 
 
 def test_sis_validation_result_round_trip() -> None:
@@ -214,10 +218,16 @@ def test_impacted_node_round_trip() -> None:
 
 
 def test_impact_report_round_trip() -> None:
-    """ImpactReport -> JSON -> ImpactReport is identity."""
+    """ImpactReport -> JSON -> ImpactReport is identity at the serialized level.
+
+    Crucible E2E Schema Alignment: ImpactedNode is a backward-compat
+    subclass of ImpactedEntity. After round-trip, Pydantic re-instantiates
+    using the field-typed class (ImpactedEntity), so we compare on the
+    serialized JSON form, which is the contract that matters for the API.
+    """
     report = _make_impact_report()
     restored = ImpactReport.model_validate_json(report.model_dump_json())
-    assert restored == report
+    assert restored.model_dump() == report.model_dump()
 
 
 def test_impact_report_executive_summary_truncation() -> None:
@@ -393,6 +403,9 @@ def test_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.min_traceability_similarity == 0.40
     assert s.degenerate_embed_min_length == 50
     assert s.bfs_high_conf_top_n == 5
-    assert s.min_reranker_score_for_validation == 0.15  # Phase 2.6: raised from 0.0
-    assert s.plausibility_gate_density_threshold == 0.35
-    assert s.plausibility_gate_max_per_file == 2
+    # Crucible Fix 9: score floor demoted to a sanity-only gate (-2.0).
+    assert s.min_reranker_score_for_validation == -2.0
+    # Crucible Fix 9: density threshold raised from 0.35 -> 0.50.
+    assert s.plausibility_gate_density_threshold == 0.50
+    # Crucible Fix 9: plausibility_gate_max_per_file removed entirely.
+    assert not hasattr(s, "plausibility_gate_max_per_file")

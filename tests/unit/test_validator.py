@@ -306,8 +306,10 @@ def test_prompt_addition_cr_forward_looking_instruction():
 def test_validate_empty_candidates():
     cr = _make_cr()
     client = MagicMock()
-    result = validate_sis_candidates_batched(cr, [], client)
-    assert result == []
+    ids, justifications, degraded = validate_sis_candidates_batched(cr, [], client)
+    assert ids == []
+    assert justifications == {}
+    assert degraded is False
     client.call.assert_not_called()
 
 
@@ -317,9 +319,11 @@ def test_validate_single_batch_all_confirmed():
     all_ids = [c.node_id for c in candidates]
     client = _mock_llm(confirmed_ids=all_ids)
 
-    result = validate_sis_candidates_batched(cr, candidates, client)
-    assert set(result) == set(all_ids)
+    ids, justifications, degraded = validate_sis_candidates_batched(cr, candidates, client)
+    assert set(ids) == set(all_ids)
     assert client.call.call_count == 1
+    assert all(nid in justifications for nid in ids)
+    assert degraded is False
 
 
 def test_validate_single_batch_partial_confirm():
@@ -329,10 +333,10 @@ def test_validate_single_batch_partial_confirm():
     c3 = _make_code_candidate(node_id="fn3")
     client = _mock_llm(confirmed_ids=["fn1", "fn3"])
 
-    result = validate_sis_candidates_batched(cr, [c1, c2, c3], client)
-    assert "fn1" in result
-    assert "fn2" not in result
-    assert "fn3" in result
+    ids, _justs, _deg = validate_sis_candidates_batched(cr, [c1, c2, c3], client)
+    assert "fn1" in ids
+    assert "fn2" not in ids
+    assert "fn3" in ids
 
 
 def test_validate_multiple_batches():
@@ -341,10 +345,10 @@ def test_validate_multiple_batches():
     all_ids = [c.node_id for c in candidates]
     client = _mock_llm(confirmed_ids=all_ids)
 
-    result = validate_sis_candidates_batched(cr, candidates, client)
-    # 11 candidates → 3 batches (5+5+1)
+    ids, _justs, _deg = validate_sis_candidates_batched(cr, candidates, client)
+    # 11 candidates -> 3 batches (5+5+1)
     assert client.call.call_count == 3
-    assert set(result) == set(all_ids)
+    assert set(ids) == set(all_ids)
 
 
 def test_validate_call_name_is_validate_sis():
@@ -360,35 +364,49 @@ def test_validate_call_name_is_validate_sis():
     assert call_kwargs[1]["call_name"] == "validate_sis" or call_kwargs[0][3] == "validate_sis"
 
 
-def test_validate_fail_open_on_empty_verdicts():
+def test_validate_fail_closed_on_empty_verdicts():
+    """Crucible Fix 1 (FF-1): missing verdict -> DROP (was admit)."""
     cr = _make_cr()
     candidates = [_make_code_candidate(node_id="fn1")]
     client = MagicMock()
     client.call.return_value = SISValidationResult(verdicts=[])
 
-    result = validate_sis_candidates_batched(cr, candidates, client)
-    # B2 fail-open: all candidates admitted when no verdicts returned
-    assert result == ["fn1"]
+    ids, _justs, _deg = validate_sis_candidates_batched(cr, candidates, client)
+    # Fail-closed: candidate with no verdict is dropped, not admitted.
+    assert ids == []
 
 
-def test_validate_fail_open_per_node_partial_coverage():
-    """B2: per-node fail-open — nodes with NO verdict are admitted."""
+def test_validate_fail_closed_per_node_partial_coverage():
+    """Crucible Fix 1 (FF-1): nodes with NO verdict are DROPPED (fail-closed)."""
     cr = _make_cr()
     c1 = _make_code_candidate(node_id="fn1")
     c2 = _make_code_candidate(node_id="fn2")
     c3 = _make_code_candidate(node_id="fn3")
     client = MagicMock()
-    # LLM only returns verdicts for fn1 (confirmed) and fn3 (rejected)
-    # fn2 has NO verdict at all → must be admitted (fail-open)
     client.call.return_value = SISValidationResult(verdicts=[
         _make_verdict("fn1", True),
         _make_verdict("fn3", False),
     ])
 
-    result = validate_sis_candidates_batched(cr, [c1, c2, c3], client)
-    assert "fn1" in result   # explicitly confirmed
-    assert "fn2" in result   # no verdict → fail-open → admitted
-    assert "fn3" not in result  # explicitly rejected
+    ids, _justs, _deg = validate_sis_candidates_batched(cr, [c1, c2, c3], client)
+    assert "fn1" in ids       # explicitly confirmed
+    assert "fn2" not in ids   # no verdict -> fail-CLOSED -> dropped
+    assert "fn3" not in ids   # explicitly rejected
+
+
+def test_validate_batch_exception_drops_batch_continues():
+    """Crucible Amendment 1: batch exception -> drop batch, continue."""
+    cr = _make_cr()
+    # Two batches: 5 + 1. First raises, second succeeds.
+    candidates = [_make_code_candidate(node_id=f"fn{i}") for i in range(6)]
+    client = MagicMock()
+    second_ok = SISValidationResult(verdicts=[_make_verdict("fn5", True)])
+    client.call.side_effect = [RuntimeError("rate limit exhausted"), second_ok]
+
+    ids, _justs, degraded = validate_sis_candidates_batched(cr, candidates, client)
+    # First batch's 5 candidates dropped; second batch's fn5 admitted.
+    assert ids == ["fn5"]
+    assert degraded is True
 
 
 def test_validate_rejects_verdicts_for_wrong_batch():
@@ -403,6 +421,6 @@ def test_validate_rejects_verdicts_for_wrong_batch():
         ]
     )
 
-    result = validate_sis_candidates_batched(cr, [c], client)
-    assert result == ["correct_fn"]
-    assert "wrong_fn" not in result
+    ids, _justs, _deg = validate_sis_candidates_batched(cr, [c], client)
+    assert ids == ["correct_fn"]
+    assert "wrong_fn" not in ids

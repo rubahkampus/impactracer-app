@@ -15,11 +15,21 @@ from collections import deque
 import networkx as nx
 from loguru import logger
 
-from impactracer.shared.constants import EDGE_CONFIG, LOW_CONF_CAPPED_EDGES
+from impactracer.shared.constants import (
+    EDGE_CONFIG,
+    EXCLUDED_PROPAGATION_NODE_TYPES,
+    LOW_CONF_CAPPED_EDGES,
+    NODE_TYPE_MAX_FAN_IN,
+    UTILITY_FILE_CALLS_DEPTH_CAP,
+)
 from impactracer.shared.models import CISResult, NodeTrace
 
 # Hub node threshold: nodes with total degree above this are capped at depth 1.
 _HUB_DEGREE_THRESHOLD = 20
+
+# Crucible Fix 11: edge type whose depth is restricted when the seed
+# originates from a UTILITY-classified file.
+_UTILITY_DEPTH_CAPPED_EDGES: frozenset[str] = frozenset({"CALLS"})
 
 
 def build_graph_from_sqlite(conn: sqlite3.Connection) -> nx.MultiDiGraph:
@@ -83,6 +93,8 @@ def bfs_propagate(
     seeds: list[str],
     high_confidence: frozenset[str] | None = None,
     low_confidence_seed_map: dict[str, bool] | None = None,
+    seed_file_classification: dict[str, str] | None = None,
+    node_type_by_id: dict[str, str] | None = None,
 ) -> CISResult:
     """Execute multi-seed BFS with per-edge-type direction and depth limits.
 
@@ -90,18 +102,36 @@ def bfs_propagate(
     1. Initialise sis_nodes from seeds (depth=0).
     2. BFS queue: (node_id, depth, causal_chain, path, source_seed).
     3. For each node, iterate over EDGE_CONFIG entries:
-       - Determine neighbor direction (forward=successors, reverse=predecessors,
-         both=union of successors+predecessors).
-       - Apply max_depth from EDGE_CONFIG (global cap = bfs_global_max_depth=3).
-       - For CALLS edges, cap to 1 if origin seed is low-confidence.
+       - Determine neighbor direction (forward=successors, reverse=predecessors).
+       - Apply max_depth from EDGE_CONFIG.
+       - For CALLS edges, cap to 1 if origin seed is low-confidence (Fix D).
        - For hub nodes (degree > 20), cap all edges to depth 1.
+       - **Crucible Fix 11**: for CALLS chains originating at a UTILITY-file
+         seed, cap depth to UTILITY_FILE_CALLS_DEPTH_CAP (1).
+       - **Crucible Fix 11**: skip neighbours whose node_type is in
+         EXCLUDED_PROPAGATION_NODE_TYPES (e.g. ExternalPackage).
+       - **Crucible Fix 11**: skip neighbours whose total in-degree exceeds
+         NODE_TYPE_MAX_FAN_IN[node_type] (sharper hub cap).
        - Skip already-visited nodes.
     4. Record NodeTrace per propagated node.
 
+    Args:
+        seed_file_classification: optional dict mapping seed node_id to its
+            file's FileClassification (e.g. "UTILITY"). Required for the
+            UTILITY-CALLS depth cutoff (Crucible Fix 11.1).
+        node_type_by_id: optional dict mapping node_id -> node_type. Used to
+            evaluate per-node-type fan-in caps and excluded-type filtering
+            (Crucible Fix 11.2).
+
     Invariant: ``len(sis_nodes) + len(propagated_nodes) == len(visited_set)``.
 
-    Blueprint §4 Step 6; Sprint 10 Hub Node Mitigation mandate.
+    Blueprint §4 Step 6; Sprint 10 Hub Node Mitigation mandate;
+    Crucible Fix 11 (structural propagation limits).
     """
+    if seed_file_classification is None:
+        seed_file_classification = {}
+    if node_type_by_id is None:
+        node_type_by_id = {}
     if high_confidence is None:
         high_confidence = frozenset()
     if low_confidence_seed_map is None:
@@ -177,6 +207,11 @@ def bfs_propagate(
         # Hub mitigation: if the CURRENT node is a hub, cap its traversal to 1.
         node_is_hub = node_id in hubs
 
+        # Crucible Fix 11.1: UTILITY-file CALLS depth cap.
+        origin_is_utility = (
+            seed_file_classification.get(source_seed, "") == "UTILITY"
+        )
+
         for edge_type, cfg in EDGE_CONFIG.items():
             direction: str = cfg["direction"]
             max_depth: int = cfg["max_depth"]
@@ -188,6 +223,13 @@ def bfs_propagate(
             # Hub mitigation: cap ALL edges to 1 when traversing FROM a hub.
             if node_is_hub:
                 max_depth = 1
+
+            # Crucible Fix 11.1: cap CALLS chains originating at UTILITY files.
+            if (
+                edge_type in _UTILITY_DEPTH_CAPPED_EDGES
+                and origin_is_utility
+            ):
+                max_depth = min(max_depth, UTILITY_FILE_CALLS_DEPTH_CAP)
 
             if depth >= max_depth:
                 continue
@@ -208,6 +250,25 @@ def bfs_propagate(
                             break
 
             for nbr in neighbors:
+                # Crucible Fix 11.2: exclude propagation INTO ExternalPackage
+                # nodes and other excluded types.
+                nbr_type = node_type_by_id.get(nbr, "")
+                if nbr_type in EXCLUDED_PROPAGATION_NODE_TYPES:
+                    continue
+
+                # Crucible Fix 11.2: per-node-type fan-in cap. Skip neighbour
+                # if its in-degree exceeds the type-specific limit. Seeds are
+                # never excluded (they were admitted by retrieval/LLM #2).
+                if nbr_type and nbr not in visited:
+                    fan_in_cap = NODE_TYPE_MAX_FAN_IN.get(nbr_type)
+                    if fan_in_cap is not None and fan_in_cap > 0:
+                        if graph.in_degree(nbr) > fan_in_cap:
+                            logger.debug(
+                                "[graph_bfs] Skipped {} ({}) — fan-in {} > cap {}",
+                                nbr, nbr_type, graph.in_degree(nbr), fan_in_cap,
+                            )
+                            continue
+
                 new_chain = causal_chain + [edge_type]
                 new_path = path + [nbr]
                 new_depth = depth + 1

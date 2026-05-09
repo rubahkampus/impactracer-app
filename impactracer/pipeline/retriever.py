@@ -23,29 +23,49 @@ from impactracer.shared.models import Candidate, CRInterpretation
 # ---------------------------------------------------------------------------
 
 
+# Crucible Fix 5 (AV-4): explicit BM25 stop-word list with len>=2 minimum.
+#
+# Previously, len>=3 was used as a coarse stop-word filter — but this also
+# dropped high-discriminative 2-char technical tokens like "id", "db", "js",
+# "ts", "ws", "os", "ui", "fk", "pk", "ip" that frequently appear in TS code
+# identifiers. The correct fix is an explicit stop-word list that targets
+# only function words, leaving short technical identifiers intact.
+_BM25_STOPWORDS: frozenset[str] = frozenset({
+    # English 2-3 char function words and articles
+    "of", "to", "in", "on", "at", "by", "is", "be", "as", "an", "or",
+    "if", "it", "we", "us", "do", "no", "so", "up", "the", "and", "for",
+    "are", "but", "not", "you", "all", "can", "has", "had", "was", "via",
+    "any", "out", "our", "off", "per", "yet", "too", "use",
+    # Indonesian 2-3 char function words
+    "di", "ke", "ya", "nya", "dan", "ini", "itu", "atau", "yang",
+    "kan", "lah", "pun", "bagi", "agar", "akan", "ada", "ialah",
+})
+
+
 def _tokenize_for_bm25(text: str) -> list[str]:
     """Tokenize text for BM25 with camelCase decomposition.
 
-    Three transformations (stdlib only, no new dependencies):
-    1. camelCase / PascalCase split: commissionListingId → commission Listing Id
+    Crucible Fix 5 (AV-4):
+    1. camelCase / PascalCase split: commissionListingId -> commission Listing Id
     2. Lowercase + split on non-alphanumeric (drops operators, punctuation)
-    3. Filter tokens shorter than 2 chars and pure-numeric tokens (noise)
+    3. Filter pure-numeric tokens (noise)
+    4. Filter tokens of length 1 (single chars are non-discriminative)
+    5. Filter explicit stop-words (function words in EN + ID)
 
-    Handles TypeScript identifiers, Indonesian words, and mixed corpus text.
+    The previous implementation used len>=3 as an implicit stop-word filter;
+    this dropped legitimate 2-char technical identifiers ("id", "db", "js",
+    "ts") that have high discriminative power in TS codebases. Explicit
+    stop-word filtering with len>=2 restores those tokens.
     """
-    # Split camelCase and PascalCase boundaries
     text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
     text = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", text)
-    # Lowercase and split on non-alphanumeric characters
     tokens = re.split(r"[^a-z0-9]+", text.lower())
-    # Phase 2.7 (E-NEW-2): raised minimum token length from 2 → 3.
-    # 2-char tokens admit high-frequency English stop-words ("to", "up",
-    # "in", "of", "is", "at", "by", "be") that consume BM25 posting-list
-    # budget without adding discriminative power. Indonesian 2-char tokens
-    # ("di", "ke", "ya") are similarly non-discriminative. 3-char minimum
-    # eliminates these while preserving meaningful short identifiers
-    # (e.g. "get", "set", "api", "url", "jwt").
-    return [t for t in tokens if len(t) >= 3 and not t.isdigit()]
+    return [
+        t for t in tokens
+        if len(t) >= 2
+        and not t.isdigit()
+        and t not in _BM25_STOPWORDS
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +109,104 @@ def build_metadata_cache(collection: object) -> dict[str, dict]:
 # ---------------------------------------------------------------------------
 # Adaptive RRF fusion
 # ---------------------------------------------------------------------------
+
+
+def apply_negative_filter(
+    candidates: list[Candidate],
+    out_of_scope_operations: list[str],
+    penalty: float = 5.0,
+) -> list[Candidate]:
+    """Crucible Fix 13: additive demotion for out-of-scope candidates.
+
+    For each candidate whose ``name`` or ``text_snippet`` contains any
+    out-of-scope operation as a case-insensitive substring, subtract
+    ``penalty`` from its ``raw_reranker_score``. This is mathematically
+    sound across the entire real line of cross-encoder logits — unlike
+    multiplicative demotion (`* 0.5`), which inverts sign for negative
+    logits and inadvertently *promotes* out-of-scope candidates.
+
+    Penalty default 5.0 is calibrated to be larger than typical
+    inter-candidate logit gaps (~1-2 units), guaranteeing demoted
+    candidates rank below all genuine matches.
+
+    Mutates candidates in-place; also returns the list for chaining.
+    """
+    if not out_of_scope_operations or not candidates:
+        return candidates
+    needles = [op.lower() for op in out_of_scope_operations if op]
+    if not needles:
+        return candidates
+    demoted_count = 0
+    for c in candidates:
+        haystack = (c.name + " " + (c.text_snippet or "")).lower()
+        if any(n in haystack for n in needles):
+            c.raw_reranker_score = c.raw_reranker_score - penalty
+            demoted_count += 1
+    if demoted_count:
+        logger.info(
+            "[retriever] Negative filter (Fix 13) demoted {} candidates by -{:.1f} "
+            "for out_of_scope_operations={}",
+            demoted_count, penalty, out_of_scope_operations,
+        )
+    return candidates
+
+
+def apply_traceability_bonus(
+    candidates: list[Candidate],
+    conn: sqlite3.Connection,
+    bonus: float = 0.1,
+    top_k_per_doc: int = 3,
+) -> list[Candidate]:
+    """Crucible Fix 12.2: additive bonus for code candidates that the
+    offline traceability matrix associates with a retrieved doc chunk.
+
+    For each doc-chunk candidate in the pool, look up its top-K code
+    resolutions in ``doc_code_candidates``. Any code candidate already in
+    the retrieval pool whose node_id appears in those top-K rows gets
+    ``raw_reranker_score += bonus``. This converts the offline doc<->code
+    similarity precomputation into an online retrieval bias, leveraging
+    work that was previously consumed only by the semantic-dedup gate.
+
+    Mutates candidates in-place; also returns the list for chaining.
+    """
+    if not candidates:
+        return candidates
+    doc_ids = [c.node_id for c in candidates if c.collection == "doc_chunks"]
+    if not doc_ids:
+        return candidates
+    code_idx: dict[str, Candidate] = {
+        c.node_id: c for c in candidates if c.collection == "code_units"
+    }
+    if not code_idx:
+        return candidates
+    placeholders = ",".join("?" * len(doc_ids))
+    rows = conn.execute(
+        f"SELECT doc_id, code_id, weighted_similarity_score "
+        f"FROM doc_code_candidates "
+        f"WHERE doc_id IN ({placeholders}) "
+        f"ORDER BY doc_id, weighted_similarity_score DESC",
+        doc_ids,
+    ).fetchall()
+    per_doc_count: dict[str, int] = {}
+    boosted: set[str] = set()
+    for doc_id, code_id, _score in rows:
+        if per_doc_count.get(doc_id, 0) >= top_k_per_doc:
+            continue
+        per_doc_count[doc_id] = per_doc_count.get(doc_id, 0) + 1
+        target = code_idx.get(code_id)
+        if target is None:
+            continue
+        if code_id in boosted:
+            continue
+        target.raw_reranker_score = target.raw_reranker_score + bonus
+        boosted.add(code_id)
+    if boosted:
+        logger.info(
+            "[retriever] Traceability bonus (Fix 12.2) +{:.2f} applied to {} "
+            "code candidates linked from {} retrieved doc chunks",
+            bonus, len(boosted), len(doc_ids),
+        )
+    return candidates
 
 
 def reciprocal_rank_fusion_adaptive(

@@ -3,6 +3,16 @@
 Batches candidates into chunks of at most 5, calls LLM #2 per chunk,
 then merges all SISValidationResult envelopes.
 
+Crucible Fix 1 (FF-1) — fail-closed:
+  - Per-node missing verdict -> DROP (not admit).
+  - Batch-level exception (after all retries exhausted) -> DROP entire batch
+    (continue with next batch). The CR analysis completes; the audit log
+    records the dropped batch; runner sets degraded_run=True.
+
+Crucible Fix 3 (AV-3, Distributed Justification) — capture verdict
+attributes per confirmed seed and return them so the runner can attach
+function_purpose, mechanism_of_impact, and justification to NodeTrace.
+
 The validator prompt MUST NOT include retrieval scores (reranker score,
 ARRF weight, cosine distance). The LLM judges structural relevance only.
 
@@ -55,27 +65,54 @@ RULES FOR ADDITION CRs:
 - Do NOT require that an existing function already contains the logic —
   for ADDITION CRs, absence of logic IS the reason to confirm it (it will
   need to be added).
-- Phase 2.5 ADDITION SCOPING CONSTRAINT: a node is impacted ONLY if it
-  DIRECTLY exposes, accepts, or processes the new feature — not merely
-  because it belongs to the same service or shares a related domain concept.
-  Generic utility functions, shared middleware, and unrelated service modules
-  that happen to be in the same codebase are NOT impacted unless they must
-  explicitly handle the new feature.
+- ADDITION SCOPING: a node is impacted ONLY if it DIRECTLY exposes,
+  accepts, or processes the new feature — not merely because it belongs
+  to the same service or shares a related domain concept. Generic utility
+  functions, shared middleware, and unrelated service modules that happen
+  to be in the same codebase are NOT impacted unless they must explicitly
+  handle the new feature.
+
+JUSTIFICATION QUALITY:
+- mechanism_of_impact MUST describe a CONCRETE structural modification
+  (e.g. "add `pin: boolean` field to the schema and propagate to the
+  serializer", "change the rate-limit constant from 5/min to 10/min and
+  update the test expectation"). Vague justifications such as "this
+  function is related" or "this is a primary target" are forbidden.
+- justification (one sentence) MUST cite the specific aspect of the CR
+  that drives the impact, not the candidate's general purpose.
 
 OUTPUT FORMAT:
 Return exactly one JSON object with this structure:
 {"verdicts": [ ... ]}
 
 Each verdict must have:
-  node_id           – the EXACT node_id string from the candidate (<<NODE_ID_START>>...<<NODE_ID_END>>), copied verbatim
-  function_purpose  – one sentence: what this node does
-  mechanism_of_impact – concrete modification required (empty string if rejected)
-  justification     – one-sentence confirmation or rejection summary
-  confirmed         – true only if mechanism_of_impact is non-empty
+  node_id           - the EXACT node_id string from the candidate (<<NODE_ID_START>>...<<NODE_ID_END>>), copied verbatim
+  function_purpose  - one sentence: what this node does
+  mechanism_of_impact - concrete modification required (empty string if rejected)
+  justification     - one-sentence confirmation or rejection summary
+  confirmed         - true only if mechanism_of_impact is non-empty
 
-CRITICAL: node_id must be copied VERBATIM from the <<NODE_ID_START>>...<<NODE_ID_END>> delimiters.
-Do NOT paraphrase, truncate, or alter the node_id.
+CRITICAL: Copy the node_id exactly from BETWEEN the delimiters
+<<NODE_ID_START>>...<<NODE_ID_END>>. DO NOT include the << >> delimiter
+markers themselves in your JSON output. Do NOT paraphrase, truncate, or
+alter the node_id contents.
 """
+
+
+def _strip_delimiters(s: str) -> str:
+    """Remove leftover <<NODE_ID_START>>/<<NODE_ID_END>> markers some
+    models (notably gemini-2.5-flash-lite) emit despite the prompt
+    instruction. Also trims whitespace and surrounding angle brackets.
+    """
+    if s is None:
+        return ""
+    out = s
+    for tok in (
+        "<<NODE_ID_START>>", "<<NODE_ID_END>>",
+        "<NODE_ID_START>", "<NODE_ID_END>",
+    ):
+        out = out.replace(tok, "")
+    return out.strip().strip("<>").strip()
 
 
 def chunk_candidates(
@@ -98,20 +135,6 @@ def build_validator_prompt(
     Includes: CR intent, change type, domain concepts, out-of-scope
     operations, named entry points, and per-candidate node_id / type /
     file path / snippet (prefers internal_logic_abstraction, full length).
-
-    B1: merged_doc_contexts are injected as "Business Context" blocks
-    immediately after the code snippet, so the LLM sees what requirement
-    makes each code node relevant.
-
-    B5: DocChunk candidates are rendered with a DOCUMENTATION SECTION header
-    and the specific confirmation criterion for doc chunks.
-
-    B6: node_id is wrapped in <<NODE_ID_START>>...<<NODE_ID_END>> delimiters
-    so the LLM cannot confuse it with surrounding prose.
-
-    ILA is already a compact skeletonized reduction — truncation would
-    drop call sites and return paths the LLM needs to judge impact.
-    Batches of ≤5 nodes fit well within the 100k-token context window.
 
     DELIBERATELY EXCLUDES all retrieval scores (reranker_score, rrf_score,
     cosine_score). The LLM must judge structural relevance independently.
@@ -153,7 +176,6 @@ def build_validator_prompt(
 
         if is_doc:
             lines.append(f"[{idx}] DOCUMENTATION SECTION")
-            # B6: node_id wrapped in unambiguous delimiters
             lines.append(f"ID: <<NODE_ID_START>>{c.node_id}<<NODE_ID_END>>")
             lines.append(f"Type: {c.node_type}")
             snippet = c.text_snippet or ""
@@ -164,21 +186,17 @@ def build_validator_prompt(
             )
         else:
             lines.append(f"[{idx}] CODE NODE")
-            # B6: node_id wrapped in unambiguous delimiters
             lines.append(f"ID: <<NODE_ID_START>>{c.node_id}<<NODE_ID_END>>")
             lines.append(f"Type: {c.node_type}")
             lines.append(f"File: {c.file_path}")
             snippet = c.internal_logic_abstraction or c.text_snippet or ""
             lines.append(f"Snippet:\n{snippet}")
 
-            # B1: inject merged doc contexts as "Business Context" blocks
             if c.merged_doc_contexts:
                 lines.append("")
                 lines.append("Business Context (requirement sections that reference this code node):")
                 for section_title, section_text in c.merged_doc_contexts:
                     lines.append(f"  [Section: {section_title}]")
-                    # Truncate long doc sections to avoid prompt bloat from very
-                    # large doc chunks — 500 chars gives ample context.
                     preview = section_text[:500] if len(section_text) > 500 else section_text
                     lines.append(f"  {preview}")
 
@@ -191,32 +209,36 @@ def validate_sis_candidates_batched(
     cr_interp: CRInterpretation,
     candidates: list[Candidate],
     client: LLMClient,
-) -> list[str]:
-    """Run LLM Call #2 in batches and return confirmed node IDs.
+) -> tuple[list[str], dict[str, dict[str, str]], bool]:
+    """Run LLM Call #2 in batches and return (confirmed_ids, justifications, degraded).
 
-    Splits candidates into batches of at most 5, calls LLM #2 per batch,
-    merges SISValidationResult envelopes, and returns the list of node_ids
-    whose confirmed=True.
+    Crucible Fix 1 (fail-closed): missing per-node verdicts -> drop. Batch
+    exception -> drop entire batch and continue. Returns degraded=True if
+    any batch was dropped due to API failure.
 
-    B2 fix: partial verdict coverage is handled per-node, not per-batch.
-    Previously, the fail-open guard fired only when ``len(result.verdicts) == 0``
-    (completely empty response).  If the LLM returned verdicts for 3 of 5
-    candidates, the remaining 2 were silently dropped — a false negative trap.
-    The new logic checks per-candidate: any node missing from the verdict
-    response is admitted (fail-open) so we never silently discard candidates.
+    Crucible Fix 3 (distributed justification): captures
+    function_purpose, mechanism_of_impact, justification per confirmed
+    seed for downstream attachment to NodeTrace.
+
+    Returns:
+        confirmed_ids: list of node_ids the LLM marked confirmed=True.
+        justifications: dict node_id -> {function_purpose, mechanism, justification}.
+        degraded: True if any batch was dropped due to API exhaustion.
 
     Blueprint §4 Step 4 (Batching Mandate).
     """
     if not candidates:
-        return []
+        return [], {}, False
 
     batches = chunk_candidates(candidates, _BATCH_SIZE)
     logger.info(
-        "[validator] LLM #2: {} candidates -> {} batches of ≤{}",
+        "[validator] LLM #2: {} candidates -> {} batches of <={}",
         len(candidates), len(batches), _BATCH_SIZE,
     )
 
     confirmed_ids: list[str] = []
+    justifications: dict[str, dict[str, str]] = {}
+    degraded: bool = False
 
     for batch_idx, batch in enumerate(batches, start=1):
         prompt = build_validator_prompt(cr_interp, batch)
@@ -225,52 +247,67 @@ def validate_sis_candidates_batched(
             batch_idx, len(batches), len(batch),
         )
 
-        result: SISValidationResult = client.call(
-            system=_SYSTEM_PROMPT,
-            user=prompt,
-            response_schema=SISValidationResult,
-            call_name="validate_sis",
-        )
+        try:
+            result: SISValidationResult = client.call(
+                system=_SYSTEM_PROMPT,
+                user=prompt,
+                response_schema=SISValidationResult,
+                call_name="validate_sis",
+            )
+        except Exception as exc:
+            # Crucible Amendment 1: fail-closed at batch level.
+            # Drop the batch (no candidates admitted) but DO NOT raise —
+            # the pipeline must complete remaining batches.
+            logger.error(
+                "[validator] Batch {}/{} failed after retries: {} — "
+                "DROPPING batch (fail-closed)",
+                batch_idx, len(batches), exc,
+            )
+            degraded = True
+            continue
 
         batch_ids = {c.node_id for c in batch}
 
-        # B2: build a lookup of verdicts keyed by node_id for O(1) coverage check.
-        # Only accept verdicts whose node_id belongs to THIS batch (reject hallucinations).
-        verdict_map: dict[str, bool] = {}
+        verdict_map: dict[str, "SISValidationResult.verdicts.__class__"] = {}
         for verdict in result.verdicts:
-            if verdict.node_id in batch_ids:
-                verdict_map[verdict.node_id] = verdict.confirmed
-                if verdict.confirmed:
-                    logger.debug(
-                        "[validator] CONFIRMED: {} — {}",
-                        verdict.node_id, verdict.mechanism_of_impact,
-                    )
-                else:
-                    logger.debug(
-                        "[validator] REJECTED: {} — {}",
-                        verdict.node_id, verdict.justification,
-                    )
+            clean_id = _strip_delimiters(verdict.node_id)
+            if clean_id in batch_ids:
+                verdict_map[clean_id] = verdict
             else:
-                # Hallucinated node_id not in this batch — silently discard
                 logger.debug(
-                    "[validator] IGNORED hallucinated verdict for {} (not in batch)",
-                    verdict.node_id,
+                    "[validator] IGNORED hallucinated verdict for {!r} (cleaned: {!r}, not in batch)",
+                    verdict.node_id, clean_id,
                 )
 
-        # B2: per-node fail-open: any node with no verdict is admitted.
+        # Crucible Fix 1 (FF-1): fail-CLOSED per-node — missing verdicts dropped.
         for c in batch:
-            if c.node_id not in verdict_map:
-                # No verdict returned for this node — fail-open: admit it
+            verdict = verdict_map.get(c.node_id)
+            if verdict is None:
                 logger.warning(
-                    "[validator] No verdict for {} — admitting (fail-open per-node)",
+                    "[validator] No verdict for {} — DROPPING (fail-closed per-node)",
                     c.node_id,
                 )
+                continue
+            if verdict.confirmed:
                 confirmed_ids.append(c.node_id)
-            elif verdict_map[c.node_id]:
-                confirmed_ids.append(c.node_id)
+                # Crucible Fix 3: capture per-seed justification material.
+                justifications[c.node_id] = {
+                    "function_purpose": verdict.function_purpose or "",
+                    "mechanism_of_impact": verdict.mechanism_of_impact or "",
+                    "justification": verdict.justification or "",
+                }
+                logger.debug(
+                    "[validator] CONFIRMED: {} - {}",
+                    c.node_id, verdict.mechanism_of_impact,
+                )
+            else:
+                logger.debug(
+                    "[validator] REJECTED: {} - {}",
+                    c.node_id, verdict.justification,
+                )
 
     logger.info(
-        "[validator] LLM #2 complete: {}/{} candidates confirmed",
-        len(confirmed_ids), len(candidates),
+        "[validator] LLM #2 complete: {}/{} candidates confirmed (degraded={})",
+        len(confirmed_ids), len(candidates), degraded,
     )
-    return confirmed_ids
+    return confirmed_ids, justifications, degraded

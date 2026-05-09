@@ -83,7 +83,14 @@ def layer_compat(code_classification: str | None, doc_chunk_type: str) -> float:
 
 EDGE_CONFIG: dict[str, dict] = {
     # Behavioral dependencies (reverse direction)
-    "CALLS":               {"direction": "reverse", "max_depth": 3},
+    # Crucible Fix 6 (AV-5): CALLS depth reduced 3 -> 2.
+    # Each reverse-CALLS hop multiplies fan-in by ~3-8 in TS codebases. Three
+    # hops can reach 200+ propagated nodes per seed (live citrakara runs:
+    # 372-460 nodes pre-collapse). Depth-2 caps the fan-out at the precision-
+    # recovery sweet spot while still catching transitive same-feature
+    # callers. Combined with the UTILITY-file cutoff and per-node-type fan-in
+    # cap below, this is the structural defence against graph flood.
+    "CALLS":               {"direction": "reverse", "max_depth": 2},
     "INHERITS":            {"direction": "reverse", "max_depth": 3},
     "IMPLEMENTS":          {"direction": "reverse", "max_depth": 3},
     "TYPED_BY":            {"direction": "reverse", "max_depth": 3},
@@ -125,6 +132,54 @@ PROPAGATION_VALIDATION_EXEMPT_EDGES: frozenset[str] = frozenset({
     "TYPED_BY",
 })
 """Single-hop edges that skip LLM #4 validation (direct contracts)."""
+
+
+# =========================================================================
+# Crucible Fix 11 — Structural propagation limits
+# =========================================================================
+#
+# These constants harden BFS against graph-flood failure modes that the
+# hub-degree cap alone cannot prevent. Two orthogonal mechanisms:
+#
+# 1. UTILITY_FILE_CALLS_DEPTH_CAP — when a propagation chain ORIGINATES at
+#    a UTILITY-classified file (e.g. lib/format-date.ts, lib/error.ts),
+#    its reverse-CALLS traversal is capped to depth 1. Utility functions
+#    are called from everywhere; reverse-CALLS at depth ≥2 from a UTILITY
+#    seed produces a near-guaranteed flood across unrelated features.
+#
+# 2. NODE_TYPE_MAX_FAN_IN — propagated nodes whose total in-degree exceeds
+#    this cap are dropped from the CIS unless they are SIS seeds. This is
+#    a sharper version of the hub-degree threshold (which uses degree=20
+#    to cap depth=1, but does not exclude). Primitive React components,
+#    base utility classes, and framework defaults all exceed 50 incoming
+#    edges and are pure noise in the impact set.
+
+UTILITY_FILE_CALLS_DEPTH_CAP: int = 1
+"""Reverse-CALLS depth cap for chains originating at UTILITY files."""
+
+NODE_TYPE_MAX_FAN_IN: dict[str, int] = {
+    "Function": 50,
+    "Method": 50,
+    "Class": 50,
+    "Interface": 100,        # Type definitions are referenced widely; allow more.
+    "TypeAlias": 100,
+    "Enum": 100,
+    "InterfaceField": 200,   # Field-level access has the highest fan-in by nature.
+    "File": 200,             # File nodes act as containers; high fan-in is expected.
+    "ExternalPackage": 0,    # Never propagate INTO an ExternalPackage from BFS.
+}
+"""Max in-degree before a node is excluded from BFS propagation (not seeds)."""
+
+EXCLUDED_PROPAGATION_NODE_TYPES: frozenset[str] = frozenset({
+    "ExternalPackage",
+})
+"""Node types that are NEVER added to the propagated set, regardless of edges.
+
+Rationale: ExternalPackage represents a third-party dependency. We do not
+analyse third-party code as 'impacted' — at most, we observe that our code
+DEPENDS_ON_EXTERNAL it. The dependency edge is informative, but reaching
+INTO the package node and treating it as a unit-of-impact is incorrect.
+"""
 
 
 # =========================================================================

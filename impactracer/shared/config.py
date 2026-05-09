@@ -54,16 +54,26 @@ class Settings(BaseSettings):
     rrf_k: int = 60
 
     # ---- Pre-Validation Gates (FR-C4) ------------------------------
-    # Phase 2.6 (F-NEW-1/F-5): raised from 0.0 → 0.15.
-    # 0.0 was a permanently-disabled gate: every candidate passes a floor of 0.0.
-    # 0.15 is calibrated against BGE-reranker-v2-m3 cross-encoder logit
-    # distribution: scores below 0.15 on the raw (pre-normalization) scale
-    # correspond to candidates the model considers weakly relevant or irrelevant.
-    # This value should be re-evaluated against the 20-CR evaluation set
-    # during Sprint 11 calibration (see evaluation/gt_protocol.md).
-    min_reranker_score_for_validation: float = 0.15
-    plausibility_gate_density_threshold: float = 0.35
-    plausibility_gate_max_per_file: int = 2
+    # Crucible Fix 9: score floor demoted to a sanity-only gate.
+    # The previous 0.15 default was a calibration-fragile magic number
+    # masking retrieval-quality issues; LLM #2 is the real precision gate.
+    # -2.0 admits all candidates whose cross-encoder logit is at or above
+    # the typical "irrelevant-candidate" floor for BGE-reranker-v2-m3,
+    # while still rejecting structurally broken candidates whose logit is
+    # strongly negative (e.g. encoded-as-binary or empty-text candidates).
+    min_reranker_score_for_validation: float = -2.0
+    # Crucible Fix 9: density threshold raised 0.35 -> 0.50.
+    # The previous 0.35 was unjustified and rejected legitimate candidates
+    # on dense service files (e.g. a 100-symbol service file triggers 35%
+    # density at 35 candidates, but LLM #2 may still confirm those if the
+    # CR is broad). 0.50 retains the gate's structural intent (catch
+    # pathological cases where the retrieval is over-concentrating into
+    # one file) while admitting more cases for LLM-level filtering.
+    plausibility_gate_density_threshold: float = 0.50
+    # Crucible Fix 9: plausibility_gate_max_per_file removed entirely.
+    # The previous default of 2 was unjustified and arbitrarily capped
+    # genuine multi-symbol impacts. Density-based protection above is
+    # sufficient.
 
     # ---- BFS --------------------------------------------------------
     bfs_global_max_depth: int = 3
@@ -85,9 +95,12 @@ class Settings(BaseSettings):
     scope_medium_max: int = 30   # 11-30 nodes → menengah; >30 → ekstensif
 
     # ---- Audit and Evaluation ---------------------------------------
+    # Crucible Fix 4: eval_k_values removed. Bounded F1@K metrics are no
+    # longer computed; metrics are pure set-level (precision_set,
+    # recall_set, f1_set) plus rank-aware r_precision. See
+    # impactracer/evaluation/metrics.py.
     llm_audit_log_path: str = "./data/llm_audit.jsonl"
     locked_parameters_path: str = "./data/locked_parameters.json"
-    eval_k_values: list[int] = [5, 10]
     alpha: float = 0.05
 
 

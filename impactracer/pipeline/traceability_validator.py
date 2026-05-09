@@ -3,8 +3,15 @@
 Per (doc_chunk, code_node) pair produced by blind resolution, LLM #3
 emits one of three decisions: CONFIRMED, PARTIAL, REJECTED.
 
-Batching Mandate: max 5 pairs per LLM call. Fail-open per pair when
-LLM omits a verdict.
+Crucible Fix 1 (FF-2) — fail-closed:
+  - Per-pair missing verdict -> REJECTED (not PARTIAL admission).
+  - Batch-level exception -> DROP entire batch (all pairs REJECTED for
+    this batch) and continue. The CR analysis completes; runner sets
+    degraded_run=True.
+
+Crucible Fix 3 (AV-3, Distributed Justification) — capture verdict
+justifications and return them so the runner can attach LLM #3 reasoning
+to the resolved code seed's NodeTrace.
 
 Anti-Circular Mandate: NO retrieval scores in the prompt.
 
@@ -22,6 +29,22 @@ from impactracer.shared.models import (
 )
 
 _BATCH_SIZE = 5
+
+
+def _strip_delimiters(s: str) -> str:
+    """Remove leftover <<DOC_ID_*>>/<<CODE_ID_*>> markers from LLM output."""
+    if s is None:
+        return ""
+    out = s
+    for tok in (
+        "<<DOC_ID_START>>", "<<DOC_ID_END>>",
+        "<DOC_ID_START>", "<DOC_ID_END>",
+        "<<CODE_ID_START>>", "<<CODE_ID_END>>",
+        "<CODE_ID_START>", "<CODE_ID_END>",
+        "<<NODE_ID_START>>", "<<NODE_ID_END>>",
+    ):
+        out = out.replace(tok, "")
+    return out.strip().strip("<>").strip()
 
 _SYSTEM_PROMPT = """\
 You are a software traceability expert. Your task is to validate whether \
@@ -44,9 +67,18 @@ if its name sounds related.
 3. For ADDITION changes: absence of current implementation does NOT mean \
 REJECTED — it means the code node is where the feature SHOULD be added.
 4. Return verdicts for EVERY pair in the batch using the exact node IDs given.
-5. Use <<DOC_ID_START>>…<<DOC_ID_END>> and <<CODE_ID_START>>…<<CODE_ID_END>> \
-delimiters when writing doc_chunk_id and code_node_id in your response. \
-Copy them VERBATIM — do NOT paraphrase or truncate.
+5. CRITICAL: Copy the doc_chunk_id and code_node_id exactly from BETWEEN \
+the <<DOC_ID_START>>...<<DOC_ID_END>> and \
+<<CODE_ID_START>>...<<CODE_ID_END>> delimiters. DO NOT include the \
+<< >> delimiter markers themselves in your JSON output. Do NOT \
+paraphrase or truncate the IDs.
+
+JUSTIFICATION QUALITY:
+The justification field MUST cite the SPECIFIC mechanism by which the code
+node either implements or fails to implement the document section. Examples:
+  GOOD: "uploadFile() reads the size limit constant defined in section 3.2.1
+         which the CR raises from 5MB to 10MB."
+  BAD:  "This function is related to file uploads."
 
 OUTPUT FORMAT:
 Return a JSON object matching TraceValidationResult with a "verdicts" list.
@@ -108,20 +140,28 @@ def validate_trace_resolutions(
     code_meta_by_id: dict[str, dict],
     client: LLMClient,
     cr_interp: CRInterpretation | None = None,
-) -> tuple[list[str], dict[str, bool]]:
-    """Run LLM Call #3 and return (validated_code_seeds, low_confidence_map).
+) -> tuple[list[str], dict[str, bool], dict[str, str], bool]:
+    """Run LLM Call #3 and return (seeds, low_conf, justifications, degraded).
 
-    PARTIAL decisions mark their code seed with ``low_confidence_seed=True``.
-    REJECTED pairs drop from SIS entirely. Fail-open: if LLM omits a verdict
-    for a pair, that pair is admitted (fail-open per Sprint 9.1 mandate).
+    Crucible Fix 1 (FF-2): fail-CLOSED. Per-pair missing verdicts ->
+    REJECTED. Batch exception -> all pairs in batch REJECTED, continue.
+
+    Crucible Fix 3: capture per-pair justification keyed by code_id.
+    For code_ids resolved via multiple doc pairs, the highest-decision
+    pair's justification wins (CONFIRMED > PARTIAL > REJECTED).
+
+    Returns:
+        validated_code_seeds: code_ids where any pair was CONFIRMED or PARTIAL.
+        low_confidence_map:   code_id -> True if all pairs were PARTIAL.
+        justifications:       code_id -> chosen justification text.
+        degraded:             True if any batch was dropped due to API exhaustion.
 
     Blueprint §4 Step 5b.
     """
     if not resolutions:
-        return [], {}
+        return [], {}, {}, False
 
     if cr_interp is None:
-        # Construct a minimal placeholder so prompt building never crashes.
         from impactracer.shared.models import CRInterpretation as _CR
         cr_interp = _CR(
             is_actionable=True,
@@ -132,7 +172,6 @@ def validate_trace_resolutions(
             search_queries=["unknown"],
         )
 
-    # Flatten resolutions into a list of (doc_id, code_id) pairs for batching.
     all_pairs: list[tuple[str, str]] = []
     for r in resolutions:
         doc_id = r["doc_id"]
@@ -145,8 +184,9 @@ def validate_trace_resolutions(
         _BATCH_SIZE,
     )
 
-    # Map (doc_id, code_id) -> decision for aggregation.
     decision_map: dict[tuple[str, str], str] = {}
+    justification_map: dict[tuple[str, str], str] = {}
+    degraded: bool = False
 
     for batch_start in range(0, len(all_pairs), _BATCH_SIZE):
         batch = all_pairs[batch_start : batch_start + _BATCH_SIZE]
@@ -160,66 +200,81 @@ def validate_trace_resolutions(
                 call_name="validate_trace",
             )
         except Exception as exc:
-            logger.warning(
-                "[traceability_validator] LLM call failed for batch {}-{}: {} — fail-open",
+            # Crucible Amendment 1: fail-closed at batch level.
+            # Drop the batch (all pairs REJECTED). Continue with next batch.
+            logger.error(
+                "[traceability_validator] Batch {}-{} failed after retries: {} - "
+                "DROPPING batch (fail-closed)",
                 batch_start, batch_start + len(batch), exc,
             )
-            # Fail-open: admit all pairs in this batch as PARTIAL.
+            degraded = True
             for doc_id, code_id in batch:
-                decision_map[(doc_id, code_id)] = "PARTIAL"
+                decision_map[(doc_id, code_id)] = "REJECTED"
             continue
 
-        # Build a lookup from returned verdicts.
-        verdict_map: dict[tuple[str, str], str] = {}
+        verdict_map: dict[tuple[str, str], tuple[str, str]] = {}
         for v in result.verdicts:
-            key = (v.doc_chunk_id, v.code_node_id)
-            verdict_map[key] = v.decision
+            doc_clean = _strip_delimiters(v.doc_chunk_id)
+            code_clean = _strip_delimiters(v.code_node_id)
+            verdict_map[(doc_clean, code_clean)] = (v.decision, v.justification or "")
 
-        # Per-pair coverage check: fail-open for any pair the LLM omitted.
+        # Crucible Fix 1 (FF-2): fail-CLOSED per-pair — missing -> REJECTED.
         for doc_id, code_id in batch:
             key = (doc_id, code_id)
             if key in verdict_map:
-                decision_map[key] = verdict_map[key]
+                decision, justification = verdict_map[key]
+                decision_map[key] = decision
+                justification_map[key] = justification
             else:
                 logger.warning(
-                    "[traceability_validator] No verdict for ({}, {}) — fail-open as PARTIAL",
+                    "[traceability_validator] No verdict for ({}, {}) - "
+                    "REJECTING (fail-closed per-pair)",
                     doc_id, code_id,
                 )
-                decision_map[key] = "PARTIAL"
+                decision_map[key] = "REJECTED"
 
-    # Aggregate per code_id: if any pair for a code_id is CONFIRMED, it is
-    # CONFIRMED. If only PARTIAL, it is PARTIAL. If all REJECTED, it is REJECTED.
-    code_id_decisions: dict[str, list[str]] = {}
+    # Aggregate per code_id.
+    code_id_decisions: dict[str, list[tuple[str, str]]] = {}
     for (doc_id, code_id), decision in decision_map.items():
-        code_id_decisions.setdefault(code_id, []).append(decision)
+        just = justification_map.get((doc_id, code_id), "")
+        code_id_decisions.setdefault(code_id, []).append((decision, just))
 
     validated_code_seeds: list[str] = []
     low_confidence_map: dict[str, bool] = {}
+    justifications: dict[str, str] = {}
 
-    # Preserve resolution order for reproducibility.
     seen: set[str] = set()
     for r in resolutions:
         for code_id in r["code_ids"]:
             if code_id in seen:
                 continue
             seen.add(code_id)
-            decisions = code_id_decisions.get(code_id, ["PARTIAL"])
-            if "CONFIRMED" in decisions:
-                validated_code_seeds.append(code_id)
-                low_confidence_map[code_id] = False
-            elif "PARTIAL" in decisions:
-                validated_code_seeds.append(code_id)
-                low_confidence_map[code_id] = True
-            # REJECTED-only: drop silently.
-            else:
+            entries = code_id_decisions.get(code_id, [])
+            decisions = [e[0] for e in entries]
+            # Pick best (CONFIRMED > PARTIAL > REJECTED) and its justification.
+            best: tuple[str, str] | None = None
+            for entry in entries:
+                d, j = entry
+                if d == "CONFIRMED":
+                    best = entry
+                    break
+                if d == "PARTIAL" and (best is None or best[0] != "CONFIRMED"):
+                    best = entry
+            if best is None:
                 logger.debug(
-                    "[traceability_validator] code_id={} REJECTED by all pairs — dropped",
+                    "[traceability_validator] code_id={} REJECTED by all pairs - dropped",
                     code_id,
                 )
+                continue
+            decision, justification = best
+            validated_code_seeds.append(code_id)
+            low_confidence_map[code_id] = (decision == "PARTIAL") or ("CONFIRMED" not in decisions)
+            justifications[code_id] = justification
 
     logger.info(
-        "[traceability_validator] Result: {} validated seeds ({} low-conf)",
+        "[traceability_validator] Result: {} validated seeds ({} low-conf, degraded={})",
         len(validated_code_seeds),
         sum(1 for v in low_confidence_map.values() if v),
+        degraded,
     )
-    return validated_code_seeds, low_confidence_map
+    return validated_code_seeds, low_confidence_map, justifications, degraded

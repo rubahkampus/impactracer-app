@@ -233,11 +233,17 @@ def test_bfs_calls_depth_capped_for_low_conf() -> None:
     assert "B" not in cis_low.propagated_nodes
 
 
-def test_bfs_calls_depth_3_for_high_conf() -> None:
-    """CALLS depth reaches 3 for high-confidence seeds."""
+def test_bfs_calls_depth_2_for_high_conf() -> None:
+    """Crucible Fix 6 (AV-5): CALLS max_depth reduced 3 -> 2.
+
+    Even for a high-confidence seed, the third reverse-CALLS hop is now
+    structurally rejected. Depth-3 fan-in regularly produces 200+ propagated
+    nodes per seed in real TS codebases — depth-2 is the precision-recovery
+    sweet spot established by Crucible audit AV-5.
+    """
     import networkx as nx
     g = nx.MultiDiGraph()
-    # Chain: A->seed, B->A, C->B (depths 1,2,3)
+    # Chain: A->seed, B->A, C->B (depths 1, 2, 3)
     g.add_edge("A", "seed", edge_type="CALLS")
     g.add_edge("B", "A", edge_type="CALLS")
     g.add_edge("C", "B", edge_type="CALLS")
@@ -248,9 +254,9 @@ def test_bfs_calls_depth_3_for_high_conf() -> None:
         high_confidence=frozenset({"seed"}),
         low_confidence_seed_map={"seed": False},
     )
-    assert "A" in cis.propagated_nodes
-    assert "B" in cis.propagated_nodes
-    assert "C" in cis.propagated_nodes
+    assert "A" in cis.propagated_nodes      # depth 1
+    assert "B" in cis.propagated_nodes      # depth 2
+    assert "C" not in cis.propagated_nodes  # depth 3: dropped per Fix 6
 
 
 # ---------------------------------------------------------------------------

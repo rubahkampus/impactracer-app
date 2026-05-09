@@ -153,7 +153,14 @@ def analyze(
 
     typer.echo(f"Analyzing CR with variant {variant_upper}...", err=True)
 
-    report = run_analysis(cr_text=cr_text, settings=settings, variant_flags=flags)
+    # Crucible E2E Task 2b: full-traceability dump.
+    trace_sink: dict = {"cr_text": cr_text, "variant": variant_upper}
+    report = run_analysis(
+        cr_text=cr_text,
+        settings=settings,
+        variant_flags=flags,
+        trace_sink=trace_sink,
+    )
 
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
@@ -161,14 +168,26 @@ def analyze(
         encoding="utf-8",
     )
 
-    # Print interpreter output summary to stderr for inclusivity evaluation
-    typer.echo(f"\nReport written to {output}", err=True)
-    typer.echo(f"Impacted nodes : {len(report.impacted_nodes)}", err=True)
-    typer.echo(f"Estimated scope: {report.estimated_scope}", err=True)
+    # Crucible E2E Task 2b: write the full step-by-step trace alongside.
+    full_path = output.with_name(output.stem + "_full.json")
+    full_path.write_text(
+        _json.dumps(trace_sink, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
 
-    # Also print the JSON to stdout so it can be piped
-    out = _json.loads(output.read_text(encoding="utf-8"))
-    print(_json.dumps({"impacted": len(out["impacted_nodes"]), "scope": out["estimated_scope"]}))
+    typer.echo(f"\nReport written to {output}", err=True)
+    typer.echo(f"Full trace written to {full_path}", err=True)
+    typer.echo(f"Impacted entities : {len(report.impacted_entities)}", err=True)
+    typer.echo(f"Impacted files    : {len(report.impacted_files)}", err=True)
+    typer.echo(f"Estimated scope   : {report.estimated_scope}", err=True)
+
+    # Pipeable summary on stdout
+    print(_json.dumps({
+        "impacted_entities": len(report.impacted_entities),
+        "impacted_files": len(report.impacted_files),
+        "scope": report.estimated_scope,
+        "degraded": report.degraded_run,
+    }))
 
 
 @app.command()

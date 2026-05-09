@@ -132,7 +132,8 @@ def test_seed_resolver_direct_code() -> None:
     )
     conn.commit()
 
-    resolutions, doc_to_code_map, direct_seeds = resolve_doc_to_code(
+    # E-NEW-3 / Phase 1: resolve_doc_to_code returns 2-tuple (resolutions, direct_seeds).
+    resolutions, direct_seeds = resolve_doc_to_code(
         sis_ids=["src/lib/auth.ts::login"],
         conn=conn,
         top_k=5,
@@ -184,11 +185,14 @@ def test_v7_exactly_5_llm_calls_mocked() -> None:
         ]
     )
 
+    # The resolver looks up doc_1 -> top-1 code in doc_code_candidates, which
+    # the mocked SQLite returns as code_seed_1. Trace validator MUST receive
+    # a verdict with the matching code_node_id or the seed is fail-closed dropped.
     trace_result = TraceValidationResult(
         verdicts=[
             TraceVerdict(
                 doc_chunk_id="doc_1",
-                code_node_id="code_1",
+                code_node_id="code_seed_1",
                 decision="CONFIRMED",
                 justification="Directly implements the requirement",
             )
@@ -205,14 +209,18 @@ def test_v7_exactly_5_llm_calls_mocked() -> None:
         ]
     )
 
-    report = ImpactReport(
+    # Crucible Fix 3 (Full Demotion): LLM #5 now returns LLMSynthesisOutput
+    # (executive_summary + documentation_conflicts only). The runner builds
+    # impacted_nodes deterministically from the validated CIS.
+    from impactracer.shared.models import LLMSynthesisOutput
+
+    summary = LLMSynthesisOutput(
         executive_summary="Commission listing duplication requires changes.",
-        impacted_nodes=[],
-        estimated_scope="terlokalisasi",
+        documentation_conflicts=[],
     )
 
     # The mock LLM returns: interp, sis, trace, propagation, synthesize
-    responses = [cr_interp, sis_result, trace_result, prop_result, report]
+    responses = [cr_interp, sis_result, trace_result, prop_result, summary]
 
     # We'll count calls in the mock client.
     call_log: list[str] = []

@@ -48,14 +48,20 @@ def _make_code_candidate(
     file_path="src/lib/services/auth.service.ts",
     file_classification="UTILITY",
     reranker_score=0.8,
+    raw_reranker_score: float | None = None,
     name="loginUser",
 ) -> Candidate:
+    # Phase 2.6: raw_reranker_score is the authoritative quality signal.
+    # If not explicitly provided, mirror reranker_score so existing tests
+    # stay meaningful (they were written before the raw/normalized split).
+    effective_raw = reranker_score if raw_reranker_score is None else raw_reranker_score
     return Candidate(
         node_id=node_id,
         node_type="Function",
         collection="code_units",
         rrf_score=0.5,
         reranker_score=reranker_score,
+        raw_reranker_score=effective_raw,
         file_path=file_path,
         file_classification=file_classification,
         name=name,
@@ -82,14 +88,13 @@ def _make_doc_candidate(
 
 
 def _make_settings(
-    min_reranker_score=0.0,
-    density_threshold=0.35,
-    max_per_file=2,
+    min_reranker_score=-2.0,
+    density_threshold=0.50,
+    max_per_file=None,  # Crucible Fix 9: parameter retained for backwards-compat but unused.
 ):
     class _Settings:
         min_reranker_score_for_validation = min_reranker_score
         plausibility_gate_density_threshold = density_threshold
-        plausibility_gate_max_per_file = max_per_file
     return _Settings()
 
 
@@ -221,11 +226,24 @@ def test_3_7_affinity_rescores_doc_out_of_layer():
 
 def test_3_7_affinity_rescores_code_candidate():
     cr = _make_cr(affected_layers=["requirement", "design", "code"])
-    code = _make_code_candidate(file_classification="UTILITY", reranker_score=1.0)
+    # Two candidates from different files so density gate doesn't fire.
+    code1 = _make_code_candidate(
+        node_id="src/lib/a.ts::fn",
+        file_path="src/lib/a.ts",
+        file_classification="UTILITY",
+        reranker_score=1.0,
+    )
+    code2 = _make_code_candidate(
+        node_id="src/lib/b.ts::fn",
+        file_path="src/lib/b.ts",
+        file_classification="UTILITY",
+        reranker_score=0.5,
+    )
     settings = _make_settings()
-    result = step_3_7_plausibility_and_affinity([code], cr, settings)
-    # UTILITY × FR (primary_chunk_type) = 1.0 from LAYER_COMPAT
+    result = step_3_7_plausibility_and_affinity([code1, code2], cr, settings)
+    # UTILITY x FR = 1.0; reranker_score remains 1.0 after affinity.
     assert result[0].reranker_score == pytest.approx(1.0)
+    assert len(result) == 2
 
 
 def test_3_7_affinity_resorts_descending():
@@ -238,43 +256,64 @@ def test_3_7_affinity_resorts_descending():
     assert result[1].node_id == "low"
 
 
-def test_3_7_density_gate_caps_per_file():
+def test_3_7_density_gate_drops_flooded_file():
+    """Crucible Fix 9: flooded files now drop ALL code candidates (no max_per_file cap).
+
+    Previous semantics: density > threshold AND admitted >= max_per_file -> drop.
+    New semantics: density > threshold -> drop entire file's candidates unless
+    matched by a named entry point. The fix removes the arbitrary 2-per-file
+    cap; density alone is the gate.
+    """
     cr = _make_cr()
-    settings = _make_settings(density_threshold=0.3, max_per_file=2)
-    # 4 candidates all from the same file → fraction=4/4=1.0 > 0.3 → cap at 2
+    settings = _make_settings(density_threshold=0.3)
+    # 4 candidates all from the same file -> fraction=1.0 > 0.3 -> all dropped.
     candidates = [
-        _make_code_candidate(node_id=f"src/lib/svc.ts::fn{i}", file_path="src/lib/svc.ts", reranker_score=1.0 - i * 0.1)
+        _make_code_candidate(
+            node_id=f"src/lib/svc.ts::fn{i}",
+            file_path="src/lib/svc.ts",
+            reranker_score=1.0 - i * 0.1,
+        )
         for i in range(4)
     ]
     result = step_3_7_plausibility_and_affinity(candidates, cr, settings)
-    assert len(result) == 2
+    assert len(result) == 0
 
 
 def test_3_7_density_gate_named_entry_point_exempt():
+    """Named entry points are exempt from density-based exclusion."""
     cr = _make_cr(named_entry_points=["createListing"])
-    settings = _make_settings(density_threshold=0.3, max_per_file=1)
+    settings = _make_settings(density_threshold=0.3)
     candidates = [
-        _make_code_candidate(node_id="src/lib/svc.ts::createListing", file_path="src/lib/svc.ts", name="createListing", reranker_score=0.9),
-        _make_code_candidate(node_id="src/lib/svc.ts::updateListing", file_path="src/lib/svc.ts", name="updateListing", reranker_score=0.8),
+        _make_code_candidate(
+            node_id="src/lib/svc.ts::createListing",
+            file_path="src/lib/svc.ts",
+            name="createListing",
+            reranker_score=0.9,
+        ),
+        _make_code_candidate(
+            node_id="src/lib/svc.ts::updateListing",
+            file_path="src/lib/svc.ts",
+            name="updateListing",
+            reranker_score=0.8,
+        ),
     ]
     result = step_3_7_plausibility_and_affinity(candidates, cr, settings)
-    # createListing is named → always admitted; updateListing exceeds cap → dropped
     ids = [c.node_id for c in result]
+    # createListing is named -> always admitted; updateListing fails density.
     assert "src/lib/svc.ts::createListing" in ids
     assert "src/lib/svc.ts::updateListing" not in ids
 
 
 def test_3_7_no_gate_when_below_density_threshold():
+    """Files below density threshold pass entirely."""
     cr = _make_cr()
-    settings = _make_settings(density_threshold=0.5, max_per_file=2)
-    # 3 total, 2 from same file → fraction=2/3≈0.67 > 0.5 → cap at 2
+    settings = _make_settings(density_threshold=0.7)  # 67% < 70% -> no flood
     candidates = [
         _make_code_candidate(node_id="a/fn1", file_path="a.ts", reranker_score=0.9),
         _make_code_candidate(node_id="a/fn2", file_path="a.ts", reranker_score=0.8),
         _make_code_candidate(node_id="b/fn1", file_path="b.ts", reranker_score=0.7),
     ]
     result = step_3_7_plausibility_and_affinity(candidates, cr, settings)
-    # a.ts: fraction=2/3=0.667 > 0.5, so capped at 2 — both from a.ts admitted (cap=2)
     assert len(result) == 3
 
 
@@ -405,13 +444,11 @@ def test_3_6_merged_doc_contexts_populated():
 
 
 def test_3_5_uses_raw_reranker_score_not_normalized():
-    """B4: step_3_5 uses raw_reranker_score when available."""
-    # c1: raw_reranker_score=0.3 (absolute quality below threshold=0.5) → drop
-    c1 = _make_code_candidate(node_id="c1", reranker_score=0.8)  # high normalized
-    c1.raw_reranker_score = 0.3  # but low raw quality
-    # c2: raw_reranker_score=0.7 (above threshold) → keep
-    c2 = _make_code_candidate(node_id="c2", reranker_score=0.2)  # low normalized
-    c2.raw_reranker_score = 0.7  # but high raw quality
+    """Phase 2.6: step_3_5 uses raw_reranker_score, not normalized reranker_score."""
+    # c1: raw=0.3 (absolute quality below threshold=0.5) → drop
+    c1 = _make_code_candidate(node_id="c1", reranker_score=0.8, raw_reranker_score=0.3)
+    # c2: raw=0.7 (above threshold) → keep, despite low normalized score
+    c2 = _make_code_candidate(node_id="c2", reranker_score=0.2, raw_reranker_score=0.7)
 
     result = step_3_5_score_filter([c1, c2], threshold=0.5)
     ids = [c.node_id for c in result]
@@ -419,13 +456,23 @@ def test_3_5_uses_raw_reranker_score_not_normalized():
     assert "c2" in ids        # raw 0.7 ≥ 0.5 → kept
 
 
-def test_3_5_falls_back_to_reranker_score_when_raw_is_zero():
-    """B4 fallback: raw_reranker_score=0.0 (V0-V2) uses reranker_score."""
-    c = _make_code_candidate(reranker_score=0.8)
-    # raw stays at 0.0 default → fallback to reranker_score=0.8
+def test_3_5_v0_v2_raw_zero_passes_positive_threshold():
+    """Phase 2.6: raw_reranker_score=0.0 (V0-V2, reranker not run) returns 0.0.
+
+    The score floor default for V0-V2 is 0.0, so all candidates pass.
+    When V3+ sets raw_reranker_score, the threshold is meaningful.
+    This verifies that raw=0.0 fails a strict positive threshold (0.5),
+    as intended — the floor gate is disabled for variants where the
+    reranker was not run by setting threshold=0.0 in VariantFlags.
+    """
+    c = _make_code_candidate(reranker_score=0.8, raw_reranker_score=0.0)
     assert c.raw_reranker_score == 0.0
-    result = step_3_5_score_filter([c], threshold=0.5)
-    assert len(result) == 1
+    # raw=0.0 does NOT pass a threshold=0.5; runner sets threshold=0.0 for V0-V2
+    result_strict = step_3_5_score_filter([c], threshold=0.5)
+    assert len(result_strict) == 0
+    # With threshold=0.0 (V0-V2 setting), everything passes
+    result_zero = step_3_5_score_filter([c], threshold=0.0)
+    assert len(result_zero) == 1
 
 
 def test_3_7_doc_chunks_exempt_from_density_gate():
@@ -443,19 +490,22 @@ def test_3_7_doc_chunks_exempt_from_density_gate():
 
 
 def test_3_7_doc_chunks_and_code_independence():
-    """B3: doc chunk exemption does not affect code node density calculation."""
+    """B3: doc chunk exemption does not affect code-density calculation.
+
+    Crucible Fix 9 semantics: when a file is flooded (>density_threshold of
+    code candidates), ALL code candidates from that file are dropped, but
+    doc chunks remain exempt. The previous max_per_file cap is gone.
+    """
     cr = _make_cr()
-    settings = _make_settings(density_threshold=0.3, max_per_file=1)
-    # 2 code candidates from same file → code density = 2/2 = 1.0 → cap at 1
+    settings = _make_settings(density_threshold=0.3)
+    # 2 code candidates from same file -> 100% density -> all dropped.
     code1 = _make_code_candidate(node_id="src/a.ts::fn1", file_path="src/a.ts", reranker_score=0.9)
     code2 = _make_code_candidate(node_id="src/a.ts::fn2", file_path="src/a.ts", reranker_score=0.7)
-    # 1 doc chunk → always passes
+    # Doc chunk -> always passes.
     doc = _make_doc_candidate(node_id="srs__doc1", reranker_score=0.6)
 
     result = step_3_7_plausibility_and_affinity([code1, code2, doc], cr, settings)
     ids = [c.node_id for c in result]
-    # doc always admitted
-    assert "srs__doc1" in ids
-    # only top code candidate admitted (density cap=1)
-    assert "src/a.ts::fn1" in ids
-    assert "src/a.ts::fn2" not in ids
+    assert "srs__doc1" in ids                 # doc always admitted
+    assert "src/a.ts::fn1" not in ids         # flooded -> dropped
+    assert "src/a.ts::fn2" not in ids         # flooded -> dropped
