@@ -1,17 +1,13 @@
-"""Ablation harness: run V0..V7 over a GT dataset (Sprint 11).
+"""Ablation harness: run V0..V7 over a GT dataset.
 
-Crucible Fix 4 (AV-1): the harness scores ``cis.all_node_ids()`` (the full
-unpruned validated CIS) against the ground-truth entity and file sets
-using set-level metrics — no F1@K. The deterministic ``impacted_nodes``
-list emitted by the runner equals the validated CIS (Crucible Fix 3 +
-Amendment 2), so the metric target is the impact-report's node IDs and
-file paths.
+Scores ``cis.all_node_ids()`` (full unpruned validated CIS) against the
+ground-truth entity and file sets using set-level metrics — no F1@K.
 
 Each (CR, variant) row records both entity-level and file-level metrics.
 The output CSV feeds ``statistical.run_primary_test`` for the V7 vs V5
 Wilcoxon test on f1_set.
 
-Reference: 09_ablation_harness.md (revised under Crucible Plan).
+Reference: 09_ablation_harness.md.
 """
 
 from __future__ import annotations
@@ -154,7 +150,7 @@ def run_full_evaluation(
 
     Performance: shares embedder, reranker, and llm_client across runs so
     BFS/LLM context loading happens once per process invocation, not per
-    CR-variant cell (Crucible Fix 15).
+    CR-variant cell.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

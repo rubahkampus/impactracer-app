@@ -55,18 +55,13 @@ class Reranker:
     ) -> list[Candidate]:
         """Score each candidate against ALL queries and take the max score.
 
-        N4 fix: using only primary_intent (single query) systematically
-        penalises BM25-code candidates whose embed_text is identifier-level
-        (low semantic overlap with natural-language intent).  Scoring against
-        all search_queries and keeping the maximum ensures a candidate that
-        precisely matches any query phrase is not under-scored.
-
+        Scoring against all search_queries and keeping the maximum ensures a
+        candidate that precisely matches any query phrase is not under-scored.
         Falls back to ``fallback_query`` when ``queries`` is empty.
 
         Sets ``reranker_score`` on each candidate to the max cross-encoder
         score across all queries, then returns top_k sorted descending.
-        The caller snapshots ``raw_reranker_score`` from this value BEFORE
-        min-max normalisation (B4).
+        The caller snapshots ``raw_reranker_score`` before min-max normalisation.
         """
         if not candidates:
             return []

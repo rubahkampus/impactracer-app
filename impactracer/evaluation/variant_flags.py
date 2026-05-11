@@ -13,12 +13,10 @@ Each variant is a prefix of an additive chain:
     V6.5 V6 + LLM #4 propagation validation (BFS only, no full synthesis changes)
     V7   V6 + LLM #4 propagation validation + full system
 
-V3.5: gates-only isolation (N7/AV-7).
-V6.5: BFS + LLM #4 isolation variant (Phase 3.1 / A-3/A-NEW-1).
-  Compares V6.5 vs V6 to isolate LLM #4's precision contribution independently
-  of any other V7 changes. The pre-registered primary test is V7 vs V5, but
-  V6.5 provides the mechanistic attribution the thesis needs to explain WHY
-  V7 outperforms V5 (BFS recall gain vs LLM #4 precision gain).
+V3.5: gates-only isolation (measures gate contribution without LLM #2).
+V6.5: BFS + LLM #4 isolation (measures LLM #4 precision contribution
+  independently of V7's full system). Enables mechanistic attribution:
+  V6→V6.5 isolates LLM #4 precision gain; V5→V6 isolates BFS recall gain.
 
 Reference: 09_ablation_harness.md.
 """
@@ -42,7 +40,7 @@ class VariantFlags:
     enable_cross_encoder: bool
 
     # Gates (FR-C4)
-    enable_score_floor: bool           # calibrated min reranker score (AV-2)
+    enable_score_floor: bool           # calibrated min reranker score
     enable_dedup_gate: bool
     enable_plausibility_gate: bool
 
@@ -56,9 +54,8 @@ class VariantFlags:
     run_llm_1: bool = True                # Interpret
     run_llm_5: bool = True                # Synthesize
 
-    # Phase 3.3 (A-4): forced-inclusion bypasses LLM #5 synthesis and builds
-    # the ImpactReport directly from all CIS nodes. Used to measure LLM #5's
-    # selection contribution vs the pipeline's CIA capability.
+    # Forced-inclusion bypasses LLM #5 synthesis and builds ImpactReport directly
+    # from all CIS nodes. Used to isolate LLM #5's selection contribution.
     force_include_all_cis_nodes: bool = False
 
     ALL_VARIANTS: ClassVar[list[str]] = [
@@ -117,11 +114,10 @@ class VariantFlags:
     def v3_5(cls) -> "VariantFlags":
         """V3.5: gates only (no LLM #2).
 
-        N7/AV-7: isolation variant to measure the independent contribution
-        of the three deterministic gates (score floor, semantic dedup,
-        plausibility+affinity) to precision/recall WITHOUT LLM #2.
-        Comparing V3.5 vs V3 isolates gate contribution; V4 vs V3.5 isolates
-        LLM #2 contribution — separating concerns for the thesis ablation table.
+        Isolation variant to measure the independent contribution of the three
+        deterministic gates (score floor, semantic dedup, plausibility+affinity)
+        to precision/recall WITHOUT LLM #2. V3.5 vs V3 isolates gate contribution;
+        V4 vs V3.5 isolates LLM #2 contribution.
         """
         return cls(
             variant_id="V3.5",
@@ -139,7 +135,7 @@ class VariantFlags:
             variant_id="V4",
             enable_bm25=True, enable_dense=True, enable_rrf=True,
             enable_cross_encoder=True,
-            enable_score_floor=True,   # Sprint 9: calibrated floor applied
+            enable_score_floor=True,
             enable_dedup_gate=True, enable_plausibility_gate=True,
             enable_sis_validation=True, enable_trace_validation=False,
             enable_bfs=False, enable_propagation_validation=False,
@@ -173,14 +169,8 @@ class VariantFlags:
     def v6_5(cls) -> "VariantFlags":
         """V6.5: BFS + LLM #4 propagation validation isolation variant.
 
-        Phase 3.1 (A-3/A-NEW-1): identical to V7 except that this variant
-        is explicitly labelled V6.5 to signal it is the mechanistic isolation
-        variant. The thesis ablation table uses V6.5 vs V6 to attribute LLM
-        #4's precision contribution independently of all other V7 changes.
-
-        In the current codebase V6.5 and V7 are behaviourally identical;
-        if future sprints add V7-only post-processing (e.g. cross-validation),
-        V6.5 provides a stable comparison point that excludes those changes.
+        Identical to V7; used to attribute LLM #4's precision contribution
+        independently in the ablation table (V6.5 vs V6).
         """
         return cls(
             variant_id="V6.5",

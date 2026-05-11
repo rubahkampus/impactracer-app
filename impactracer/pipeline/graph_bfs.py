@@ -27,8 +27,6 @@ from impactracer.shared.models import CISResult, NodeTrace
 # Hub node threshold: nodes with total degree above this are capped at depth 1.
 _HUB_DEGREE_THRESHOLD = 20
 
-# Crucible Fix 11: edge type whose depth is restricted when the seed
-# originates from a UTILITY-classified file.
 _UTILITY_DEPTH_CAPPED_EDGES: frozenset[str] = frozenset({"CALLS"})
 
 
@@ -104,29 +102,18 @@ def bfs_propagate(
     3. For each node, iterate over EDGE_CONFIG entries:
        - Determine neighbor direction (forward=successors, reverse=predecessors).
        - Apply max_depth from EDGE_CONFIG.
-       - For CALLS edges, cap to 1 if origin seed is low-confidence (Fix D).
+       - For CALLS edges, cap to 1 if origin seed is low-confidence.
        - For hub nodes (degree > 20), cap all edges to depth 1.
-       - **Crucible Fix 11**: for CALLS chains originating at a UTILITY-file
-         seed, cap depth to UTILITY_FILE_CALLS_DEPTH_CAP (1).
-       - **Crucible Fix 11**: skip neighbours whose node_type is in
-         EXCLUDED_PROPAGATION_NODE_TYPES (e.g. ExternalPackage).
-       - **Crucible Fix 11**: skip neighbours whose total in-degree exceeds
-         NODE_TYPE_MAX_FAN_IN[node_type] (sharper hub cap).
+       - For CALLS chains originating at a UTILITY-file seed, cap depth to
+         UTILITY_FILE_CALLS_DEPTH_CAP (prevents service-layer fan-out explosion).
+       - Skip neighbours in EXCLUDED_PROPAGATION_NODE_TYPES (e.g. ExternalPackage).
+       - Skip neighbours whose in-degree exceeds NODE_TYPE_MAX_FAN_IN[node_type].
        - Skip already-visited nodes.
     4. Record NodeTrace per propagated node.
 
-    Args:
-        seed_file_classification: optional dict mapping seed node_id to its
-            file's FileClassification (e.g. "UTILITY"). Required for the
-            UTILITY-CALLS depth cutoff (Crucible Fix 11.1).
-        node_type_by_id: optional dict mapping node_id -> node_type. Used to
-            evaluate per-node-type fan-in caps and excluded-type filtering
-            (Crucible Fix 11.2).
-
     Invariant: ``len(sis_nodes) + len(propagated_nodes) == len(visited_set)``.
 
-    Blueprint §4 Step 6; Sprint 10 Hub Node Mitigation mandate;
-    Crucible Fix 11 (structural propagation limits).
+    Blueprint §4 Step 6.
     """
     if seed_file_classification is None:
         seed_file_classification = {}
@@ -165,18 +152,9 @@ def bfs_propagate(
             source_seed=seed,
             low_confidence_seed=is_low_conf,
         )
-        # Phase 1 fix (E-NEW-4 / E-7): Do NOT mutate the shared graph.
-        # Previously graph.add_node(seed) was called unconditionally, which
-        # contaminated the shared ctx.graph across sequential ablation runs —
-        # seeds from run N were permanently visible in run N+1's graph,
-        # producing non-reproducible BFS results.
-        #
-        # Pure terminal nodes (in SQLite but with no edges) are simply absent
-        # from the graph. BFS over an absent node produces no neighbors, which
-        # is the correct behaviour: a node with no structural edges propagates
-        # to nothing. NetworkX graph.predecessors/successors on a node NOT in
-        # the graph raises NetworkXError, so we skip BFS expansion for absent
-        # seeds rather than adding them.
+        # Do NOT mutate the shared graph — adding absent seeds would contaminate
+        # sequential ablation runs. Pure terminal nodes (no edges) simply produce
+        # no BFS neighbors; they are recorded in sis_nodes only.
         if seed not in graph:
             # Absent from graph → no edges → no BFS expansion, only seed itself.
             logger.debug(
@@ -207,7 +185,6 @@ def bfs_propagate(
         # Hub mitigation: if the CURRENT node is a hub, cap its traversal to 1.
         node_is_hub = node_id in hubs
 
-        # Crucible Fix 11.1: UTILITY-file CALLS depth cap.
         origin_is_utility = (
             seed_file_classification.get(source_seed, "") == "UTILITY"
         )
@@ -216,7 +193,6 @@ def bfs_propagate(
             direction: str = cfg["direction"]
             max_depth: int = cfg["max_depth"]
 
-            # Fix D: CALLS depth = 1 for low-confidence origins.
             if edge_type in LOW_CONF_CAPPED_EDGES and origin_is_low_conf:
                 max_depth = 1
 
@@ -224,7 +200,6 @@ def bfs_propagate(
             if node_is_hub:
                 max_depth = 1
 
-            # Crucible Fix 11.1: cap CALLS chains originating at UTILITY files.
             if (
                 edge_type in _UTILITY_DEPTH_CAPPED_EDGES
                 and origin_is_utility
@@ -250,15 +225,11 @@ def bfs_propagate(
                             break
 
             for nbr in neighbors:
-                # Crucible Fix 11.2: exclude propagation INTO ExternalPackage
-                # nodes and other excluded types.
                 nbr_type = node_type_by_id.get(nbr, "")
                 if nbr_type in EXCLUDED_PROPAGATION_NODE_TYPES:
                     continue
 
-                # Crucible Fix 11.2: per-node-type fan-in cap. Skip neighbour
-                # if its in-degree exceeds the type-specific limit. Seeds are
-                # never excluded (they were admitted by retrieval/LLM #2).
+                # Per-node-type fan-in cap. Seeds are never excluded.
                 if nbr_type and nbr not in visited:
                     fan_in_cap = NODE_TYPE_MAX_FAN_IN.get(nbr_type)
                     if fan_in_cap is not None and fan_in_cap > 0:
@@ -274,13 +245,9 @@ def bfs_propagate(
                 new_depth = depth + 1
 
                 if nbr in visited:
-                    # Phase 2.1 (E-1): best-path semantics for multi-seed paths.
-                    # First-visit-wins (old behaviour) was arbitrary: whichever
-                    # seed happened to reach a node first won, regardless of
-                    # semantic quality. We now compare the NEW candidate trace
-                    # against the EXISTING trace and keep the higher-severity one.
-                    # If the new trace is strictly better, re-enqueue the node so
-                    # BFS can continue propagating from it with the improved chain.
+                    # Best-path semantics: if the new trace has higher severity
+                    # than the existing one, replace and re-enqueue so BFS
+                    # continues from the improved chain.
                     existing = propagated_nodes.get(nbr)
                     if existing is None:
                         # nbr is a SIS seed — seeds always keep depth=0, skip.
@@ -312,10 +279,8 @@ def bfs_propagate(
                 )
                 queue.append((nbr, new_depth, new_chain, new_path, source_seed))
 
-    # Invariant assertion: must hold or there is a visited-set bug.
-    # Phase 2.1: best-path re-enqueuing does not change the visited set size —
-    # a re-enqueued node was already in visited; only its NodeTrace is updated.
-    # So the invariant len(sis+prop) == len(visited) still holds exactly.
+    # Best-path re-enqueuing does not change the visited set size — a re-enqueued
+    # node was already in visited; only its NodeTrace changes.
     assert len(sis_nodes) + len(propagated_nodes) == len(visited), (
         f"BFS invariant violated: "
         f"{len(sis_nodes)} sis + {len(propagated_nodes)} prop != {len(visited)} visited"
@@ -329,20 +294,12 @@ def bfs_propagate(
     return CISResult(sis_nodes=sis_nodes, propagated_nodes=propagated_nodes)
 
 
-# ---------------------------------------------------------------------------
-# Sprint 10.1 — Strategy 1: CONTAINS sub-tree aggregation
-# ---------------------------------------------------------------------------
-
 #: Node types that can act as CONTAINS parents (aggregation candidates).
 _CONTAINS_PARENT_TYPES: frozenset[str] = frozenset({
     "Interface", "Enum", "Class", "File",
 })
 
 #: Node types that are collapsed into their parent (leaf children).
-# Phase 1 fix (E-2): "EnumMember" removed. It is not one of the 9 canonical
-# NodeType values (see models.py NodeType Literal) and has never appeared in
-# any indexed graph. Keeping it was dead code that silently implied the system
-# handles a node type it does not actually produce.
 _CONTAINS_CHILD_TYPES: frozenset[str] = frozenset({
     "InterfaceField",
 })
@@ -355,12 +312,11 @@ def collapse_contains_subtrees(
 ) -> CISResult:
     """Collapse CONTAINS-only children into their parent's NodeTrace.
 
-    Motivation (Sprint 10.1): dense CONTAINS edges (File→InterfaceField,
-    Interface→InterfaceField) cause BFS to visit hundreds of leaf nodes,
-    generating thousands of LLM #4 prompt tokens.  This function identifies
-    propagated parent nodes (Interface/Enum/Class/File) whose children in the
-    CIS are connected to them *exclusively* via CONTAINS edges, removes those
-    children from propagated_nodes, and records their IDs in the parent's
+    Dense CONTAINS edges (File→InterfaceField, Interface→InterfaceField) cause
+    BFS to visit hundreds of leaf nodes, generating thousands of LLM #4 prompt
+    tokens. This function identifies propagated parent nodes whose CONTAINS
+    children are pure leaves (no non-CONTAINS edges), removes those children
+    from propagated_nodes, and records their IDs in the parent's
     ``collapsed_children`` list.
 
     Collapse conditions for a child node C relative to parent P:
@@ -376,7 +332,7 @@ def collapse_contains_subtrees(
     consumers: the combined() view now contains parent records instead of
     the removed child records.
 
-    Blueprint reference: master_blueprint.md Sprint 10.1 §Strategy-1.
+    Blueprint reference: master_blueprint.md §4 Step 6.5.
     """
     if not cis.propagated_nodes:
         return cis

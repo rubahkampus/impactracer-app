@@ -19,17 +19,11 @@ from impactracer.shared.models import Candidate, CRInterpretation
 
 
 # ---------------------------------------------------------------------------
-# BM25 tokenizer (ED-1: camelCase-aware, replaces naive whitespace split)
+# BM25 tokenizer — camelCase-aware
 # ---------------------------------------------------------------------------
 
-
-# Crucible Fix 5 (AV-4): explicit BM25 stop-word list with len>=2 minimum.
-#
-# Previously, len>=3 was used as a coarse stop-word filter — but this also
-# dropped high-discriminative 2-char technical tokens like "id", "db", "js",
-# "ts", "ws", "os", "ui", "fk", "pk", "ip" that frequently appear in TS code
-# identifiers. The correct fix is an explicit stop-word list that targets
-# only function words, leaving short technical identifiers intact.
+# Explicit stop-word list with len>=2 minimum. len>=3 as a coarse filter
+# drops discriminative 2-char technical tokens ("id", "db", "ts", "ui").
 _BM25_STOPWORDS: frozenset[str] = frozenset({
     # English 2-3 char function words and articles
     "of", "to", "in", "on", "at", "by", "is", "be", "as", "an", "or",
@@ -45,17 +39,9 @@ _BM25_STOPWORDS: frozenset[str] = frozenset({
 def _tokenize_for_bm25(text: str) -> list[str]:
     """Tokenize text for BM25 with camelCase decomposition.
 
-    Crucible Fix 5 (AV-4):
-    1. camelCase / PascalCase split: commissionListingId -> commission Listing Id
-    2. Lowercase + split on non-alphanumeric (drops operators, punctuation)
-    3. Filter pure-numeric tokens (noise)
-    4. Filter tokens of length 1 (single chars are non-discriminative)
-    5. Filter explicit stop-words (function words in EN + ID)
-
-    The previous implementation used len>=3 as an implicit stop-word filter;
-    this dropped legitimate 2-char technical identifiers ("id", "db", "js",
-    "ts") that have high discriminative power in TS codebases. Explicit
-    stop-word filtering with len>=2 restores those tokens.
+    1. camelCase / PascalCase split
+    2. Lowercase + split on non-alphanumeric
+    3. Filter pure-numeric tokens, single chars, and BM25 stop-words
     """
     text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
     text = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", text)
@@ -78,7 +64,7 @@ def build_bm25_from_chroma(collection: object) -> tuple[BM25Okapi, list[str]]:
 
     Returns ``(bm25, ids)`` where ``ids[i]`` corresponds to the i-th BM25 document.
 
-    Raises RuntimeError if the collection is empty (ED-5).
+    Raises RuntimeError if the collection is empty.
     """
     result = collection.get(include=["documents", "metadatas"])
     ids: list[str] = result["ids"]
@@ -100,7 +86,7 @@ def build_metadata_cache(collection: object) -> dict[str, dict]:
     """Build a {node_id: metadata_dict} cache from a ChromaDB collection.
 
     Called once at context load time to avoid N+1 per-document metadata
-    queries during BM25 chunk_type filtering (ED-3).
+    queries during BM25 chunk_type filtering.
     """
     result = collection.get(include=["metadatas"])
     return {cid: meta for cid, meta in zip(result["ids"], result["metadatas"])}
@@ -116,18 +102,14 @@ def apply_negative_filter(
     out_of_scope_operations: list[str],
     penalty: float = 5.0,
 ) -> list[Candidate]:
-    """Crucible Fix 13: additive demotion for out-of-scope candidates.
+    """Additive demotion for out-of-scope candidates.
 
-    For each candidate whose ``name`` or ``text_snippet`` contains any
-    out-of-scope operation as a case-insensitive substring, subtract
-    ``penalty`` from its ``raw_reranker_score``. This is mathematically
-    sound across the entire real line of cross-encoder logits — unlike
-    multiplicative demotion (`* 0.5`), which inverts sign for negative
-    logits and inadvertently *promotes* out-of-scope candidates.
+    Subtracts ``penalty`` from raw_reranker_score when a candidate's name or
+    snippet matches an out-of-scope operation. Additive is correct across the
+    full real line of cross-encoder logits — multiplicative would invert sign
+    for negative logits and promote instead of demote.
 
-    Penalty default 5.0 is calibrated to be larger than typical
-    inter-candidate logit gaps (~1-2 units), guaranteeing demoted
-    candidates rank below all genuine matches.
+    Penalty 5.0 exceeds typical inter-candidate logit gaps (~1-2 units).
 
     Mutates candidates in-place; also returns the list for chaining.
     """
@@ -157,8 +139,8 @@ def apply_traceability_bonus(
     bonus: float = 0.1,
     top_k_per_doc: int = 3,
 ) -> list[Candidate]:
-    """Crucible Fix 12.2: additive bonus for code candidates that the
-    offline traceability matrix associates with a retrieved doc chunk.
+    """Additive bonus for code candidates that the offline traceability
+    matrix associates with a retrieved doc chunk.
 
     For each doc-chunk candidate in the pool, look up its top-K code
     resolutions in ``doc_code_candidates``. Any code candidate already in
@@ -333,9 +315,9 @@ def _hydrate_doc_candidates(
 ) -> list[Candidate]:
     """Build Candidate objects for doc_chunks collection entries.
 
-    B3/FF-5: Populate file_path from ChromaDB metadata source_file so the
-    density gate in Step 3.7 can distinguish srs.md from sdd.md correctly,
-    and so the validator prompt shows a meaningful source file for doc chunks.
+    Populates file_path from ChromaDB metadata source_file so the density gate
+    in Step 3.7 can distinguish documents by source and the validator prompt
+    shows a meaningful source file for doc chunks.
     """
     if not ids:
         return []
@@ -356,8 +338,6 @@ def _hydrate_doc_candidates(
             bm25_score=bm25_scores.get(cid, 0.0),
             chunk_type=meta.get("chunk_type"),
             name=meta.get("section_title", cid),
-            # B3/FF-5: populate from metadata — was always "" before, causing all
-            # doc chunks to share file_path="" and be incorrectly density-gated.
             file_path=meta.get("source_file", ""),
             text_snippet=doc,   # full doc text — no truncation here; context_builder caps
         ))
@@ -379,7 +359,7 @@ def hybrid_search(
     Assembles up to four ranked lists depending on variant flags, fuses via
     Adaptive RRF, and returns the top-K RRF pool (settings.top_k_rrf_pool)
     for downstream reranking. The reranker then selects up to
-    settings.max_admitted_seeds from this pool (FF-1: 50→15 funnel).
+    settings.max_admitted_seeds from this pool.
     """
     flags = ctx.variant_flags
     top_k = settings.top_k_per_query
@@ -401,8 +381,6 @@ def hybrid_search(
     queries = cr_interp.search_queries
     logger.info("[retriever] search_queries={}", queries)
 
-    # FF-4: initialize unconditionally — prevents NameError if enable_dense=False
-    # and a future code path references query_vecs outside the dense guard.
     query_vecs: list = []
     if flags.enable_dense:
         query_vecs = [ctx.embedder.embed_single(q) for q in queries]
@@ -434,7 +412,7 @@ def hybrid_search(
         logger.debug("[retriever] dense_doc: {} candidates", len(dense_doc_ids))
 
     # -------------------------------------------------------------------
-    # Path 2: BM25 doc (ED-3: use pre-cached metadata, no N+1 queries)
+    # Path 2: BM25 doc
     # -------------------------------------------------------------------
     bm25_doc_ids: list[str] = []
     if flags.enable_bm25 and ctx.doc_bm25_ids:
@@ -447,7 +425,6 @@ def hybrid_search(
                 if score <= 0:
                     continue
                 cid = ctx.doc_bm25_ids[i]
-                # ED-3: use cached metadata instead of per-doc ChromaDB get()
                 if doc_filter:
                     chunk_type = doc_meta_cache.get(cid, {}).get("chunk_type", "")
                     if chunk_type not in doc_filter:
@@ -484,7 +461,7 @@ def hybrid_search(
         logger.debug("[retriever] dense_code: {} candidates", len(dense_code_ids))
 
     # -------------------------------------------------------------------
-    # Path 4: BM25 code (ED-1: camelCase tokenizer applied to queries)
+    # Path 4: BM25 code
     # -------------------------------------------------------------------
     bm25_code_ids: list[str] = []
     if flags.enable_bm25 and has_code_layer and ctx.code_bm25_ids:
@@ -532,11 +509,8 @@ def hybrid_search(
             for rank, cid in enumerate(ids_list):
                 scores[cid] = scores.get(cid, 0.0) + 1.0 / (rrf_k + rank + 1)
 
-    # Top-K RRF pool (FF-1: top_k_rrf_pool=50, feeds cross-encoder which
-    # selects max_admitted_seeds=15 from this broader pool)
     top_ids = sorted(scores, key=scores.__getitem__, reverse=True)[:top_k_rrf_pool]
 
-    # AV-3: structured retrieval summary log for ablation variance verification
     logger.info(
         "[retriever] retrieval_summary variant={} rrf_pool_size={} "
         "dense_doc={} bm25_doc={} dense_code={} bm25_code={}",

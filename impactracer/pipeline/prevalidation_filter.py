@@ -66,37 +66,17 @@ def step_3_5_score_filter(
 ) -> list[Candidate]:
     """Drop candidates whose absolute cross-encoder score is below threshold.
 
-    B4 fix: uses ``raw_reranker_score`` (absolute cross-encoder quality)
-    rather than ``reranker_score`` (min-max normalized, rank-relative).
-    Min-max normalization maps the worst candidate in a batch to 0.0
-    regardless of its absolute quality, making a normalized score floor
-    a rank filter rather than a quality filter.  Using the raw score
-    preserves the intended semantics: "drop candidates the model considers
-    low quality", not "drop the bottom N% of candidates".
+    Uses raw_reranker_score (absolute logit) not the min-max normalized
+    reranker_score — normalization maps the worst candidate to 0.0 regardless
+    of quality, making a normalized floor a rank filter, not a quality filter.
 
-    Falls back to ``reranker_score`` when ``raw_reranker_score`` is 0.0
-    (V0–V2 where the reranker was not run, so raw is always 0).
+    Falls back to 0.0 for V0–V2 where the reranker was not run.
 
     Blueprint §4 Step 3.5.
     """
     def _effective_score(c: Candidate) -> float:
-        # Phase 2.6 (F-NEW-1/F-5): use raw_reranker_score as the authoritative
-        # quality signal. If raw_reranker_score is None-equivalent (0.0, which
-        # is the default for V0-V2 where the reranker was not run), return 0.0
-        # directly — do NOT fall back to the normalized reranker_score.
-        #
-        # The previous fall-back to reranker_score was the bug: min-max
-        # normalization always maps the lowest candidate in a batch to 0.0,
-        # so the normalized score of a genuinely poor candidate could equal
-        # 0.0 and still pass a 0.0 floor — the gate was permanently disabled.
-        # With raw_reranker_score, a score of 0.0 means "reranker not run"
-        # (V0-V2), which correctly passes a 0.0 default threshold.
-        # For V3+ where the reranker IS run, raw_reranker_score is the
-        # absolute cross-encoder logit — negative values indicate poor quality
-        # and will fail a properly calibrated positive threshold (e.g. 0.15).
         if c.raw_reranker_score != 0.0:
             return c.raw_reranker_score
-        # Reranker not run (V0-V2): treat as 0.0 so everything passes default floor.
         return 0.0
 
     return [c for c in candidates if _effective_score(c) >= threshold]
@@ -121,11 +101,6 @@ def step_3_6_semantic_dedup(
         c.node_id: c for c in candidates if c.collection == "code_units"
     }
 
-    # Phase 2.8 (E-NEW-1): batch SQLite query for all doc chunk top-1 resolutions.
-    # The previous implementation issued one SELECT per doc candidate in a loop —
-    # N sequential round-trips for N doc chunks. With 15 candidates this is 15
-    # sequential queries. Replace with a single WHERE doc_id IN (...) batch query
-    # that returns all top-1 mappings at once, then build a lookup dict.
     doc_candidates = [c for c in candidates if c.collection == "doc_chunks"]
     doc_top1_map: dict[str, str] = {}  # doc_id → top-1 code_id
 
@@ -186,14 +161,9 @@ def step_3_7_plausibility_and_affinity(
     """Rescore by layer affinity, then enforce density-only plausibility gate.
 
     Phase A: multiply reranker_score by _affinity_factor(c, cr_interp).
-    Phase B (Crucible Fix 9): drop CODE candidates from files whose fraction
-    of total code candidates exceeds plausibility_gate_density_threshold.
-    Named-entry-point matches are exempt. The previous per-file admission
-    cap (max_per_file=2) was removed because it arbitrarily rejected genuine
-    multi-symbol impacts; density-based protection alone catches the
-    pathological "one over-indexed file dominates retrieval" case.
-
-    B3 fix: doc chunk candidates are ALWAYS exempt from the file-density cap.
+    Phase B: drop CODE candidates from files whose fraction of total code
+    candidates exceeds plausibility_gate_density_threshold. Named-entry-point
+    matches are exempt. Doc chunk candidates always pass Phase B.
 
     Blueprint §4 Step 3.7.
     """
@@ -297,18 +267,11 @@ def _primary_chunk_type(affected_layers: list[str]) -> str:
 def _matches_any_named(name: str, named_patterns: list[str]) -> bool:
     """True if any named pattern is a substring of name (case-insensitive).
 
-    N3 fix: the previous implementation checked BOTH ``p in name_lower`` AND
-    ``name_lower in p``, creating a false positive trap: a short name like
-    "get" would match a pattern like "getCommission" (name_lower in p direction)
-    even though "get" is not what the CR is targeting.
+    Direction: pattern ∈ name (not name ∈ pattern). Pattern "createListing"
+    matches "createListingHandler" but not the reverse — avoids false positives
+    from short generic names like "get" matching long patterns.
 
-    The semantically correct direction is: the pattern is a substring of the
-    name.  E.g. pattern "createListing" should match the function named
-    "createListingHandler" but NOT match any function whose name happens to be
-    a prefix of "createListing".
-
-    Blueprint §4 Step 3.7 Phase B: named_entry_points are explicit patterns
-    the CR describes — use them as search strings against node names.
+    Blueprint §4 Step 3.7 Phase B.
     """
     name_lower = name.lower()
     return any(p in name_lower for p in named_patterns)

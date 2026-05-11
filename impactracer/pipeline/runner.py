@@ -4,9 +4,6 @@ Invoked by :func:`impactracer.cli.analyze`. Consumes a :class:`VariantFlags`
 instance so the same code powers both full V7 analysis and the ablation
 harness variants V0 through V6.
 
-Sprint 8 implements Steps 0, 1, 2, 3, 8, 9 (V0–V3 capability).
-Steps 4–7 are passthrough stubs filled in Sprints 9–10.
-
 Reference: master_blueprint.md §4.
 """
 
@@ -77,7 +74,7 @@ class PipelineContext:
     graph: Any
     doc_bm25: Any
     doc_bm25_ids: list[str]
-    doc_meta_cache: dict[str, dict]   # ED-3: pre-cached doc chunk metadata
+    doc_meta_cache: dict[str, dict]   # pre-cached doc chunk metadata
     code_bm25: Any
     code_bm25_ids: list[str]
     embedder: Any
@@ -108,7 +105,7 @@ def load_pipeline_context(
 
     Accepts optional pre-constructed shared_embedder, shared_reranker,
     shared_llm_client so the evaluation harness can reuse a single set of
-    heavy objects across 160 runs instead of instantiating 160 copies (ED-6).
+    heavy objects across all ablation runs.
 
     Blueprint §4 Step 0.
     """
@@ -127,7 +124,6 @@ def load_pipeline_context(
     graph = _build_graph_from_sqlite(conn)
 
     doc_bm25, doc_bm25_ids = build_bm25_from_chroma(doc_col)
-    # ED-3: build metadata cache to avoid N+1 ChromaDB queries in BM25 filtering
     doc_meta_cache = build_metadata_cache(doc_col)
 
     code_bm25, code_bm25_ids = build_bm25_from_chroma(code_col)
@@ -188,7 +184,7 @@ def _minimal_rejection_report(reason: str, degraded: bool = False) -> ImpactRepo
 
 
 def _validate_cr_interpretation_coherence(ci: CRInterpretation) -> CRInterpretation:
-    """Crucible Fix 14: soft-fix change_type / affected_layers coherence.
+    """Soft-fix change_type / affected_layers coherence.
 
     DELETION CRs without 'code' layer have 'code' added. ADDITION CRs with
     only 'code' (no requirement/design) have 'requirement' added so doc
@@ -216,18 +212,8 @@ def _validate_cr_interpretation_coherence(ci: CRInterpretation) -> CRInterpretat
 def _compute_scope(cis: CISResult, settings: "Settings | None" = None) -> str:
     """Deterministically compute estimated_scope from CIS node counts.
 
-    N8 fix: estimated_scope must NOT be hallucinated by LLM #5 from a pruned
-    synthesis context.  The synthesizer sees only the context-budget subset;
-    counting nodes from the full CIS gives a provably correct scope that is
-    reproducible and thesis-defensible.
-
-    Phase 2.9 (F-NEW-5): thresholds are now read from Settings so they can
-    be calibrated post-evaluation without changing source code.
-
-    Thresholds (default, from Settings.scope_local_max / scope_medium_max):
-        terlokalisasi  : ≤ scope_local_max total CIS nodes   (default 10)
-        menengah       : scope_local_max+1 – scope_medium_max (default 11-30)
-        ekstensif      : > scope_medium_max                   (default >30)
+    Counts the full CIS regardless of prompt-window truncation, so the scope
+    is reproducible. Thresholds from Settings.scope_local_max / scope_medium_max.
 
     Returns one of "terlokalisasi", "menengah", "ekstensif".
     """
@@ -252,22 +238,13 @@ def run_analysis(
 ) -> ImpactReport:
     """End-to-end online analysis for one CR.
 
-    Crucible E2E Task 2b: when ``trace_sink`` is provided (a mutable dict),
-    the runner populates it with every step's result so the CLI can write
-    ``impact_report_full.json`` for academic auditability. The trace_sink
-    dict is mutated in-place; passing None disables tracing.
+    When ``trace_sink`` is provided (a mutable dict), the runner populates it
+    with every step's result so the CLI can write ``impact_report_full.json``
+    for academic auditability. The dict is mutated in-place; None disables tracing.
 
-    Trace keys populated:
-      step_1_interpretation,
-      step_2_rrf_pool,
-      step_3_reranked,
-      step_3_gates_survivors,
-      step_4_llm2_verdicts,
-      step_5_resolutions,
-      step_5b_llm3_verdicts,
-      step_6_bfs_raw_cis,
-      step_7_llm4_verdicts,
-      final_report.
+    Trace keys: step_1_interpretation, step_2_rrf_pool, step_3_reranked,
+    step_3_gates_survivors, step_4_llm2_verdicts, step_5_resolutions,
+    step_5b_llm3_verdicts, step_6_bfs_raw_cis, step_7_llm4_verdicts, final_report.
 
     Blueprint §4.
     """
@@ -276,8 +253,6 @@ def run_analysis(
     if variant_flags is None:
         variant_flags = VariantFlags.v7_full()
 
-    # Crucible E2E Task 2b: full-traceability sink. None means tracing
-    # disabled (no-op). Otherwise mutate the dict in-place at each step.
     def _trace(key: str, value: Any) -> None:
         if trace_sink is not None:
             trace_sink[key] = value
@@ -292,7 +267,6 @@ def run_analysis(
 
     # ------------------------------------------------------------------
     # Step 1 — Interpret CR (LLM #1, always-on)
-    # Schema constraints now live in interpreter.py SYSTEM_PROMPT (AV-1).
     # ------------------------------------------------------------------
     logger.info("[runner] Step 1: Interpret CR")
     cr_interp = interpret_cr(cr_text, ctx.llm_client)
@@ -327,7 +301,6 @@ def run_analysis(
         _trace("final_report", rej.model_dump())
         return rej
 
-    # Crucible Fix 14: enforce change_type / affected_layers coherence.
     cr_interp = _validate_cr_interpretation_coherence(cr_interp)
 
     # Aggregate degraded flag across all LLM batches in this run.
@@ -335,7 +308,6 @@ def run_analysis(
 
     # ------------------------------------------------------------------
     # Step 2 — Adaptive RRF Hybrid Search (FR-C1, FR-C2)
-    # Returns top_k_rrf_pool (=50) candidates for cross-encoder input.
     # ------------------------------------------------------------------
     logger.info("[runner] Step 2: Hybrid search (variant={})", variant_flags.variant_id)
     candidates = hybrid_search(cr_interp, ctx, settings)
@@ -346,18 +318,14 @@ def run_analysis(
         for c in candidates
     ])
 
-    # FF-5: guard zero-candidate case — synthesizing with zero nodes produces
-    # a hallucinated report; return a clean rejection instead.
+    # Guard zero-candidate case: synthesizing with zero nodes produces a hallucinated report.
     if not candidates:
         logger.warning("[runner] Zero candidates — returning empty report")
         return _minimal_rejection_report("No candidates retrieved — check index and affected_layers")
 
     # ------------------------------------------------------------------
     # Step 3 — Cross-Encoder Rerank (FR-C3)
-    # N4: Score each candidate against ALL search_queries and take the max
-    # cross-encoder score.  Using only primary_intent systematically
-    # penalises BM25-code candidates whose embed_text is identifier-level
-    # (low semantic overlap with natural-language intent).
+    # Scores each candidate against ALL search_queries; takes the max.
     # ------------------------------------------------------------------
     if variant_flags.enable_cross_encoder:
         logger.info("[runner] Step 3: Cross-encoder rerank (multi-query max scoring)")
@@ -376,30 +344,25 @@ def run_analysis(
             for c in candidates
         ])
 
-        # B4: Snapshot raw cross-encoder scores BEFORE normalization so the
-        # score floor gate operates on absolute quality, not rank-within-15.
+        # Snapshot raw cross-encoder logits before normalization so the score
+        # floor gate operates on absolute quality, not relative rank-within-15.
         for c in candidates:
             c.raw_reranker_score = c.reranker_score
 
-        # Crucible Fix 12.2: traceability bonus on raw_reranker_score for
-        # code candidates that the offline doc-code matrix associates with
-        # any retrieved doc chunk.
+        # Traceability bonus: additive +0.1 for code candidates associated with
+        # any retrieved doc chunk in the offline traceability table.
         candidates = apply_traceability_bonus(candidates, ctx.conn)
 
-        # Crucible Fix 13: additive negative filter on raw_reranker_score
-        # for candidates whose name/snippet contains an out-of-scope
-        # operation. Mathematically sound across the entire real line of
-        # cross-encoder logits (additive, not multiplicative).
+        # Negative filter: additive penalty (-5.0) for candidates matching an
+        # out-of-scope operation. Additive preserves correctness across negative
+        # cross-encoder logits (multiplicative would invert the sign).
         candidates = apply_negative_filter(
             candidates, cr_interp.out_of_scope_operations
         )
 
-        # Re-sort after bonus/penalty so downstream score-floor gate sees
-        # the corrected ordering.
         candidates.sort(key=lambda c: c.raw_reranker_score, reverse=True)
 
-        # FF-2: min-max normalize to [0,1] for relative sorting inside the
-        # pipeline (gates, context priority).  Raw scores preserved above.
+        # Min-max normalize to [0,1] for relative sorting in gates and context.
         if len(candidates) > 1:
             min_s = min(c.raw_reranker_score for c in candidates)
             max_s = max(c.raw_reranker_score for c in candidates)
@@ -420,8 +383,6 @@ def run_analysis(
 
     # ------------------------------------------------------------------
     # Steps 3.5, 3.6, 3.7 — Pre-validation gates (FR-C4)
-    # B4: Score floor uses raw_reranker_score (absolute quality signal),
-    # not the normalized relative-rank signal.
     # ------------------------------------------------------------------
     post_rerank_count = len(candidates)
     candidates = apply_prevalidation_gates(
@@ -434,7 +395,6 @@ def run_analysis(
         enable_plausibility=variant_flags.enable_plausibility_gate,
     )
 
-    # AV-3: structured admission summary for ablation log analysis
     logger.info(
         "[runner] admission_summary variant={} post_rerank={} post_gates={} admitted={}",
         variant_flags.variant_id,
@@ -456,12 +416,8 @@ def run_analysis(
 
     # ------------------------------------------------------------------
     # Step 4 — SIS Validation (LLM #2, FR-C5)
-    # Batched: max 5 candidates per LLM call (Batching Mandate).
-    # Returns (confirmed_ids, score_ordered_ids) for metric ranking (N9).
+    # Batched max 5. Returns (ids, justifications, degraded).
     # ------------------------------------------------------------------
-    # Crucible Fix 1+3: validator returns (ids, justifications, degraded).
-    # justifications maps confirmed node_id -> {function_purpose,
-    # mechanism_of_impact, justification} — used to populate NodeTrace.
     sis_justifications: dict[str, dict[str, str]] = {}
     if variant_flags.enable_sis_validation:
         logger.info("[runner] Step 4: SIS validation (batched, fail-closed)")
@@ -488,7 +444,6 @@ def run_analysis(
 
     # ------------------------------------------------------------------
     # Step 5 — Resolve doc-chunk SIS to code seeds (FR-C6)
-    # N9: Preserve score order within admitted set for metric ranking.
     # ------------------------------------------------------------------
     logger.info("[runner] Step 5: Seed resolution")
     sis_id_set = set(sis_ids)
@@ -504,20 +459,13 @@ def run_analysis(
         logger.warning("[runner] Zero admitted candidates after gates — returning empty report")
         return _minimal_rejection_report("All candidates rejected by validation gates")
 
-    # Phase 1 (E-6): Build code_node_ids set once and pass it to the resolver
-    # so resolve_doc_to_code can skip the full table scan on every call.
-    # During a 20-CR ablation run (8 variants × 20 CRs = 160 calls), this
-    # eliminates 160 full-table scans. We build it here in runner.py because
-    # the runner already has the SQLite connection and this set is stable for
-    # the lifetime of a single pipeline context.
+    # Build code_node_ids once per run so resolve_doc_to_code skips the full
+    # table scan on every call during the ablation harness (160 calls per eval).
     _code_node_ids: set[str] = {
         row[0]
         for row in ctx.conn.execute("SELECT node_id FROM code_nodes").fetchall()
     }
 
-    # Phase 1 (E-NEW-3): resolve_doc_to_code now returns (resolutions,
-    # direct_code_seeds) — the previously dead doc_to_code_map third return
-    # value has been removed from the function signature.
     resolutions, direct_code_seeds = resolve_doc_to_code(
         sis_ids=sis_ids,
         conn=ctx.conn,
@@ -539,9 +487,7 @@ def run_analysis(
     # ------------------------------------------------------------------
     # Step 5b — Trace validation (LLM #3, FR-C7)
     # ------------------------------------------------------------------
-    # low_conf tracks which resolved code seeds have PARTIAL decision.
     low_conf: dict[str, bool] = {}
-    # Crucible Fix 3: trace justifications keyed by code_id (LLM #3).
     trace_justifications: dict[str, str] = {}
 
     if variant_flags.enable_trace_validation and resolutions:
@@ -584,10 +530,6 @@ def run_analysis(
                     "source_code": row[4],
                 }
 
-        # Crucible Fix 1+3: trace validator returns 4-tuple
-        # (seeds, low_conf, justifications, degraded). Justifications map
-        # code_id -> LLM #3 verdict justification text (used to populate
-        # NodeTrace.justification with source='llm3_trace').
         validated_code_seeds, low_conf, trace_justifications, llm3_degraded = (
             validate_trace_resolutions(
                 resolutions=resolutions,
@@ -655,9 +597,7 @@ def run_analysis(
             len(high_conf),
         )
 
-        # Crucible Fix 11: bulk-fetch (file_classification, node_type) for
-        # every node in the graph and seeds. The BFS uses this to apply the
-        # UTILITY-CALLS depth cutoff and per-node-type fan-in cap.
+        # Bulk-fetch (file_classification, node_type) for BFS depth cap and fan-in cap.
         all_graph_node_ids = list(ctx.graph.nodes())
         seed_file_classification: dict[str, str] = {}
         node_type_by_id: dict[str, str] = {}
@@ -723,9 +663,8 @@ def run_analysis(
         logger.info("[runner] Step 6: No code seeds — CIS from admitted candidates")
 
     # ------------------------------------------------------------------
-    # Step 6.5 — Graph Collapse: CONTAINS sub-tree aggregation (Sprint 10.1)
-    # Must run AFTER BFS and BEFORE LLM #4 to reduce prompt token count.
-    # Only applies when BFS was enabled (propagated_nodes is non-empty).
+    # Step 6.5 — Graph Collapse: CONTAINS sub-tree aggregation
+    # Runs after BFS, before LLM #4, to reduce prompt token count.
     # ------------------------------------------------------------------
     if variant_flags.enable_bfs and cis.propagated_nodes:
         from impactracer.pipeline.graph_bfs import collapse_contains_subtrees
@@ -757,9 +696,6 @@ def run_analysis(
     # ------------------------------------------------------------------
     # Step 7 — Propagation validation (LLM #4, FR-D2)
     # ------------------------------------------------------------------
-    # Crucible Fix 3: justification map populated by LLM #4 for kept nodes
-    # AND by synthetic 'auto_exempt' strings for IMPLEMENTS/DEFINES_METHOD/
-    # TYPED_BY single-hop edges (assigned inside validate_propagation).
     llm4_justifications: dict[str, str] = {}
     if variant_flags.enable_propagation_validation and cis.propagated_nodes:
         logger.info(
@@ -785,9 +721,6 @@ def run_analysis(
                     "source_code": row[4],
                 }
 
-        # Crucible Fix 1+3: validate_propagation now returns
-        # (filtered_cis, justifications, degraded). Justifications map
-        # node_id -> LLM #4 verdict justification text.
         cis, llm4_justifications, llm4_degraded = validate_propagation(
             cis=cis,
             cr_interp=cr_interp,
@@ -810,11 +743,9 @@ def run_analysis(
     elif variant_flags.enable_propagation_validation:
         logger.info("[runner] Step 7: Propagation validation SKIPPED (no propagated nodes)")
 
-    # Crucible Fix 3: BFS-only variants (V6) and exempt-edge auto-keeps
-    # need a justification too. Generate synthetic chain-described strings
-    # for any propagated node that was NOT processed by LLM #4. This is
-    # NOT a retrospective LLM hallucination — it is a deterministic
-    # rendering of the BFS chain that the runner has access to.
+    # Generate synthetic justifications for propagated nodes not processed by
+    # LLM #4 (BFS-only variants and exempt-edge auto-keeps). These are
+    # deterministic renderings of the BFS chain, not LLM-generated text.
     for nid, trace in cis.propagated_nodes.items():
         if nid in llm4_justifications:
             continue
@@ -835,12 +766,9 @@ def run_analysis(
                 f"variant; chain is structural only."
             )
 
-    # ------------------------------------------------------------------
-    # Crucible Fix 3: attach distributed justifications to every NodeTrace
-    # so context_builder can render them and synthesizer.build_deterministic
-    # _impacted_nodes can copy them verbatim. This is the single source of
-    # truth — LLM #5 never re-justifies.
-    # ------------------------------------------------------------------
+    # Attach distributed justifications to every NodeTrace.
+    # LLM #5 never re-justifies individual nodes — they carry verbatim
+    # text from whichever LLM validated them (#2/#3/#4).
     from dataclasses import replace as _dc_replace
 
     for sid, trace in list(cis.sis_nodes.items()):
@@ -899,8 +827,7 @@ def run_analysis(
     logger.info("[runner] Step 8: Build context")
     all_node_ids = cis.all_node_ids()
 
-    # Build node_types map from admitted candidates (needed for FF-3 routing).
-    # Also query SQLite for propagated nodes not in admitted_candidates.
+    # Build node_types and node_file_paths maps — candidates plus SQLite for propagated nodes.
     node_types: dict[str, str] = {}
     node_file_paths: dict[str, str] = {}
     for c in admitted_candidates:
@@ -920,13 +847,11 @@ def run_analysis(
             node_types[row[0]] = row[1]
             node_file_paths[row[0]] = row[2] or ""
 
-    # FF-3: bidirectional backlink routing by node type
     backlinks = fetch_backlinks(all_node_ids, node_types, ctx.conn, settings.top_k_backlinks_per_node)
     snippets = fetch_snippets(all_node_ids, ctx.conn, doc_col=ctx.doc_col)
 
-    # FF-6/B4: Use raw_reranker_score (absolute quality) for context
-    # truncation priority.  The affinity-modified normalized score would
-    # mis-rank TYPE_DEFINITION nodes vs UTILITY nodes of equal raw quality.
+    # Use raw_reranker_score for context truncation priority — the normalized
+    # score would mis-rank nodes modified by the affinity gate.
     candidate_scores: dict[str, float] = {}
     for c in admitted_candidates:
         candidate_scores[c.node_id] = (
@@ -942,18 +867,12 @@ def run_analysis(
 
     # ------------------------------------------------------------------
     # Step 9 — Synthesize (LLM #5, FR-E3)
-    #
-    # Crucible Fix 3 (Full Demotion): LLM #5 is called only for the
-    # executive summary + documentation_conflicts. The impacted_nodes
-    # array is built deterministically from the FULL validated CIS using
-    # pre-recorded justifications — Crucible Amendment 2 mandate: every
-    # validated node appears in the report, regardless of whether it was
-    # truncated from the LLM #5 prompt window.
+    # LLM #5 produces only executive_summary + documentation_conflicts.
+    # impacted_entities is built deterministically from the full validated CIS;
+    # every validated node appears in the report regardless of prompt truncation.
     # ------------------------------------------------------------------
     logger.info("[runner] Step 9: Synthesize report (aggregator-only LLM #5)")
 
-    # Build deterministic impacted_nodes FIRST (Amendment 2 invariant).
-    # This is independent of any prompt-window truncation in build_context.
     impacted_entities_deterministic = build_deterministic_impacted_entities(
         cis=cis,
         node_types=node_types,
@@ -981,10 +900,6 @@ def run_analysis(
         try:
             synthesis = synthesize_summary(context, ctx.llm_client)
         except Exception as exc:
-            # Crucible Amendment 1: fail-closed at LLM #5 too — if the
-            # synthesis call exhausts retries, fall back to a minimal
-            # summary. The deterministic impacted_nodes still carry the
-            # full per-node justifications.
             logger.error(
                 "[runner] Step 9: LLM #5 failed after retries: {} - "
                 "using minimal summary (degraded)",

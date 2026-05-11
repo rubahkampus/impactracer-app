@@ -10,11 +10,10 @@ The client enforces:
   - ``temperature=0`` and configured ``seed`` for determinism.
   - Pydantic v2 ``response_schema`` constraint on every call via JSON mode.
   - Retry with exponential backoff for transient 429/5xx errors.
-  - Retry-After header respected for 429 responses (Phase 2.10 / E-NEW-5).
+  - Retry-After header respected for 429 responses.
   - Session-scoped ``config_hash`` logged per call for NFR-05 audit.
   - JSONL audit entry appended to ``settings.llm_audit_log_path`` on every
-    call (success OR failure), with prompt_hash, response_hash, retry_count
-    (Phase 2.11 / F-NEW-3 / E-NEW-7).
+    call (success OR failure), with prompt_hash, response_hash, retry_count.
 
 Transport:
   HTTP POST to ``https://openrouter.ai/api/v1/chat/completions`` with
@@ -58,8 +57,6 @@ class LLMClient:
     def __init__(self, settings: Settings) -> None:
         """Construct the client and compute the session config hash."""
         self.settings = settings
-        # Phase 2.11 (E-NEW-7): call_counter now increments AFTER a successful
-        # call. A separate _attempt_counter tracks pre-call attempts for logging.
         self.call_counter: int = 0
         self.session_config_hash: str = self._compute_config_hash()
         # Keep two clients: one with standard timeout, one with extended timeout
@@ -108,11 +105,10 @@ class LLMClient:
         Raises:
             RuntimeError: If all retries are exhausted.
         """
-        # Phase 2.11 (E-NEW-7): prompt_hash for audit reproducibility.
         prompt_content = system + "\n\n" + user
         prompt_hash = hashlib.sha256(prompt_content.encode("utf-8")).hexdigest()[:16]
 
-        # Use extended timeout for synthesis calls (Phase 2.10 / F-4).
+        # Synthesis calls use extended timeout; all others use the default.
         http_client = (
             self._synthesis_client
             if call_name in _SYNTHESIS_CALL_NAMES
@@ -155,7 +151,6 @@ class LLMClient:
                     json=payload,
                 )
 
-                # Phase 2.10 (E-NEW-5): honour Retry-After header on 429.
                 if response.status_code == 429:
                     retry_after = response.headers.get("Retry-After")
                     if retry_after is not None:
@@ -178,7 +173,6 @@ class LLMClient:
                 response.raise_for_status()
                 raw_json = response.json()["choices"][0]["message"]["content"]
 
-                # Phase 2.11 (F-NEW-3): response_hash for audit.
                 response_hash = hashlib.sha256(raw_json.encode("utf-8")).hexdigest()[:16]
 
                 # Extract token usage if provided by OpenRouter.
@@ -188,7 +182,6 @@ class LLMClient:
 
                 result = response_schema.model_validate_json(raw_json)
 
-                # Phase 2.11 (E-NEW-7): increment call_counter AFTER success.
                 self.call_counter += 1
                 self._append_audit_entry(
                     call_name=call_name,
@@ -254,10 +247,8 @@ class LLMClient:
     ) -> None:
         """Append one JSONL line to the audit log (NFR-05).
 
-        Phase 2.11 (F-NEW-3/E-NEW-7): extended fields — prompt_hash,
-        response_hash, retry_count, prompt_tokens, completion_tokens, error.
-        Failed calls are now logged (status='failed') so the audit trail is
-        complete even when the pipeline raises an exception.
+        Records prompt_hash, response_hash, retry_count, token counts, and error.
+        Failed calls are logged with status='failed' for a complete audit trail.
         """
         record: dict = {
             "call_index": self.call_counter,

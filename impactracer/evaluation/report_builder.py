@@ -22,4 +22,4 @@ def build_summary_artifacts(
     output_dir: Path,
 ) -> None:
     """Emit all post-evaluation artifacts to ``output_dir``."""
-    raise NotImplementedError("Sprint 11")
+    raise NotImplementedError("not yet implemented")

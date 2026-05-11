@@ -41,7 +41,7 @@ security ("authentication", "authorization", "vulnerability", "encryption"),
 scalability ("horizontal scaling", "load handling"), accessibility ("a11y",
 "screen reader", "WCAG"), reliability ("retry", "circuit breaker"). Set
 false for ordinary feature additions, modifications, or deletions even when
-they incidentally affect performance/security. (Crucible Fix 16.)
+they incidentally affect performance/security.
 
 SCHEMA CONSTRAINTS (must be satisfied in every response):
 - is_actionable: boolean, always required

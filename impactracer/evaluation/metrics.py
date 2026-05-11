@@ -1,25 +1,16 @@
-"""Set-Level Precision, Recall, F1, R-Precision (Crucible Fix 4 / AV-1).
-
-The architectural-horizon mandate forbids bounded F1@K because it cannot
-detect the V6 graph flood: a 372-node CIS scored only on its top-10 looks
-identical to a focused 50-node CIS, masking the precision collapse the
-ablation study is designed to measure.
+"""Set-Level Precision, Recall, F1, R-Precision.
 
 Primary metric: ``f1_set``. Computed against the full unpruned validated
-CIS (``cis.all_node_ids()``). No top-K truncation.
+CIS (``cis.all_node_ids()``). No top-K truncation — bounded F1@K cannot
+distinguish a 372-node graph flood from a focused 50-node result.
 
-Supplementary rank-aware metric: ``r_precision``. Defined as the precision
-in the top-|gt| of a ranked list — gives one rank-sensitive diagnostic for
-descriptive table purposes without compromising the unbounded primary
-metric.
+Supplementary metric: ``r_precision`` (precision at |gt| rank).
 
-Phase 3.2 invariant (preserved): metrics MUST be computed against the CIS
-node set, NOT against ``report.impacted_nodes``. After Crucible Fix 3
-(Full Demotion of LLM #5), ``ImpactReport.impacted_nodes`` IS the full
-CIS, so the two are equivalent — but the contract continues to require
-CIS-level evaluation for clarity.
+Evaluation invariant: metrics are computed against CIS node IDs, not against
+``report.impacted_nodes``. The two are equivalent post-demotion of LLM #5,
+but the contract is stated against the CIS for reproducibility.
 
-Reference: 10_evaluation_protocol.md §3 (revised under Crucible Plan).
+Reference: 10_evaluation_protocol.md §3.
 """
 
 from __future__ import annotations

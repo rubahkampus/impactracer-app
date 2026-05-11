@@ -1,10 +1,8 @@
 """Single pre-registered Wilcoxon test: V7 vs V5 on Total F1 (set-level).
 
-Crucible Fix 4 (AV-1): primary metric changed from F1@10 to ``f1_set``.
-F1@10 is structurally unable to distinguish a graph flood (V6's 372-node
-CIS) from a focused result (V4's 8-node CIS). Total F1 (set-level) is
-unbounded and therefore correctly attributes precision collapse to V6
-and precision recovery to V7.
+Primary metric is ``f1_set`` (Total F1, set-level). F1@K is structurally
+unable to distinguish a graph flood from a focused result; set-level F1
+correctly attributes precision collapse and recovery across ablation variants.
 
 PROTOCOL (pre-registered):
   - Test:    one-sided paired Wilcoxon signed-rank.

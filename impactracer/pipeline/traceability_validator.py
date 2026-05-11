@@ -3,17 +3,13 @@
 Per (doc_chunk, code_node) pair produced by blind resolution, LLM #3
 emits one of three decisions: CONFIRMED, PARTIAL, REJECTED.
 
-Crucible Fix 1 (FF-2) — fail-closed:
-  - Per-pair missing verdict -> REJECTED (not PARTIAL admission).
-  - Batch-level exception -> DROP entire batch (all pairs REJECTED for
-    this batch) and continue. The CR analysis completes; runner sets
-    degraded_run=True.
+Fail-closed: per-pair missing verdict → REJECTED; batch-level exception →
+DROP entire batch, continue. Runner sets degraded_run=True on any drop.
 
-Crucible Fix 3 (AV-3, Distributed Justification) — capture verdict
-justifications and return them so the runner can attach LLM #3 reasoning
-to the resolved code seed's NodeTrace.
+Returns (validated_seeds, low_conf_map, justifications, degraded) so the
+runner can attach LLM #3 reasoning to resolved code seed NodeTraces.
 
-Anti-Circular Mandate: NO retrieval scores in the prompt.
+No retrieval scores in the prompt (anti-circular mandate).
 
 Reference: master_blueprint.md §4 Step 5b.
 """
@@ -143,12 +139,12 @@ def validate_trace_resolutions(
 ) -> tuple[list[str], dict[str, bool], dict[str, str], bool]:
     """Run LLM Call #3 and return (seeds, low_conf, justifications, degraded).
 
-    Crucible Fix 1 (FF-2): fail-CLOSED. Per-pair missing verdicts ->
-    REJECTED. Batch exception -> all pairs in batch REJECTED, continue.
+    Fail-closed: per-pair missing verdicts -> REJECTED. Batch exception ->
+    all pairs in that batch REJECTED, continue with the next batch.
 
-    Crucible Fix 3: capture per-pair justification keyed by code_id.
-    For code_ids resolved via multiple doc pairs, the highest-decision
-    pair's justification wins (CONFIRMED > PARTIAL > REJECTED).
+    Per-pair justifications are captured keyed by code_id. For code_ids
+    resolved via multiple doc pairs, the highest-decision pair's justification
+    wins (CONFIRMED > PARTIAL > REJECTED).
 
     Returns:
         validated_code_seeds: code_ids where any pair was CONFIRMED or PARTIAL.
@@ -200,8 +196,7 @@ def validate_trace_resolutions(
                 call_name="validate_trace",
             )
         except Exception as exc:
-            # Crucible Amendment 1: fail-closed at batch level.
-            # Drop the batch (all pairs REJECTED). Continue with next batch.
+            # Fail-closed at batch level: drop the batch (all pairs REJECTED).
             logger.error(
                 "[traceability_validator] Batch {}-{} failed after retries: {} - "
                 "DROPPING batch (fail-closed)",
@@ -218,7 +213,6 @@ def validate_trace_resolutions(
             code_clean = _strip_delimiters(v.code_node_id)
             verdict_map[(doc_clean, code_clean)] = (v.decision, v.justification or "")
 
-        # Crucible Fix 1 (FF-2): fail-CLOSED per-pair — missing -> REJECTED.
         for doc_id, code_id in batch:
             key = (doc_id, code_id)
             if key in verdict_map:

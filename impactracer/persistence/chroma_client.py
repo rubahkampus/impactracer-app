@@ -42,8 +42,8 @@ def init_collections(
 ) -> tuple[chromadb.Collection, chromadb.Collection]:
     """Return ``(doc_chunks, code_units)``, creating if absent.
 
-    Asserts both collections use cosine distance (ED-2 / reproducibility
-    requirement: thesis methodology section cites cosine similarity).
+    Asserts both collections use cosine distance (thesis methodology
+    requires cosine similarity for reproducibility).
     """
     doc = client.get_or_create_collection(name="doc_chunks", metadata=COLLECTION_CONFIG)
     code = client.get_or_create_collection(name="code_units", metadata=COLLECTION_CONFIG)

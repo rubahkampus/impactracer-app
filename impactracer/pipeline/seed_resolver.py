@@ -19,23 +19,15 @@ def resolve_doc_to_code(
 ) -> tuple[list[dict], list[str]]:
     """Return (resolutions, direct_code_seeds).
 
-    - ``resolutions``: list of ``{"doc_id": ..., "code_ids": [...]}``
-      for doc-chunk SIS entries that resolved to at least one code node.
+    - ``resolutions``: ``[{"doc_id": ..., "code_ids": [...]}]`` for each
+      doc-chunk SIS entry that resolved to at least one code node.
     - ``direct_code_seeds``: SIS entries that were already code nodes.
 
-    Phase 1 fix (E-NEW-3 / E-6): the previous signature returned a third
-    value ``doc_to_code_map`` that was silently discarded by runner.py on
-    every call — dead return value eliminated. The function also previously
-    executed a full ``SELECT node_id FROM code_nodes`` table scan on every
-    invocation (160× during ablation). The optional ``code_node_ids``
-    parameter lets the caller supply a pre-built set so the scan is a no-op.
+    The optional ``code_node_ids`` parameter lets the caller supply a
+    pre-built set to skip the full table scan (used by the ablation harness).
 
-    Blueprint §4 Step 5: direct code-node SIS entries pass through as
-    direct_code_seeds; doc-chunk SIS entries query doc_code_candidates
-    ORDER BY weighted_similarity_score DESC LIMIT top_k.
+    Blueprint §4 Step 5.
     """
-    # Materialise the full set of known code node IDs for membership testing.
-    # If the caller passes a pre-built set (E-6 cache), use it directly.
     if code_node_ids is None:
         code_node_set: set[str] = {
             row[0]

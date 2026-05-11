@@ -3,25 +3,18 @@
 For each node reached by BFS (except exempted-edge single-hop neighbors),
 LLM #4 decides whether the structural path implies semantic impact.
 
-Crucible Fix 1 (FF-3) — fail-closed:
-  - Per-node missing verdict -> DROP (not keep).
-  - Batch-level exception -> DROP entire batch (continue with next batch).
-  - Per-child collapse missing verdict -> DROP child.
-  - Child batch exception -> DROP all children in that batch (continue).
+Fail-closed: per-node missing verdict → DROP; batch-level exception → DROP
+entire batch, continue. Same policy applies to collapsed-child batches.
 
-Crucible Fix 2 (AV-2) — de-blind chain:
-  The previous "blind-chain" mandate hid the causal chain from LLM #4 to
-  prevent tautological reasoning ("IMPLEMENTS implies impact"). The fix
-  is *not* to hide the chain but to forbid the model from grading nodes
-  by edge type alone. The chain is now shown as factual context; the
-  prompt explicitly forbids bare-topology justifications and demands a
-  contract-breakage / behavioral-anomaly explanation.
+The causal chain is shown to LLM #4 as factual context only. The prompt
+explicitly forbids bare-topology justifications — the model must identify a
+concrete contract breakage or behavioral anomaly, not just confirm edge presence.
 
-Crucible Fix 3 (AV-3, Distributed Justification) — capture LLM #4
-justification per kept node and return it so the runner can attach it
-to the propagated NodeTrace.
+Returns (filtered_cis, justifications_map, degraded). The runner attaches
+justifications verbatim to propagated NodeTraces (distributed justification
+principle — LLM #5 never re-justifies individual nodes).
 
-Anti-Circular Mandate: NO retrieval scores in the prompt.
+No retrieval scores in the prompt (anti-circular mandate).
 
 Reference: master_blueprint.md §4 Step 7.
 """
@@ -118,11 +111,9 @@ def _build_propagation_prompt(
 ) -> str:
     """Build the user prompt for one batch of propagated nodes.
 
-    Crucible Fix 2 (de-blind chain): the causal chain IS shown to LLM #4
-    as factual context. Anti-tautology safety is enforced by the system
-    prompt (forbidden bare-topology justifications), not by hiding the
-    chain. The seed source is also shown so the model can reason about
-    upstream contract changes.
+    The causal chain is shown to LLM #4 as factual context. Anti-tautology
+    safety is enforced by the system prompt (forbidden bare-topology
+    justifications), not by hiding the chain.
     """
     lines: list[str] = [
         f"Change Request Intent: {cr_interp.primary_intent}",
@@ -181,12 +172,12 @@ def validate_propagation(
 ) -> tuple[CISResult, dict[str, str], bool]:
     """Filter CIS by LLM #4 decision.
 
-    Crucible Fix 1 (FF-3): fail-CLOSED. Per-node missing -> drop.
-    Batch exception -> drop entire batch. Per-child missing/exception -> drop.
+    Fail-closed: per-node missing verdict -> drop. Batch exception -> drop
+    entire batch. Per-child missing/exception -> drop.
 
-    Crucible Fix 3: capture per-node justification keyed by node_id and
-    return alongside the filtered CIS so the runner can attach it to
-    NodeTrace.justification with source='llm4_propagation'.
+    Per-node justifications are keyed by node_id and returned alongside the
+    filtered CIS so the runner can attach them to NodeTrace.justification
+    with source='llm4_propagation'.
 
     Returns:
         filtered_cis: CIS with LLM-#4-rejected nodes removed.
@@ -230,7 +221,7 @@ def validate_propagation(
     if not to_validate:
         return cis, justifications, degraded
 
-    # Phase 2.4: deterministic shuffle to remove BFS-order positional bias.
+    # Deterministic shuffle to remove BFS-order positional bias.
     to_validate_shuffled = list(to_validate)
     random.seed(42)
     random.shuffle(to_validate_shuffled)
@@ -250,7 +241,6 @@ def validate_propagation(
                 call_name="validate_propagation",
             )
         except Exception as exc:
-            # Crucible Amendment 1: fail-closed at batch level.
             logger.error(
                 "[traversal_validator] Batch {}-{} failed after retries: {} - "
                 "DROPPING batch (fail-closed)",
@@ -264,7 +254,6 @@ def validate_propagation(
             clean_id = _strip_delimiters(v.node_id)
             verdict_map[clean_id] = (v.semantically_impacted, v.justification or "")
 
-        # Crucible Fix 1 (FF-3): fail-CLOSED per-node — missing -> drop.
         for node_id, trace in batch:
             verdict = verdict_map.get(node_id)
             if verdict is None:
@@ -283,7 +272,7 @@ def validate_propagation(
                     node_id, justification,
                 )
 
-    # Per-child collapse validation (Phase 2.2 / F-3).
+    # Per-child collapse validation.
     _CHILD_SYSTEM = (
         "You are a software impact analysis expert. "
         "Given a parent code node that IS impacted by a Change Request, "
@@ -332,7 +321,6 @@ def validate_propagation(
                     call_name="validate_collapsed_children",
                 )
             except Exception as exc:
-                # Crucible Amendment 1: fail-closed for child batch.
                 logger.error(
                     "[traversal_validator] Child validation failed for {} children "
                     "of {}: {} - DROPPING child batch (fail-closed)",

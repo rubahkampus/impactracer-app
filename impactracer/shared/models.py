@@ -159,7 +159,7 @@ class CRInterpretation(BaseModel):
             "NOT being changed. Injected into the SIS validator prompt as a "
             "hard exclusion list and used by the retriever to apply an "
             "additive demotion penalty (-5.0) on candidates whose names or "
-            "snippets contain these substrings (Crucible Fix 13)."
+            "snippets contain these substrings."
         ),
         max_length=4,
     )
@@ -169,7 +169,7 @@ class CRInterpretation(BaseModel):
             "True if the CR primarily concerns a non-functional requirement "
             "(performance, security, scalability, accessibility). NFR CRs "
             "still flow through the standard pipeline but are stratified in "
-            "evaluation. Crucible Fix 16 — scaffolding only."
+            "evaluation."
         ),
     )
 
@@ -179,7 +179,7 @@ class CRInterpretation(BaseModel):
 
         A zero-length affected_layers on an actionable CR causes all four
         retrieval paths to be skipped, producing zero candidates and a
-        hallucinated synthesis result (FF-5).
+        hallucinated synthesis result.
         """
         if self.is_actionable and len(self.affected_layers) == 0:
             # Coerce to a safe default rather than crashing — the LLM may
@@ -206,8 +206,8 @@ class CandidateVerdict(TruncatingModel):
         max_length=400,
         description=(
             "Concrete modification mechanism if confirmed, or empty string "
-            "if rejected. Crucible Fix 3: this string is propagated verbatim "
-            "into the final ImpactReport.impacted_nodes[i].structural_justification."
+            "if rejected. Propagated verbatim into the final "
+            "ImpactReport.impacted_nodes[i].structural_justification."
         ),
     )
     justification: str = Field(
@@ -248,9 +248,9 @@ class TraceVerdict(TruncatingModel):
     justification: str = Field(
         max_length=400,
         description=(
-            "One-sentence rationale for the decision. Crucible Fix 3: "
-            "propagated into ImpactedNode.structural_justification when "
-            "this code seed is admitted via LLM #3."
+            "One-sentence rationale for the decision. Propagated into "
+            "ImpactedNode.structural_justification when this code seed "
+            "is admitted via LLM #3."
         ),
     )
 
@@ -300,16 +300,13 @@ class PropagationValidationResult(TruncatingModel):
 
 
 class ImpactedEntity(TruncatingModel):
-    """A single impacted code entity (Crucible E2E Schema Alignment).
+    """A single impacted code entity.
 
-    Aligned with the Ground Truth ``GTEntry.impacted_entities`` shape:
-    each row carries the canonical ``node`` (= node_id) and a
-    ``justification`` propagated VERBATIM from LLM #2 / LLM #3 / LLM #4
-    (or a synthetic auto_exempt string).
-
-    Crucible Fix 3 (Distributed Justification): ``justification`` is the
-    rationale generated AT THE POINT OF VALIDATION, not retrospectively
-    by LLM #5.
+    Aligned with the Ground Truth ``GTEntry.impacted_entities`` shape.
+    Each row carries the canonical ``node`` (= node_id) and a
+    ``justification`` propagated VERBATIM from the validator that admitted
+    the node (LLM #2 / LLM #3 / LLM #4 / auto_exempt). Justification is
+    generated AT THE POINT OF VALIDATION, not retrospectively by LLM #5.
     """
 
     node: str = Field(description="The canonical node_id (matches GT format).")
@@ -342,7 +339,7 @@ class ImpactedEntity(TruncatingModel):
 
 
 class ImpactedFile(TruncatingModel):
-    """A file-level impact entry (Crucible E2E Schema Alignment).
+    """A file-level impact entry.
 
     Aligned with ``GTEntry.impacted_files``: each row has ``file_path``
     and a ``justification`` summarizing why the file as a whole is
@@ -405,16 +402,14 @@ class FileJustificationItem(TruncatingModel):
 
 
 class LLMSynthesisOutput(TruncatingModel):
-    """Crucible Fix 3 (Full Demotion) + E2E Schema Alignment.
+    """Structured output from LLM Call #5.
 
     LLM #5 produces:
       - executive_summary (one paragraph)
       - documentation_conflicts (list of doc chunk IDs)
       - file_justifications: ONE entry per file in the deterministic
         impacted-file set, each with a one-or-two-sentence summary of
-        why that FILE AS A WHOLE is impacted (allowed to summarize
-        the entity-level justifications already attached to entities
-        in that file).
+        why that file as a whole is impacted.
 
     LLM #5 NEVER generates entity-level justifications; those are
     propagated verbatim from LLM #2/#3/#4 (Distributed Justification
@@ -444,8 +439,7 @@ class LLMSynthesisOutput(TruncatingModel):
 class ImpactReport(TruncatingModel):
     """Final user-visible artifact (FR-E3).
 
-    Crucible E2E Schema Alignment: ``impacted_nodes`` REMOVED. Replaced
-    with two distinct fields aligned with the Ground Truth shape:
+    Two entity arrays aligned with the Ground Truth shape:
 
       - ``impacted_entities`` (list[ImpactedEntity]): every entity in the
         validated CIS, with a justification propagated VERBATIM from
@@ -456,11 +450,8 @@ class ImpactReport(TruncatingModel):
         ``justification`` field is written by LLM #5 (file-level summary).
 
     Invariant: every file_path in any impacted_entity has a corresponding
-    entry in impacted_files. The runner enforces this at assemble time.
-
-    Crucible Amendment 2 (Truncation Decoupling): both arrays contain
-    100% of the validated CIS regardless of whether nodes were truncated
-    from the LLM #5 prompt window.
+    entry in impacted_files. Both arrays contain 100% of the validated CIS
+    regardless of whether nodes were truncated from the LLM #5 prompt window.
     """
 
     executive_summary: str = Field(
@@ -503,7 +494,7 @@ class ImpactReport(TruncatingModel):
         default=False,
         description=(
             "True if any LLM batch failed all retries and was dropped "
-            "(Crucible Amendment 1: fail-closed batch). The CR completed "
+            "(fail-closed batch). The CR completed "
             "but the impact set is potentially incomplete."
         ),
     )
@@ -531,11 +522,10 @@ class ImpactReport(TruncatingModel):
 class NodeTrace:
     """Per-node BFS trace record.
 
-    Crucible Fix 3 (Distributed Justification): ``justification`` is populated
-    at the validation step that admits the node — LLM #2 for SIS seeds,
-    LLM #3 for trace-resolved seeds, LLM #4 for propagated nodes, or a
-    synthetic auto-exempt string for single-hop contract edges. The
-    ``justification_source`` field records which validator produced it.
+    ``justification`` is populated at the validation step that admits the node:
+    LLM #2 for SIS seeds, LLM #3 for trace-resolved seeds, LLM #4 for
+    propagated nodes, or a synthetic auto-exempt string for single-hop contract
+    edges. ``justification_source`` records which validator produced it.
     """
 
     depth: int
@@ -543,11 +533,10 @@ class NodeTrace:
     path: list[str]
     source_seed: str
     low_confidence_seed: bool = False
-    # Sprint 10.1 — Graph Collapse (Strategy 1): after BFS, parent nodes whose
-    # CONTAINS-only children are in the CIS receive those children's IDs here.
-    # The children are removed from propagated_nodes to avoid token explosion.
+    # After BFS, parent nodes whose CONTAINS-only children are in the CIS
+    # receive those children's IDs here; children are removed from
+    # propagated_nodes to avoid token explosion.
     collapsed_children: list[str] = field(default_factory=list)
-    # Crucible Fix 3 — distributed justification fields.
     justification: str = ""
     justification_source: str = ""  # 'llm2_sis' | 'llm3_trace' | 'llm4_propagation' | 'auto_exempt'
     function_purpose: str = ""      # Populated for SIS seeds from LLM #2 verdict.

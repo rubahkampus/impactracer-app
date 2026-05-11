@@ -3,18 +3,13 @@
 Batches candidates into chunks of at most 5, calls LLM #2 per chunk,
 then merges all SISValidationResult envelopes.
 
-Crucible Fix 1 (FF-1) — fail-closed:
-  - Per-node missing verdict -> DROP (not admit).
-  - Batch-level exception (after all retries exhausted) -> DROP entire batch
-    (continue with next batch). The CR analysis completes; the audit log
-    records the dropped batch; runner sets degraded_run=True.
+Fail-closed: per-node missing verdict → DROP; batch-level exception → DROP
+entire batch and continue. Runner sets degraded_run=True on any drop.
 
-Crucible Fix 3 (AV-3, Distributed Justification) — capture verdict
-attributes per confirmed seed and return them so the runner can attach
-function_purpose, mechanism_of_impact, and justification to NodeTrace.
+Returns (confirmed_ids, justifications_map, degraded) so the runner can
+attach function_purpose, mechanism_of_impact, and justification to NodeTrace.
 
-The validator prompt MUST NOT include retrieval scores (reranker score,
-ARRF weight, cosine distance). The LLM judges structural relevance only.
+No retrieval scores in the prompt — the LLM judges structural relevance only.
 
 Blueprint: master_blueprint.md §4 Step 4.
 """
@@ -212,13 +207,11 @@ def validate_sis_candidates_batched(
 ) -> tuple[list[str], dict[str, dict[str, str]], bool]:
     """Run LLM Call #2 in batches and return (confirmed_ids, justifications, degraded).
 
-    Crucible Fix 1 (fail-closed): missing per-node verdicts -> drop. Batch
-    exception -> drop entire batch and continue. Returns degraded=True if
-    any batch was dropped due to API failure.
+    Fail-closed: missing per-node verdicts -> drop. Batch exception -> drop
+    entire batch and continue. Returns degraded=True if any batch was dropped.
 
-    Crucible Fix 3 (distributed justification): captures
-    function_purpose, mechanism_of_impact, justification per confirmed
-    seed for downstream attachment to NodeTrace.
+    Captures function_purpose, mechanism_of_impact, and justification per
+    confirmed seed for downstream attachment to NodeTrace.
 
     Returns:
         confirmed_ids: list of node_ids the LLM marked confirmed=True.
@@ -255,9 +248,7 @@ def validate_sis_candidates_batched(
                 call_name="validate_sis",
             )
         except Exception as exc:
-            # Crucible Amendment 1: fail-closed at batch level.
-            # Drop the batch (no candidates admitted) but DO NOT raise —
-            # the pipeline must complete remaining batches.
+            # Fail-closed: drop the batch but continue remaining batches.
             logger.error(
                 "[validator] Batch {}/{} failed after retries: {} — "
                 "DROPPING batch (fail-closed)",
@@ -279,7 +270,6 @@ def validate_sis_candidates_batched(
                     verdict.node_id, clean_id,
                 )
 
-        # Crucible Fix 1 (FF-1): fail-CLOSED per-node — missing verdicts dropped.
         for c in batch:
             verdict = verdict_map.get(c.node_id)
             if verdict is None:
@@ -290,7 +280,6 @@ def validate_sis_candidates_batched(
                 continue
             if verdict.confirmed:
                 confirmed_ids.append(c.node_id)
-                # Crucible Fix 3: capture per-seed justification material.
                 justifications[c.node_id] = {
                     "function_purpose": verdict.function_purpose or "",
                     "mechanism_of_impact": verdict.mechanism_of_impact or "",

@@ -14,19 +14,10 @@ from impactracer.shared.constants import severity_for_chain
 from impactracer.shared.models import CISResult, CRInterpretation
 
 
-# ---------------------------------------------------------------------------
-# Code node type set for backlink routing (FF-3)
-# ---------------------------------------------------------------------------
-
 _CODE_NODE_TYPES: frozenset[str] = frozenset({
     "File", "Class", "Function", "Method", "Interface",
     "TypeAlias", "Enum", "ExternalPackage", "InterfaceField",
 })
-
-
-# ---------------------------------------------------------------------------
-# FR-E1: Bidirectional backlink retrieval (FF-3)
-# ---------------------------------------------------------------------------
 
 
 def fetch_backlinks(
@@ -86,7 +77,7 @@ def fetch_backlinks(
 
 
 # ---------------------------------------------------------------------------
-# FR-E1: Source snippet retrieval (ED-8: includes doc chunk content)
+# FR-E1: Source snippet retrieval
 # ---------------------------------------------------------------------------
 
 
@@ -102,13 +93,10 @@ def fetch_snippets(
 
     - Code nodes (Function/Method): prefers ``internal_logic_abstraction``
       (skeletonized reduction) over ``source_code`` when ILA is available.
-      N6 fix: ILA preserves call sites and signatures the synthesizer needs
-      for structural_justification; raw source_code includes whitespace and
+      ILA preserves call sites and signatures while stripping whitespace and
       comment noise that wastes token budget.
     - Other code nodes: ``source_code`` (no ILA generated for them).
-    - Doc chunk nodes: fetched from ChromaDB ``doc_chunks`` documents
-      (ED-8: previously returned empty string, causing content-free context
-      blocks and hallucinated structural_justification in synthesis).
+    - Doc chunk nodes: fetched from ChromaDB ``doc_chunks`` documents.
     """
     if not node_ids:
         return {}
@@ -123,13 +111,11 @@ def fetch_snippets(
 
     result: dict[str, str] = {}
     for node_id, node_type, ila, source_code in rows:
-        # N6: prefer ILA for Function/Method nodes
         if node_type in _ILA_NODE_TYPES and ila:
             result[node_id] = ila
         else:
             result[node_id] = source_code or ""
 
-    # Fetch doc chunk content from ChromaDB for IDs missing from SQLite (ED-8)
     missing_ids = [n for n in node_ids if n not in result]
     if missing_ids and doc_col is not None:
         try:
@@ -153,7 +139,7 @@ def _estimate_tokens(text: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Sprint 10.1 — Strategy 2: depth-based hard-limit failsafe
+# Depth-based hard-limit failsafe
 # ---------------------------------------------------------------------------
 
 # Hard ceiling enforced BEFORE the per-token-budget soft truncation.
@@ -181,9 +167,8 @@ def _apply_hard_limit(
 ) -> tuple[list[str], str]:
     """Return (trimmed_ids, warning_text) after applying the hard char limit.
 
-    Crucible Fix 7 (AV-6) — severity-aware truncation.
-
-    Sort key for droppable nodes: (severity_rank ASC, depth DESC, node_id).
+    Severity-aware truncation: sort key for droppable nodes is
+    (severity_rank ASC, depth DESC, node_id).
     Tinggi (contract dependencies) always survive even at depth 3; Rendah
     (composition) at depth 2 is dropped before Tinggi at depth 3.
 
@@ -278,8 +263,8 @@ def build_context(
 
     Enforces the token budget; truncates lowest-priority nodes first.
 
-    Truncation priority (AV-4):
-    1. Nodes with populated causal_chain (BFS-propagated, Sprint 10+) sorted by severity
+    Truncation priority:
+    1. Nodes with populated causal_chain (BFS-propagated) sorted by severity
     2. SIS seeds (empty causal_chain) sorted by retrieval score descending
     3. Within each group: depth ascending, then node_id alphabetic
 
@@ -311,21 +296,9 @@ def build_context(
             "retrieval_score": _candidate_scores.get(nid, 0.0),
         }
 
-    # AV-4 / Phase 1 (E-NEW-6): sort for inclusion — HIGHEST PRIORITY FIRST.
-    #
-    # CORRECTED GROUP ASSIGNMENT (previous code had groups inverted):
-    #   Group 0 (highest priority = included first, last to be truncated):
-    #     SIS seeds — direct retrieval hits; depth=0; empty causal_chain.
-    #     Sorted within group by retrieval score DESC (best match first).
-    #   Group 1 (lower priority = included after seeds, first to be truncated):
-    #     BFS-propagated nodes — structural inferences; has_chain=True.
-    #     Sorted within group by severity rank ASC, then depth ASC, then id.
-    #
-    # Rationale: SIS seeds have the highest semantic certainty (they matched
-    # the CR directly by dense + BM25 search and passed LLM #2). Propagated
-    # nodes are structural inferences whose relevance diminishes with depth.
-    # If the token budget forces truncation, we MUST preserve seeds over
-    # propagated nodes — the opposite of what the previous code did.
+    # Sort for inclusion — HIGHEST PRIORITY FIRST.
+    # Group 0: SIS seeds (depth=0, empty causal_chain), sorted by retrieval score DESC.
+    # Group 1: BFS-propagated nodes, sorted by severity rank ASC, depth ASC, then id.
     def _sort_key(nid: str) -> tuple:
         m = node_meta[nid]
         if not m["has_chain"]:
@@ -340,13 +313,8 @@ def build_context(
 
     sorted_ids = sorted(combined.keys(), key=_sort_key)
 
-    # Sprint 10.1 — Strategy 2: apply hard char-limit failsafe BEFORE
-    # the per-token-budget soft truncation.  Drops highest-depth propagated
-    # nodes first; SIS seeds (depth=0) are immune.
     sorted_ids, hard_limit_warning = _apply_hard_limit(sorted_ids, combined)
 
-    # Crucible E2E Schema Alignment: emit the canonical file set so LLM #5
-    # knows EXACTLY which files it must produce justifications for.
     file_set: list[str] = []
     seen_fp: set[str] = set()
     for nid in sorted_ids:
@@ -397,9 +365,6 @@ def build_context(
             f"Path from seed: {' -> '.join(meta['path']) if meta['path'] else nid}",
             f"Source seed: {meta['source_seed']}",
         ]
-        # Crucible Fix 3: render the pre-recorded validator justification so
-        # LLM #5 can ground its executive summary in real validator
-        # reasoning (not hallucinated retrospective justification).
         if trace_obj is not None and trace_obj.justification:
             src_label = trace_obj.justification_source or "validator"
             block_lines.append(
@@ -422,14 +387,6 @@ def build_context(
                 "Traceability backlinks: " + ", ".join(f"{d}({s:.3f})" for d, s in bl[:3])
             )
         if snippet:
-            # N6: for Function/Method nodes, the SQLite source_code field is the
-            # raw TypeScript body.  Prefer the ILA (internal_logic_abstraction)
-            # when available — it is a skeletonized reduction that strips whitespace
-            # noise and preserves the call graph the synthesizer needs for
-            # structural_justification.  The raw source_code is a reliable
-            # fallback when ILA was not generated (degenerate nodes, non-TS files).
-            # No 1500-char truncation: ILA is already compact; truncating raw
-            # source drops important call sites and field assignments.
             block_lines.append("Source snippet:")
             block_lines.append(snippet)
         block_lines.append("")
@@ -461,7 +418,6 @@ def build_context(
             truncated, budget, used_tokens,
         )
 
-    # Sprint 10.1 — prepend hard-limit warning if the failsafe activated.
     if hard_limit_warning:
         context_parts.insert(0, hard_limit_warning + "\n")
 

@@ -13,4 +13,4 @@ from pathlib import Path
 
 def annotate_cr(cr_text: str, db_path: Path) -> dict:
     """Interactive annotation session; returns a GT entry dict."""
-    raise NotImplementedError("Sprint 12")
+    raise NotImplementedError("not yet implemented")

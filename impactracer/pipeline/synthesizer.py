@@ -1,28 +1,16 @@
 """LLM Call #5: ImpactReport synthesis (FR-E3).
 
-Crucible Fix 3 (Full Demotion) + Crucible E2E Schema Alignment:
+LLM #5 is an aggregator only. It produces:
+  - executive_summary (one paragraph for non-technical stakeholders)
+  - documentation_conflicts (doc chunk IDs)
+  - file_justifications: one prose row per impacted file. File-level
+    summarization is the one authoring task LLM #5 is permitted.
 
-  LLM #5 produces ONLY:
-    - executive_summary (one paragraph)
-    - documentation_conflicts (doc chunk IDs)
-    - file_justifications: one row per impacted file, summarizing the
-      entity-level impacts in that file. (LLM #5 IS allowed to write
-      file-level prose, since file justification is a summarization
-      task, not a per-entity validation task.)
+The runner builds impacted_entities and impacted_files deterministically
+from the validated CIS. LLM #5 never authors per-entity justifications.
+The full CIS appears in the report regardless of prompt-window truncation.
 
-  The runner builds:
-    - impacted_entities (deterministic; justifications verbatim from
-      LLM #2 / LLM #3 / LLM #4)
-    - impacted_files (deterministic file_path set; LLM #5's
-      file_justifications are matched against this set with
-      "no information available" filled in for any missing files)
-
-Crucible Amendment 2 (Truncation Decoupling): the runner emits the
-FULL validated CIS in ImpactReport.impacted_entities regardless of
-whether the corresponding nodes were truncated from the LLM #5 prompt
-window.
-
-Reference: 07_online_pipeline.md §13; Crucible E2E Plan TASK 2.
+Reference: master_blueprint.md §4 Step 9.
 """
 
 from __future__ import annotations
@@ -104,7 +92,7 @@ def build_deterministic_impacted_entities(
 ) -> list[ImpactedEntity]:
     """Build the entity-level rows DETERMINISTICALLY from the validated CIS.
 
-    Justification source priority (Crucible Fix 3):
+    Justification source priority:
       1. trace.justification (set by runner from LLM #2/#3/#4 verdict)
       2. justifications_extra[node_id] (parallel map for legacy compat)
       3. trace.mechanism_of_impact (LLM #2 SIS attribute)
@@ -157,7 +145,7 @@ def derive_impacted_files(
 ) -> list[ImpactedFile]:
     """Build the file-level rows DETERMINISTICALLY from impacted_entities.
 
-    Invariant (Crucible E2E Task 2): ONE file row per distinct
+    Invariant: ONE file row per distinct
     non-empty ``file_path`` referenced in ``entities``. Order: first
     appearance in entities (stable + reproducible).
 

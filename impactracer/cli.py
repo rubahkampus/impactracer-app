@@ -208,7 +208,7 @@ def evaluate(
     Implementation entry point:
         impactracer.evaluation.ablation.run_full_evaluation(...)
     """
-    raise NotImplementedError("Sprint 11-12: evaluation")
+    raise NotImplementedError("evaluation not yet implemented")
 
 
 if __name__ == "__main__":
