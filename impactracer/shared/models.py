@@ -85,8 +85,17 @@ NodeType = Literal[
     "Enum",
     "ExternalPackage",
     "InterfaceField",
+    "Variable",
 ]
-"""Code graph node kinds (nine types)."""
+"""Code graph node kinds.
+
+``Variable`` covers top-level ``const NAME = <RHS>`` declarations whose RHS is
+NOT an arrow function (those are already captured as ``Function`` nodes).
+Examples: Mongoose schemas (``const UserSchema = new Schema(...)``), constant
+arrays / objects (``const TEMPLATES = [...]``), object-literal exports, and
+``Object.freeze(...)`` constants. Added in Sprint 13-W1 to restore GT-existence
+coverage that was missing under the original 9-type vocabulary.
+"""
 
 Severity = Literal["Tinggi", "Menengah", "Rendah"]
 """Impact severity category (Indonesian labels, thesis convention)."""

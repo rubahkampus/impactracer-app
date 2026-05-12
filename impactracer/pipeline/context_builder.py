@@ -17,6 +17,7 @@ from impactracer.shared.models import CISResult, CRInterpretation
 _CODE_NODE_TYPES: frozenset[str] = frozenset({
     "File", "Class", "Function", "Method", "Interface",
     "TypeAlias", "Enum", "ExternalPackage", "InterfaceField",
+    "Variable",
 })
 
 

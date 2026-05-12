@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS code_nodes (
         CHECK (node_type IN (
             'File', 'Class', 'Function', 'Method',
             'Interface', 'TypeAlias', 'Enum',
-            'ExternalPackage', 'InterfaceField'
+            'ExternalPackage', 'InterfaceField', 'Variable'
         )),
     name                        TEXT    NOT NULL,
     file_path                   TEXT,

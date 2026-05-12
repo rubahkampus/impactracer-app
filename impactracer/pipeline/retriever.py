@@ -353,6 +353,7 @@ def hybrid_search(
     cr_interp: CRInterpretation,
     ctx: object,
     settings: object,
+    cr_text: str | None = None,
 ) -> list[Candidate]:
     """Execute dual-path search and return RRF-sorted candidates (FR-C1, FR-C2).
 
@@ -360,6 +361,18 @@ def hybrid_search(
     Adaptive RRF, and returns the top-K RRF pool (settings.top_k_rrf_pool)
     for downstream reranking. The reranker then selects up to
     settings.max_admitted_seeds from this pool.
+
+    Sprint 13-W2 additions (apply only when the dense path is enabled):
+      - **2B raw-CR dense pass**: if ``cr_text`` is provided and
+        ``settings.enable_raw_cr_dense_pass``, runs one extra dense query
+        against the code collection using the raw multilingual CR text and
+        merges results into the dense_code ranked list. BGE-M3 bridges the
+        Indonesian-CR ↔ English-identifier gap directly.
+      - **2C traceability pool seeding**: if ``settings.enable_traceability_pool_seeding``,
+        after dense_doc retrieves doc chunks, the offline traceability matrix
+        seeds code-node neighbours of those chunks into the RRF pool with a
+        synthetic rank. Promotes the offline precomputation from a +0.1
+        rerank bonus to a pool-membership signal.
     """
     flags = ctx.variant_flags
     top_k = settings.top_k_per_query
@@ -455,6 +468,37 @@ def hybrid_search(
                 cos = 1.0 - dist
                 if cid not in seen_dc or seen_dc[cid] < cos:
                     seen_dc[cid] = cos
+
+        # ---- Sprint 13-W2B: raw-CR multilingual bridge --------------
+        # Embed the full CR text once and ask the code collection for its
+        # nearest neighbours. BGE-M3 is multilingual, so an Indonesian CR
+        # reaches English-identifier code without going through LLM #1.
+        if (
+            cr_text
+            and getattr(settings, "enable_raw_cr_dense_pass", False)
+        ):
+            raw_top_k = getattr(settings, "raw_cr_dense_top_k", top_k)
+            try:
+                raw_vec = ctx.embedder.embed_single(cr_text)
+                res = ctx.code_col.query(
+                    query_embeddings=[raw_vec],
+                    n_results=raw_top_k,
+                    include=["distances"],
+                )
+                raw_hits = 0
+                for cid, dist in zip(res["ids"][0], res["distances"][0]):
+                    cos = 1.0 - dist
+                    if cid not in seen_dc or seen_dc[cid] < cos:
+                        seen_dc[cid] = cos
+                        raw_hits += 1
+                if raw_hits:
+                    logger.info(
+                        "[retriever] raw-CR dense pass added {} new code candidates "
+                        "(n_results={})", raw_hits, raw_top_k,
+                    )
+            except Exception as exc:
+                logger.warning("[retriever] raw-CR dense pass failed: {}", exc)
+
         dense_code_ids = sorted(seen_dc, key=seen_dc.__getitem__, reverse=True)[:top_k]
         for cid in dense_code_ids:
             cosine_scores[cid] = max(cosine_scores.get(cid, 0.0), seen_dc[cid])
@@ -479,6 +523,61 @@ def hybrid_search(
         for cid in bm25_code_ids:
             bm25_scores_map[cid] = max(bm25_scores_map.get(cid, 0.0), seen_bc[cid])
         logger.debug("[retriever] bm25_code: {} candidates", len(bm25_code_ids))
+
+    # -------------------------------------------------------------------
+    # Sprint 13-W2C: traceability-matrix pool seeding
+    # -------------------------------------------------------------------
+    # Inject code-nodes that the offline doc<->code traceability matrix
+    # links to any retrieved doc-chunk into the dense_code ranked list. This
+    # promotes the offline precomputation from a rerank +0.1 bonus into a
+    # pool-membership signal, fixing the case where a GT code node is
+    # traceability-linked to a retrieved doc chunk but never reaches the
+    # cross-encoder because no LLM #1 query mentions it.
+    seeded_via_traceability: list[str] = []
+    retrieved_doc_ids_for_seeding = list(dict.fromkeys(dense_doc_ids + bm25_doc_ids))
+    if (
+        has_code_layer
+        and retrieved_doc_ids_for_seeding
+        and getattr(settings, "enable_traceability_pool_seeding", False)
+        and getattr(ctx, "conn", None) is not None
+    ):
+        per_doc_cap = getattr(settings, "traceability_seed_top_k_per_doc", 5)
+        min_score = getattr(settings, "traceability_seed_min_score", 0.40)
+        existing_code = set(dense_code_ids) | set(bm25_code_ids)
+        placeholders = ",".join("?" * len(retrieved_doc_ids_for_seeding))
+        try:
+            rows = ctx.conn.execute(
+                f"SELECT doc_id, code_id, weighted_similarity_score "
+                f"FROM doc_code_candidates "
+                f"WHERE doc_id IN ({placeholders}) "
+                f"  AND weighted_similarity_score >= ? "
+                f"ORDER BY doc_id, weighted_similarity_score DESC",
+                [*retrieved_doc_ids_for_seeding, min_score],
+            ).fetchall()
+        except Exception as exc:
+            logger.warning("[retriever] traceability seeding query failed: {}", exc)
+            rows = []
+        per_doc_count: dict[str, int] = {}
+        for doc_id, code_id, _score in rows:
+            if per_doc_count.get(doc_id, 0) >= per_doc_cap:
+                continue
+            per_doc_count[doc_id] = per_doc_count.get(doc_id, 0) + 1
+            if code_id in existing_code:
+                continue
+            existing_code.add(code_id)
+            seeded_via_traceability.append(code_id)
+        if seeded_via_traceability:
+            # Append after dense_code so it has its own ranked list — RRF will
+            # promote nodes that also appear elsewhere; pure traceability
+            # seeds get a competitive but not dominant synthetic rank.
+            dense_code_ids = list(dense_code_ids) + seeded_via_traceability
+            logger.info(
+                "[retriever] traceability pool seeding added {} code candidates "
+                "(linked to {} doc chunks, min_score={:.2f})",
+                len(seeded_via_traceability),
+                len(retrieved_doc_ids_for_seeding),
+                min_score,
+            )
 
     # -------------------------------------------------------------------
     # Assemble ranked lists for RRF

@@ -444,14 +444,22 @@ def _walk_declarations(
             continue
 
         if decl.type == "lexical_declaration":
-            # Could contain arrow-function variable declarators
+            # Could contain arrow-function variable declarators OR non-arrow
+            # canonical const declarations (schemas, constant data, factories).
             for vd in decl.children:
-                if vd.type == "variable_declarator":
-                    val = vd.child_by_field_name("value")
-                    if val and val.type == "arrow_function":
-                        fn_node = _build_arrow_function_node(vd, val, child, src, file_posix, file_classification)
-                        if fn_node:
-                            nodes.append(fn_node)
+                if vd.type != "variable_declarator":
+                    continue
+                val = vd.child_by_field_name("value")
+                if val is None:
+                    continue
+                if val.type == "arrow_function":
+                    fn_node = _build_arrow_function_node(vd, val, child, src, file_posix, file_classification)
+                    if fn_node:
+                        nodes.append(fn_node)
+                elif val.type in _VARIABLE_VALUE_TYPES:
+                    var_node = _build_variable_node(vd, val, child, src, file_posix, file_classification)
+                    if var_node:
+                        nodes.append(var_node)
             continue
 
         if decl.type == "class_declaration":
@@ -675,6 +683,171 @@ def _build_arrow_function_node(
         "is_exported": is_exported,
         "embed_text": embed_text,
         "is_component": is_component,
+    }
+
+
+_VARIABLE_VALUE_TYPES: frozenset[str] = frozenset({
+    "new_expression",
+    "object",
+    "array",
+    "call_expression",
+})
+"""Tree-sitter RHS types that qualify a ``const NAME = <RHS>`` as a Variable.
+
+Arrow-function RHS is handled by ``_build_arrow_function_node`` (emits a
+``Function`` node). Anything else with one of these RHS shapes becomes a
+``Variable`` node: Mongoose schemas (``new Schema(...)``), constant arrays /
+objects, and factory calls such as ``Object.freeze({...})`` or
+``createStore(...)``.
+"""
+
+
+def _variable_name_is_canonical(name: str) -> bool:
+    """Heuristic for whether a ``const NAME = ...`` is worth indexing.
+
+    Accepts PascalCase (typical for schemas, components, type-shaped constants),
+    SCREAMING_SNAKE_CASE (typical for module-level constants/templates), and
+    any name with internal capital letters. Rejects single-lowercase locals
+    like ``i``, ``j``, ``tmp`` to keep the index lean.
+    """
+    if not name or not name[0].isalpha():
+        return False
+    if name[0].isupper():
+        return True  # PascalCase or SCREAMING
+    return any(c.isupper() for c in name[1:])
+
+
+def _summarize_variable_value(val: Node, src: bytes, cap: int = 400) -> str:
+    """Return a short, embed-friendly summary of a variable's RHS.
+
+    For ``new Schema<T>({...fields...})``: collect top-level keys of the first
+    object argument and emit them space-separated — these are the schema's
+    field names and are exactly the tokens BGE-M3 / BM25 needs to match
+    Indonesian CR descriptions that mention them indirectly.
+
+    For array / object literals: collect top-level keys / element identifiers.
+
+    Falls back to the raw source up to ``cap`` characters.
+    """
+    try:
+        if val.type == "new_expression":
+            for arg_list in val.children:
+                if arg_list.type != "arguments":
+                    continue
+                for arg in arg_list.children:
+                    if arg.type == "object":
+                        keys: list[str] = []
+                        for prop in arg.children:
+                            if prop.type == "pair":
+                                k = prop.child_by_field_name("key")
+                                if k is not None:
+                                    keys.append(
+                                        src[k.start_byte:k.end_byte]
+                                        .decode(errors="replace")
+                                        .strip("\"'`")
+                                    )
+                        if keys:
+                            return " ".join(keys)[:cap]
+                        break
+                break
+        if val.type == "object":
+            keys = []
+            for prop in val.children:
+                if prop.type == "pair":
+                    k = prop.child_by_field_name("key")
+                    if k is not None:
+                        keys.append(
+                            src[k.start_byte:k.end_byte]
+                            .decode(errors="replace")
+                            .strip("\"'`")
+                        )
+            if keys:
+                return " ".join(keys)[:cap]
+        if val.type == "array":
+            # Pull identifier tokens from the first ~5 elements for a sniff.
+            tokens: list[str] = []
+            for elem in val.children[:20]:
+                if elem.type == "object":
+                    for prop in elem.children:
+                        if prop.type == "pair":
+                            k = prop.child_by_field_name("key")
+                            if k is not None:
+                                tokens.append(
+                                    src[k.start_byte:k.end_byte]
+                                    .decode(errors="replace")
+                                    .strip("\"'`")
+                                )
+            if tokens:
+                return " ".join(tokens)[:cap]
+    except Exception:
+        pass
+    raw = src[val.start_byte:val.end_byte].decode(errors="replace")
+    return raw[:cap]
+
+
+def _build_variable_node(
+    vd: Node,
+    val: Node,
+    raw_child: Node,
+    src: bytes,
+    file_posix: str,
+    file_classification: str | None,
+) -> dict[str, Any] | None:
+    """Build a ``Variable`` node for a top-level ``const NAME = <non-arrow RHS>``.
+
+    Returns None for unnameable, non-canonical, or unsupported RHS shapes.
+    """
+    name_node = vd.child_by_field_name("name")
+    if name_node is None:
+        return None
+    name = src[name_node.start_byte:name_node.end_byte].decode(errors="replace")
+    if not _variable_name_is_canonical(name):
+        return None
+    if val.type not in _VARIABLE_VALUE_TYPES:
+        return None
+
+    is_exported, _ = _is_exported(vd)
+    docstring = _extract_jsdoc(raw_child, src)
+
+    # Signature: identifier + (optional) type annotation + RHS-kind hint.
+    type_ann_node = vd.child_by_field_name("type")
+    type_ann = (
+        src[type_ann_node.start_byte:type_ann_node.end_byte].decode(errors="replace")
+        if type_ann_node is not None
+        else ""
+    )
+    rhs_kind = {
+        "new_expression": "new",
+        "object": "object literal",
+        "array": "array literal",
+        "call_expression": "factory call",
+    }.get(val.type, val.type)
+    signature = f"const {name}{type_ann} = <{rhs_kind}>"
+
+    rhs_summary = _summarize_variable_value(val, src)
+    embed_parts = [name, _camel_to_readable(name), signature]
+    if docstring:
+        embed_parts.append(docstring)
+    if rhs_summary:
+        embed_parts.append(rhs_summary)
+    embed_text = " | ".join(p for p in embed_parts if p)
+
+    source_code = src[vd.start_byte:vd.end_byte].decode(errors="replace")
+    return {
+        "node_id": _make_node_id(file_posix, name),
+        "node_type": "Variable",
+        "name": name,
+        "file_path": file_posix,
+        "file_classification": file_classification,
+        "route_path": None,
+        "signature": signature,
+        "docstring": docstring,
+        "internal_logic_abstraction": None,
+        "source_code": source_code,
+        "start_line": vd.start_point[0] + 1,
+        "end_line": vd.end_point[0] + 1,
+        "is_exported": is_exported,
+        "embed_text": embed_text,
     }
 
 
@@ -2160,10 +2333,10 @@ def _emit_contains_edges(
 
     Blueprint §3.4.
     """
-    # --- Pass 1: File → direct children (including InterfaceField) ---
+    # --- Pass 1: File → direct children (including InterfaceField + Variable) ---
     cur = conn.execute(
         "SELECT node_id FROM code_nodes WHERE file_path = ? AND node_type IN "
-        "('Function','Method','Interface','TypeAlias','Class','Enum','InterfaceField')",
+        "('Function','Method','Interface','TypeAlias','Class','Enum','InterfaceField','Variable')",
         (file_posix,),
     )
     for row in cur:

@@ -310,7 +310,7 @@ def run_analysis(
     # Step 2 — Adaptive RRF Hybrid Search (FR-C1, FR-C2)
     # ------------------------------------------------------------------
     logger.info("[runner] Step 2: Hybrid search (variant={})", variant_flags.variant_id)
-    candidates = hybrid_search(cr_interp, ctx, settings)
+    candidates = hybrid_search(cr_interp, ctx, settings, cr_text=cr_text)
     logger.info("[runner] Post-RRF pool: {}", len(candidates))
     _trace("step_2_rrf_pool", [
         {"node_id": c.node_id, "collection": c.collection,

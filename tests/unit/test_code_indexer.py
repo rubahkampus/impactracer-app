@@ -14,6 +14,7 @@ from impactracer.indexer.code_indexer import (
     compose_embed_text,
     compose_file_embed_text,
     derive_route_path,
+    extract_edges,
     extract_nodes,
     get_ts_parser,
     synthesize_ui_docstring,
@@ -544,6 +545,100 @@ def test_insert_idempotent(conn):
     ).fetchone()[0]
     # File node + foo node = 2 rows
     assert count == 2
+
+
+# ---------------------------------------------------------------------------
+# Variable node extraction (Sprint 13-W1) — const FOO = <non-arrow RHS>
+# ---------------------------------------------------------------------------
+
+def test_variable_extracts_mongoose_schema_with_field_names_in_embed_text(conn):
+    """A `const X = new Schema({...})` is emitted as a Variable node and the
+    embed_text contains the schema's top-level field names so retrieval can
+    surface the schema via field-name queries."""
+    src = (
+        b"import { Schema, model } from 'mongoose';\n"
+        b"interface IUser { email: string; username: string; }\n"
+        b"const UserSchema = new Schema<IUser>({\n"
+        b"  email: { type: String, required: true },\n"
+        b"  username: { type: String, required: true },\n"
+        b"  pinnedCommissions: [{ type: Schema.Types.ObjectId }],\n"
+        b"});\n"
+        b"export default model<IUser>('User', UserSchema);\n"
+    )
+    nodes = extract_nodes(_make_file_path("src/lib/db/models/user.model.ts"), src, conn)
+    by_id = {n["node_id"]: n for n in nodes}
+    nid = "src/lib/db/models/user.model.ts::UserSchema"
+    assert nid in by_id, f"UserSchema not extracted; got {list(by_id)}"
+    var = by_id[nid]
+    assert var["node_type"] == "Variable"
+    assert var["name"] == "UserSchema"
+    assert var["file_path"] == "src/lib/db/models/user.model.ts"
+    # Field names from the schema must appear in embed_text (BGE-M3 / BM25 fodder).
+    emb = var["embed_text"].lower()
+    assert "email" in emb
+    assert "username" in emb
+    assert "pinnedcommissions" in emb
+
+
+def test_variable_extracts_const_array_literal(conn):
+    """A `const TEMPLATES = [...]` is emitted with array-element keys in embed_text."""
+    src = (
+        b"interface TemplateData { id: string; title: string; basePrice: number; }\n"
+        b"const TEMPLATES: TemplateData[] = [\n"
+        b"  { id: 'a', title: 'Sketch', basePrice: 10 },\n"
+        b"  { id: 'b', title: 'Lineart', basePrice: 25 },\n"
+        b"];\n"
+    )
+    nodes = extract_nodes(
+        _make_file_path("src/components/dashboard/commissions/form/TemplateSection.tsx"),
+        src, conn,
+    )
+    by_id = {n["node_id"]: n for n in nodes}
+    nid = "src/components/dashboard/commissions/form/TemplateSection.tsx::TEMPLATES"
+    assert nid in by_id, f"TEMPLATES not extracted; got {list(by_id)}"
+    var = by_id[nid]
+    assert var["node_type"] == "Variable"
+    emb = var["embed_text"].lower()
+    assert "id" in emb
+    assert "title" in emb
+    assert "baseprice" in emb
+
+
+def test_variable_skips_lowercase_locals(conn):
+    """Plain lowercase locals like `const tmp = ...` are not emitted (heuristic)."""
+    src = b"const tmp = { foo: 1 };\nconst i = 0;\n"
+    nodes = extract_nodes(_make_file_path("src/lib/helper.ts"), src, conn)
+    types = {n["node_type"] for n in nodes}
+    assert "Variable" not in types
+
+
+def test_variable_node_emits_contains_edge_from_file(conn):
+    """The File node must CONTAIN any Variable extracted from it."""
+    from impactracer.indexer.code_indexer import extract_edges
+
+    src = (
+        b"import { Schema } from 'mongoose';\n"
+        b"const UserSchema = new Schema({ email: String });\n"
+    )
+    fp = _make_file_path("src/lib/db/models/user.model.ts")
+    nodes = extract_nodes(fp, src, conn)
+    known = {n["node_id"] for n in nodes}
+    extract_edges(fp, src, known, conn)
+    file_id = "src/lib/db/models/user.model.ts"
+    var_id = "src/lib/db/models/user.model.ts::UserSchema"
+    row = conn.execute(
+        "SELECT 1 FROM structural_edges WHERE source_id=? AND target_id=? AND edge_type='CONTAINS'",
+        (file_id, var_id),
+    ).fetchone()
+    assert row is not None, "Expected File -> Variable CONTAINS edge"
+
+
+def test_variable_node_type_accepted_by_sqlite_check_constraint(conn):
+    """Smoke test: the DDL's CHECK constraint allows 'Variable' as a node_type."""
+    conn.execute(
+        "INSERT INTO code_nodes (node_id, node_type, name) VALUES (?, ?, ?)",
+        ("src/x.ts::Y", "Variable", "Y"),
+    )
 
 
 # ---------------------------------------------------------------------------

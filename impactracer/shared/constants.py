@@ -150,6 +150,7 @@ NODE_TYPE_MAX_FAN_IN: dict[str, int] = {
     "InterfaceField": 200,   # Field-level access has the highest fan-in by nature.
     "File": 200,             # File nodes act as containers; high fan-in is expected.
     "ExternalPackage": 0,    # Never propagate INTO an ExternalPackage from BFS.
+    "Variable": 80,          # Top-level const declarations (schemas, constant data).
 }
 """Max in-degree before a node is excluded from BFS propagation (not seeds)."""
 

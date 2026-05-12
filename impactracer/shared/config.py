@@ -46,12 +46,35 @@ class Settings(BaseSettings):
 
     # ---- Retrieval --------------------------------------------------
     # top_k_per_query: per individual dense/BM25 query call (4 paths × N queries)
-    top_k_per_query: int = 15
-    # top_k_rrf_pool: pool entering cross-encoder after RRF (50→15 funnel)
-    top_k_rrf_pool: int = 50
+    # Sprint 13-W2A: widened from 15 to 30. Diagnostics on the calibration set
+    # showed only 5 of 21 in-index GT entities entered the RRF pool at width 15.
+    top_k_per_query: int = 30
+    # top_k_rrf_pool: pool entering cross-encoder after RRF (was 50)
+    # Sprint 13-W2A: widened to 200. Cross-encoder rerank on 200 candidates
+    # adds < 1 s on the existing model and gives the rerank-top-15 funnel a
+    # meaningful selection problem to solve.
+    top_k_rrf_pool: int = 200
     # max_admitted_seeds: hard cap on seeds admitted to CIS after reranking
     max_admitted_seeds: int = 15
     rrf_k: int = 60
+
+    # ---- Sprint 13-W2B: raw CR multilingual bridge ----------------
+    # When True, the retriever runs one additional dense query against the
+    # code collection using the raw (pre-interpretation) CR text. BGE-M3 is
+    # multilingual; an Indonesian CR can natively reach English-identifier
+    # code that no LLM #1 search_query happens to mention.
+    enable_raw_cr_dense_pass: bool = True
+    raw_cr_dense_top_k: int = 60
+
+    # ---- Sprint 13-W2C: traceability-matrix pool seeding -----------
+    # After dense_doc retrieval, query doc_code_candidates for code-nodes
+    # linked to those doc-chunks above this threshold and inject them into
+    # the RRF pool with a synthetic rank. Promotes the offline traceability
+    # precomputation from a rerank +0.1 bonus into a pool-seeding signal.
+    enable_traceability_pool_seeding: bool = True
+    traceability_seed_top_k_per_doc: int = 5
+    traceability_seed_min_score: float = 0.40
+    traceability_seed_synthetic_rank: int = 5
 
     # ---- Pre-Validation Gates (FR-C4) ------------------------------
     # Score floor is a sanity-only gate (-2.0 admits all candidates above

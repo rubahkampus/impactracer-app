@@ -26,9 +26,16 @@ from impactracer.shared.config import Settings
 
 
 def _extract_predicted(report) -> tuple[set[str], set[str]]:
-    """Pull (entity_node_ids, file_paths) from an ImpactReport."""
-    nodes = {n.node_id for n in report.impacted_nodes}
-    files = {n.file_path for n in report.impacted_nodes if n.file_path}
+    """Pull (entity_node_ids, file_paths) from an ImpactReport.
+
+    Uses the canonical GT-aligned schema:
+      - entity ids come from ``impacted_entities[i].node``
+      - file paths come from the deterministic ``impacted_files`` array
+        (the brief: "Extract file_path strings from the predicted
+        impacted_files and compare against GT impacted_files").
+    """
+    nodes = {e.node for e in report.impacted_entities}
+    files = {f.file_path for f in report.impacted_files if f.file_path}
     return nodes, files
 
 
@@ -44,8 +51,9 @@ def run_single_cr_all_variants(
 ) -> dict[str, dict]:
     """Execute every variant in VariantFlags.ALL_VARIANTS on one CR.
 
-    Writes ``<output_dir>/<cr_id>/<variant>.json`` per variant. Returns a
-    dict mapping variant_id -> per-variant metrics + timing + report path.
+    Writes ``<output_dir>/<cr_id>/<variant_id>/impact_report.json`` and
+    ``impact_report_full.json`` (step-by-step trace) per variant. Returns
+    a dict mapping variant_id -> per-variant metrics + timing + report path.
 
     Variants that crash (exception during run_analysis) are recorded with
     status='error' and metric values set to None — these CRs are excluded
@@ -53,8 +61,8 @@ def run_single_cr_all_variants(
     """
     from impactracer.pipeline.runner import run_analysis
 
-    cr_dir = output_dir / cr_id
-    cr_dir.mkdir(parents=True, exist_ok=True)
+    cr_root = output_dir / cr_id
+    cr_root.mkdir(parents=True, exist_ok=True)
 
     gt_nodes = gt_entry.entity_node_ids()
     gt_files = gt_entry.file_paths()
@@ -63,6 +71,9 @@ def run_single_cr_all_variants(
 
     for variant_id in VariantFlags.ALL_VARIANTS:
         flags = VariantFlags.for_id(variant_id)
+        variant_dir = cr_root / variant_id
+        variant_dir.mkdir(parents=True, exist_ok=True)
+        trace_sink: dict = {"cr_text": cr_text, "variant": variant_id, "cr_id": cr_id}
         t0 = time.perf_counter()
         try:
             report = run_analysis(
@@ -72,11 +83,20 @@ def run_single_cr_all_variants(
                 shared_embedder=shared_embedder,
                 shared_reranker=shared_reranker,
                 shared_llm_client=shared_llm_client,
+                trace_sink=trace_sink,
             )
         except Exception as exc:
             logger.error(
                 "[ablation] {} on {} crashed: {}", variant_id, cr_id, exc
             )
+            # Persist the trace_sink even on crash for forensic inspection.
+            try:
+                (variant_dir / "impact_report_full.json").write_text(
+                    json.dumps(trace_sink, indent=2, ensure_ascii=False, default=str),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
             results[variant_id] = {
                 "status": "error",
                 "error": str(exc),
@@ -96,10 +116,15 @@ def run_single_cr_all_variants(
             gt_files=gt_files,
         )
 
-        # Persist the per-variant report.
-        report_path = cr_dir / f"{variant_id}.json"
+        # Persist the canonical report and the full step-by-step trace.
+        report_path = variant_dir / "impact_report.json"
         report_path.write_text(
-            json.dumps(report.model_dump(), indent=2, ensure_ascii=False),
+            report.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
+        full_path = variant_dir / "impact_report_full.json"
+        full_path.write_text(
+            json.dumps(trace_sink, indent=2, ensure_ascii=False, default=str),
             encoding="utf-8",
         )
 
@@ -108,6 +133,7 @@ def run_single_cr_all_variants(
             "elapsed_s": elapsed,
             "report_path": str(report_path),
             "n_impacted_nodes": len(predicted_nodes),
+            "n_impacted_files": len(predicted_files),
             "degraded_run": report.degraded_run,
             "analysis_mode": report.analysis_mode,
             "estimated_scope": report.estimated_scope,
@@ -143,8 +169,8 @@ def run_full_evaluation(
     Writes:
       - ``<output_dir>/per_cr_per_variant_metrics.csv``
       - ``<output_dir>/per_cr_per_variant_metrics.jsonl``
-      - ``<output_dir>/<cr_id>/<variant>.json``
-      - ``<output_dir>/llm_audit.jsonl`` (NFR-05 audit trail)
+      - ``<output_dir>/<cr_id>/<variant_id>/impact_report.json``
+      - ``<output_dir>/<cr_id>/<variant_id>/impact_report_full.json``
 
     Returns the CSV path so callers can pivot for the Wilcoxon test.
 
@@ -173,7 +199,8 @@ def run_full_evaluation(
     fieldnames = [
         "cr_id", "variant",
         "status", "elapsed_s",
-        "n_impacted_nodes", "degraded_run", "analysis_mode", "estimated_scope",
+        "n_impacted_nodes", "n_impacted_files",
+        "degraded_run", "analysis_mode", "estimated_scope",
         # Entity-level
         "entity_precision_set", "entity_recall_set", "entity_f1_set",
         "entity_n_predicted", "entity_n_gt", "entity_n_intersect",
