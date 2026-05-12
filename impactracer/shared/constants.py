@@ -83,24 +83,15 @@ def layer_compat(code_classification: str | None, doc_chunk_type: str) -> float:
 
 EDGE_CONFIG: dict[str, dict] = {
     # Behavioral dependencies (reverse direction)
-    # Crucible Fix 6 (AV-5): CALLS depth reduced 3 -> 2.
-    # Each reverse-CALLS hop multiplies fan-in by ~3-8 in TS codebases. Three
-    # hops can reach 200+ propagated nodes per seed (live citrakara runs:
-    # 372-460 nodes pre-collapse). Depth-2 caps the fan-out at the precision-
-    # recovery sweet spot while still catching transitive same-feature
-    # callers. Combined with the UTILITY-file cutoff and per-node-type fan-in
-    # cap below, this is the structural defence against graph flood.
+    # Reverse-CALLS: each hop multiplies fan-in by ~3-8 in TS codebases.
+    # Depth-2 caps fan-out while still catching transitive same-feature callers.
     "CALLS":               {"direction": "reverse", "max_depth": 2},
     "INHERITS":            {"direction": "reverse", "max_depth": 3},
     "IMPLEMENTS":          {"direction": "reverse", "max_depth": 3},
     "TYPED_BY":            {"direction": "reverse", "max_depth": 3},
     "FIELDS_ACCESSED":     {"direction": "reverse", "max_depth": 2},
     # Structural ownership (forward direction)
-    # Phase 1 fix (F-1/F-NEW-2): max_depth reduced 3→1. DEFINES_METHOD is a
-    # containment relation (Class owns its Methods); it is NOT a semantic
-    # propagation pathway. Allowing depth-3 forward traversal caused Class →
-    # Method → anything-3-hops-deep explosions that are architecturally
-    # unjustifiable. Depth-1 means a class reaches only its own direct methods.
+    # Containment relation, not a semantic propagation pathway. Depth-1 only.
     "DEFINES_METHOD":      {"direction": "forward", "max_depth": 1},
     "PASSES_CALLBACK":     {"direction": "forward", "max_depth": 1},
     # Reactive
@@ -111,20 +102,13 @@ EDGE_CONFIG: dict[str, dict] = {
     "DEPENDS_ON_EXTERNAL": {"direction": "reverse", "max_depth": 1},
     "CLIENT_API_CALLS":    {"direction": "reverse", "max_depth": 1},
     "DYNAMIC_IMPORT":      {"direction": "reverse", "max_depth": 1},
-    # CONTAINS bridges the File↔symbol membrane.
-    # Phase 1 fix (E-NEW-8/A-NEW-7): direction changed "both"→"reverse".
-    # Forward traversal (File→all-children) caused a BFS explosion that reached
-    # every InterfaceField and Method in any touched file, producing 372+ nodes
-    # on live CRs and a 97K-token synthesis timeout. The academically correct
-    # direction is reverse only: given a changed symbol, we want to know which
-    # files CONTAIN it (i.e. which files are affected), NOT to enumerate all
-    # other symbols that live in the same file. Forward CONTAINS is structural
-    # noise, not semantic propagation.
+    # CONTAINS bridges the File↔symbol membrane. Reverse only: given a changed
+    # symbol, find which files contain it — not enumerate all sibling symbols.
     "CONTAINS":            {"direction": "reverse", "max_depth": 1},
 }
 
 LOW_CONF_CAPPED_EDGES: frozenset[str] = frozenset({"CALLS"})
-"""Edges whose depth is capped to 1 for low-confidence seeds (Fix D)."""
+"""Edges whose depth is capped to 1 for low-confidence seeds."""
 
 PROPAGATION_VALIDATION_EXEMPT_EDGES: frozenset[str] = frozenset({
     "IMPLEMENTS",
@@ -135,11 +119,10 @@ PROPAGATION_VALIDATION_EXEMPT_EDGES: frozenset[str] = frozenset({
 
 
 # =========================================================================
-# Crucible Fix 11 — Structural propagation limits
+# Structural propagation limits (BFS graph-flood defence)
 # =========================================================================
 #
-# These constants harden BFS against graph-flood failure modes that the
-# hub-degree cap alone cannot prevent. Two orthogonal mechanisms:
+# Two orthogonal mechanisms beyond the hub-degree cap:
 #
 # 1. UTILITY_FILE_CALLS_DEPTH_CAP — when a propagation chain ORIGINATES at
 #    a UTILITY-classified file (e.g. lib/format-date.ts, lib/error.ts),
@@ -211,15 +194,9 @@ SEVERITY_BY_EDGE_CHAIN_TYPE: dict[str, Severity] = {
 def severity_for_chain(causal_chain: list[str]) -> Severity:
     """Severity = the edge type of the LAST hop in the causal chain.
 
-    Phase 1 fix (F-NEW-4): the previous implementation used min(rank) across
-    the entire chain, which caused "severity laundering" — a node reached via
-    CALLS → CALLS → IMPLEMENTS inherited Tinggi severity from the final
-    IMPLEMENTS edge even though the intervening CALLS hops were speculative.
-    The last hop is the proximate structural dependency; its edge type is the
-    correct indicator of *why* the node is impacted.
-
-    SIS seeds (empty chain) are ``Tinggi`` by convention: they are the direct
-    retrieval targets of the CR and have the highest semantic certainty.
+    The last hop is the proximate structural dependency; its type indicates
+    *why* the node is impacted rather than laundering through earlier hops.
+    SIS seeds (empty chain) are Tinggi — they are direct retrieval targets.
     """
     if not causal_chain:
         return "Tinggi"
