@@ -361,3 +361,180 @@ def validate_propagation(
 
     filtered_cis = CISResult(sis_nodes=cis.sis_nodes, propagated_nodes=final_propagated)
     return filtered_cis, justifications, degraded
+
+
+# =========================================================================
+# Apex Crucible Proposal A.3 — Sibling validation via LLM #4
+# =========================================================================
+
+_SIBLING_SYSTEM_PROMPT = """\
+You are a software impact analysis expert. You are reviewing whether a set
+of code symbols inside ONE file must change to support a Change Request.
+
+INPUT:
+  - A Change Request (CR) intent and change_type.
+  - One or more confirmed-impacted ANCHOR nodes inside this file (already
+    validated upstream — accept all of them as ground truth).
+  - Each anchor's justification (why it is impacted).
+  - A list of SIBLING symbols defined in the same file as the anchors.
+
+YOUR TASK:
+For EACH sibling, decide whether — given that the anchors ARE impacted by
+this CR — the sibling must ALSO change to coherently support the CR.
+
+ADMIT a sibling when ANY of these holds:
+  - The CR adds/changes a domain field, and the sibling is a related
+    interface, type alias, schema, or input/payload definition that must
+    expose that field on the same data shape.
+  - The CR adds/changes a behaviour, and the sibling is a function in the
+    same file that produces, consumes, validates, sanitizes, or persists
+    the same data shape.
+  - The CR's change_type is ADDITION and the sibling is the matching
+    creation / update / delete function that must accept the new field
+    (e.g. updateX, createX, sanitizeX, validateX when the CR adds a field
+    to X's payload).
+  - The CR concerns a UI form/page and the sibling is a sub-component
+    defined in the same file that renders or edits the affected field.
+  - The sibling shares a tight contract with any anchor (e.g. anchor is
+    `updateX` and sibling is `XUpdateInput` — the input type of `updateX`).
+
+REJECT a sibling when:
+  - The sibling is a helper/util that operates on unrelated data
+    (e.g. a date formatter when the CR adds a boolean flag).
+  - The sibling's domain is orthogonal to the CR (e.g. an analytics event
+    helper when the CR is about pricing).
+  - The sibling exists only for a legacy concern the CR does not touch.
+
+ANTI-TAUTOLOGY RULE (softer than primary LLM #4 rule):
+  Same-file co-location alone is NOT sufficient. But the bar here is lower
+  than for general BFS propagation — these candidates are siblings of a
+  CONFIRMED anchor in the same file, which is a strong prior. Use the
+  CR's primary_intent and the anchor justifications to identify the
+  matching CRUD partner / type partner / form partner.
+
+OUTPUT (JSON):
+{
+  "verdicts": [
+    {"node_id": "<verbatim sibling id>",
+     "semantically_impacted": true | false,
+     "justification": "<one sentence, concrete>"},
+    ...
+  ]
+}
+Return one verdict per sibling. Copy the node_id VERBATIM from between
+the <<NODE_ID_START>> ... <<NODE_ID_END>> delimiters.
+"""
+
+
+def validate_siblings_for_file(
+    *,
+    file_path: str,
+    anchors: list[tuple[str, str]],
+    siblings: list[tuple[str, str]],
+    cr_interp: CRInterpretation,
+    node_meta_by_id: dict[str, dict],
+    client: LLMClient,
+) -> tuple[dict[str, str], bool]:
+    """LLM #4 sibling-batch: admit/reject siblings given multi-anchor context.
+
+    Apex Crucible V2: previously this function took a single anchor + its
+    single justification. The forensic audit on CR-01 V7 showed bad anchors
+    (FPs in the file) caused the LLM to reject legitimate sibling GTs because
+    the anchor framing was wrong. We now pass ALL anchors in the file plus
+    each anchor's justification, so LLM #4 sees the multi-anchor contract
+    surface and can identify CRUD/type partners correctly.
+
+    Args:
+        file_path: the shared file path of anchors + siblings.
+        anchors: list of (anchor_id, anchor_justification) tuples — every
+            validated impacted node currently in that file. Justification
+            text comes from whichever upstream validator admitted each
+            anchor (LLM #2 / #3 / #4).
+        siblings: list of (sibling_id, node_type) tuples to adjudicate.
+        cr_interp: the active CRInterpretation (intent + change_type).
+        node_meta_by_id: optional metadata for code snippets / abstractions.
+        client: shared LLMClient.
+
+    Returns:
+        (justifications, degraded) where:
+          - justifications maps admitted sibling_id -> per-node justification.
+          - degraded is True if the batch failed all retries (fail-closed).
+    """
+    if not siblings:
+        return {}, False
+
+    lines: list[str] = [
+        f"Change Request Intent: {cr_interp.primary_intent}",
+        f"Change Type: {cr_interp.change_type}",
+        f"Domain Concepts: {', '.join(cr_interp.domain_concepts)}",
+        "",
+        f"File under review: {file_path}",
+        "Confirmed-impacted ANCHOR symbols in this file:",
+    ]
+    for anchor_id, anchor_just in anchors:
+        truncated = (anchor_just or "Validated upstream; no per-anchor justification text available.")[:300]
+        lines.append(f"  - {anchor_id}")
+        lines.append(f"      justification: {truncated}")
+    lines += [
+        "",
+        "Adjudicate each sibling in the same file:",
+        "",
+    ]
+
+    for i, (sib_id, sib_type) in enumerate(siblings, start=1):
+        meta = node_meta_by_id.get(sib_id, {})
+        abstraction = meta.get("internal_logic_abstraction") or meta.get("source_code", "")
+        if abstraction:
+            abstraction = abstraction[:800]
+        lines += [
+            f"[{i}]",
+            f"NODE ID: <<NODE_ID_START>>{sib_id}<<NODE_ID_END>>",
+            f"Type: {sib_type}",
+        ]
+        if abstraction:
+            lines += ["Signature / Abstraction:", abstraction]
+        lines.append("")
+
+    lines.append(
+        'Return: {"verdicts": [{"node_id": ..., '
+        '"semantically_impacted": true/false, "justification": "..."}]}'
+    )
+    prompt = "\n".join(lines)
+
+    try:
+        result: PropagationValidationResult = client.call(
+            system=_SIBLING_SYSTEM_PROMPT,
+            user=prompt,
+            response_schema=PropagationValidationResult,
+            call_name="validate_siblings",
+        )
+    except Exception as exc:
+        logger.error(
+            "[traversal_validator] Sibling batch for {} failed after retries: {} "
+            "- DROPPING (fail-closed)", file_path, exc,
+        )
+        return {}, True
+
+    verdict_map: dict[str, tuple[bool, str]] = {}
+    for v in result.verdicts:
+        clean_id = _strip_delimiters(v.node_id)
+        verdict_map[clean_id] = (v.semantically_impacted, v.justification or "")
+
+    admitted: dict[str, str] = {}
+    for sib_id, _sib_type in siblings:
+        verdict = verdict_map.get(sib_id)
+        if verdict is None:
+            logger.warning(
+                "[traversal_validator] No sibling verdict for {} - DROPPING (fail-closed)",
+                sib_id,
+            )
+            continue
+        impacted, justification = verdict
+        if impacted:
+            admitted[sib_id] = justification
+
+    logger.info(
+        "[traversal_validator] Sibling batch {}: {} admitted of {} candidates",
+        file_path, len(admitted), len(siblings),
+    )
+    return admitted, False

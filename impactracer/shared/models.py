@@ -172,6 +172,20 @@ class CRInterpretation(BaseModel):
         ),
         max_length=4,
     )
+    layered_search_queries: dict[str, list[str]] | None = Field(
+        default=None,
+        description=(
+            "Apex Crucible Proposal B: per-architectural-layer query grid. "
+            "Keys MUST be one of: 'api_route', 'page_component', "
+            "'ui_component', 'utility', 'type_definition'. Each value is a "
+            "list of 1-2 English technical phrases that target THAT layer's "
+            "naming conventions and structural patterns. The retriever runs "
+            "every layer's queries against both the dense and BM25 indices "
+            "and merges via per-layer RRF quotas, ensuring no layer is "
+            "starved when one layer's signals dominate the LLM #1 output. "
+            "When None, the retriever falls back to the flat search_queries."
+        ),
+    )
     is_nfr: bool = Field(
         default=False,
         description=(

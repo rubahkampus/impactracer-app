@@ -66,6 +66,42 @@ class Settings(BaseSettings):
     enable_raw_cr_dense_pass: bool = True
     raw_cr_dense_top_k: int = 60
 
+    # ---- Apex Crucible Proposal B: per-layer code retrieval --------
+    # When CRInterpretation.layered_search_queries is populated, the retriever
+    # runs an additional pass per architectural layer (api_route, page_component,
+    # ui_component, utility, type_definition) against the code collection
+    # scoped by file_classification. Each layer contributes up to
+    # `per_layer_top_k` candidates to a new RRF path called "layered_code".
+    # This guarantees no layer is starved when LLM #1's flat search_queries
+    # are biased toward one architectural plane.
+    per_layer_top_k: int = 12
+
+    # ---- Apex Crucible Proposal A: file-local sibling promotion -----
+    # After LLM #4 validation, the runner enumerates every qualified sibling
+    # of each validated node within the same file (via CONTAINS) and lets
+    # LLM #4 admit/reject each sibling using the anchor's justification as
+    # context. Recovers GT entities that share a file with a confirmed seed
+    # (the dominant failure mode at the V7 baseline: 7/8 missed entities on
+    # CR-01, 4/6 on CR-03 live in already-named files).
+    #
+    # Apex V3: per-file/per-CR admission caps prevent sibling-promotion
+    # overshoot. Forensic on V2 calibration: CR-04 admitted 10 siblings in
+    # one file (escrow repo) because the anchors were SIS-confirmed CRUD
+    # functions of a single domain entity; LLM #4 correctly recognized all
+    # 10 as similarly-shaped, but the GT only named the one caller. Capping
+    # admissions truncates this overshoot while preserving the recall win
+    # on CRs where 1-2 siblings per file are the right answer.
+    enable_sibling_promotion: bool = True
+    sibling_promotion_max_per_file: int = 12        # candidate ceiling per file
+    # Apex V4: per-file admission cap softened from 2 (V3) to 4. V3 forensics
+    # showed cap=2 dropped legitimate admissions on CR-03 and removed the TP
+    # camouflage on CR-04. Cap=4 prevents the worst overshoot (CR-04 V2 had
+    # 10 admits in one file) while preserving the 1-3 admits per file that
+    # drive recall gains on CR-01 / CR-03. Per-CR cap removed (set to 0 =
+    # disabled) — global throttling was too blunt on a 5-CR mix.
+    sibling_admit_max_per_file: int = 4
+    sibling_admit_max_per_cr: int = 0               # 0 = no global cap
+
     # ---- Sprint 13-W2C: traceability-matrix pool seeding -----------
     # After dense_doc retrieval, query doc_code_candidates for code-nodes
     # linked to those doc-chunks above this threshold and inject them into

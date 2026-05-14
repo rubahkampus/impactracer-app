@@ -10,7 +10,7 @@ Reference: master_blueprint.md §4 Step 6.
 from __future__ import annotations
 
 import sqlite3
-from collections import deque
+from collections import defaultdict, deque
 
 import networkx as nx
 from loguru import logger
@@ -435,3 +435,110 @@ def collapse_contains_subtrees(
         len(parent_to_children),
     )
     return CISResult(sis_nodes=new_sis, propagated_nodes=new_propagated)
+
+
+# =========================================================================
+# Apex Crucible Proposal A.2 — Sibling promotion via CONTAINS
+# =========================================================================
+
+#: Node types that can appear as anchors for sibling promotion.
+#: We anchor on qualified (file::symbol) entities; bare File nodes don't
+#: anchor a "promote my siblings" pass — that would be every node in the file.
+_SIBLING_ANCHOR_EXCLUDED_NODE_TYPES: frozenset[str] = frozenset({
+    "File", "ExternalPackage",
+})
+
+#: Node types eligible as sibling candidates within an anchor's file.
+#: InterfaceField is excluded — Step 6.5 already collapses these into their
+#: parent Interface, so promoting them again would re-introduce token bloat
+#: and InterfaceFields are never in GT.
+_SIBLING_CANDIDATE_ALLOWED_NODE_TYPES: frozenset[str] = frozenset({
+    "Function", "Method", "Interface", "TypeAlias",
+    "Enum", "Class", "Variable",
+})
+
+
+def collect_file_local_siblings(
+    anchor_ids: list[str],
+    conn: sqlite3.Connection,
+    already_in_cis: set[str],
+    max_per_file: int = 12,
+) -> dict[str, list[tuple[str, str, str]]]:
+    """Return per-file sibling candidates for promotion via CONTAINS.
+
+    For each anchor (a validated qualified node), look up the anchor's
+    ``file_path`` and fetch every other qualified node in the same file
+    that:
+      - has a node_type in _SIBLING_CANDIDATE_ALLOWED_NODE_TYPES;
+      - is not already in ``already_in_cis``;
+      - is not the anchor itself.
+
+    Multiple anchors in the same file collapse to a single sibling list
+    (so LLM #4 only adjudicates each sibling once). Returns a dict keyed by
+    file_path, value is a list of (sibling_id, node_type, anchor_id) tuples
+    capped at ``max_per_file``. The anchor_id is the *first* anchor we
+    encountered in that file — used only as a justification reference.
+
+    Apex Crucible Proposal A.2: 7 of 8 missed GT entities on CR-01 live in
+    files we already named correctly; 4 of 6 on CR-03. CONTAINS-based
+    file-local sibling enumeration is the cheapest way to surface them.
+    """
+    if not anchor_ids:
+        return {}
+
+    # Fetch anchor file_paths.
+    placeholders = ",".join("?" * len(anchor_ids))
+    rows = conn.execute(
+        f"SELECT node_id, file_path, node_type "
+        f"FROM code_nodes WHERE node_id IN ({placeholders})",
+        anchor_ids,
+    ).fetchall()
+    anchor_file_paths: dict[str, str] = {}
+    file_first_anchor: dict[str, str] = {}
+    for nid, fp, ntype in rows:
+        if not fp or not nid:
+            continue
+        if ntype in _SIBLING_ANCHOR_EXCLUDED_NODE_TYPES:
+            continue
+        anchor_file_paths[nid] = fp
+        file_first_anchor.setdefault(fp, nid)
+
+    target_files = list(file_first_anchor.keys())
+    if not target_files:
+        return {}
+
+    # One query for every qualified node living in any of those files.
+    placeholders_f = ",".join("?" * len(target_files))
+    rows = conn.execute(
+        f"SELECT node_id, node_type, file_path "
+        f"FROM code_nodes "
+        f"WHERE file_path IN ({placeholders_f}) "
+        f"  AND node_id LIKE '%::%'",
+        target_files,
+    ).fetchall()
+
+    by_file: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
+    anchor_set = set(anchor_ids)
+    for nid, ntype, fp in rows:
+        if nid in anchor_set or nid in already_in_cis:
+            continue
+        if ntype not in _SIBLING_CANDIDATE_ALLOWED_NODE_TYPES:
+            continue
+        first_anchor = file_first_anchor.get(fp, "")
+        by_file[fp].append((nid, ntype, first_anchor))
+
+    # Apply per-file cap.
+    capped: dict[str, list[tuple[str, str, str]]] = {}
+    for fp, sibs in by_file.items():
+        if not sibs:
+            continue
+        capped[fp] = sibs[:max_per_file]
+
+    total = sum(len(v) for v in capped.values())
+    if capped:
+        logger.info(
+            "[graph_bfs] sibling promotion: {} candidate siblings across {} files "
+            "(anchors={}, max_per_file={})",
+            total, len(capped), len(anchor_ids), max_per_file,
+        )
+    return capped

@@ -743,6 +743,198 @@ def run_analysis(
     elif variant_flags.enable_propagation_validation:
         logger.info("[runner] Step 7: Propagation validation SKIPPED (no propagated nodes)")
 
+    # ------------------------------------------------------------------
+    # Step 7.5 — Apex Crucible Proposal A: file-local sibling promotion
+    # For each validated qualified node, fetch its in-file siblings via
+    # CONTAINS and ask LLM #4 (sibling-batch mode) to admit/reject each.
+    # Recovers GT entities that share a file with a confirmed seed — the
+    # dominant V7-baseline failure mode (forensic audit: 7/8 missed entities
+    # on CR-01, 4/6 on CR-03 lived in already-named files).
+    # ------------------------------------------------------------------
+    sibling_admitted_count = 0
+    if (
+        variant_flags.enable_propagation_validation
+        and getattr(settings, "enable_sibling_promotion", True)
+    ):
+        from impactracer.pipeline.graph_bfs import collect_file_local_siblings
+        from impactracer.pipeline.traversal_validator import validate_siblings_for_file
+
+        anchors_for_sibling: list[str] = []
+        anchor_justifications: dict[str, str] = {}
+        # Anchors = qualified validated nodes (SIS + propagated post-LLM4).
+        for nid in list(cis.sis_nodes.keys()) + list(cis.propagated_nodes.keys()):
+            if "::" not in nid:
+                continue
+            anchors_for_sibling.append(nid)
+            j = (
+                (sis_justifications.get(nid, {}) or {}).get("mechanism_of_impact")
+                or (sis_justifications.get(nid, {}) or {}).get("justification")
+                or trace_justifications.get(nid)
+                or llm4_justifications.get(nid)
+                or ""
+            )
+            anchor_justifications[nid] = j
+
+        already_in_cis_set = set(cis.sis_nodes.keys()) | set(cis.propagated_nodes.keys())
+
+        per_file_candidates = collect_file_local_siblings(
+            anchor_ids=anchors_for_sibling,
+            conn=ctx.conn,
+            already_in_cis=already_in_cis_set,
+            max_per_file=getattr(settings, "sibling_promotion_max_per_file", 12),
+        )
+
+        if per_file_candidates:
+            # Fetch metadata for all candidate siblings (one batched SELECT).
+            all_sibling_ids = [
+                sid for sibs in per_file_candidates.values() for sid, _t, _a in sibs
+            ]
+            sib_meta: dict[str, dict] = {}
+            if all_sibling_ids:
+                placeholders = ",".join("?" * len(all_sibling_ids))
+                rows = ctx.conn.execute(
+                    f"SELECT node_id, node_type, file_path, "
+                    f"internal_logic_abstraction, source_code "
+                    f"FROM code_nodes WHERE node_id IN ({placeholders})",
+                    all_sibling_ids,
+                ).fetchall()
+                for row in rows:
+                    sib_meta[row[0]] = {
+                        "node_type": row[1],
+                        "file_path": row[2],
+                        "internal_logic_abstraction": row[3],
+                        "source_code": row[4],
+                    }
+
+            # Apex Crucible V2: build per-file anchor list (all CIS anchors in
+            # the file, not just the first). This corrects the V1 bug where a
+            # bad first-anchor caused LLM #4 to reject legitimate sibling GT
+            # entities for off-target reasons.
+            anchors_by_file: dict[str, list[tuple[str, str]]] = {}
+            for anc in anchors_for_sibling:
+                fp = (node_file_paths_unused := None)  # placeholder
+            # We need anchor file_paths. Fetch via SQLite.
+            if anchors_for_sibling:
+                placeholders_a = ",".join("?" * len(anchors_for_sibling))
+                rows_a = ctx.conn.execute(
+                    f"SELECT node_id, file_path FROM code_nodes "
+                    f"WHERE node_id IN ({placeholders_a})",
+                    anchors_for_sibling,
+                ).fetchall()
+                anchor_fp = {nid: fp for nid, fp in rows_a if fp}
+            else:
+                anchor_fp = {}
+            for anc in anchors_for_sibling:
+                fp = anchor_fp.get(anc, "")
+                if not fp:
+                    continue
+                anchors_by_file.setdefault(fp, []).append(
+                    (anc, anchor_justifications.get(anc, ""))
+                )
+
+            sibling_justifications: dict[str, str] = {}
+            sibling_anchors: dict[str, str] = {}
+            sibling_files: dict[str, str] = {}
+
+            for file_path, sibs in per_file_candidates.items():
+                if not sibs:
+                    continue
+                file_anchors = anchors_by_file.get(file_path, [])
+                if not file_anchors:
+                    # Fallback: synthesize from sib's recorded first-anchor.
+                    fallback_anchor = sibs[0][2]
+                    file_anchors = [(
+                        fallback_anchor,
+                        anchor_justifications.get(fallback_anchor, "") or
+                        "Anchor was validated upstream; specific justification unavailable.",
+                    )]
+                pairs = [(sid, stype) for sid, stype, _a in sibs]
+                admitted, sibling_degraded = validate_siblings_for_file(
+                    file_path=file_path,
+                    anchors=file_anchors,
+                    siblings=pairs,
+                    cr_interp=cr_interp,
+                    node_meta_by_id=sib_meta,
+                    client=ctx.llm_client,
+                )
+                if sibling_degraded:
+                    degraded_run = True
+                primary_anchor = file_anchors[0][0] if file_anchors else sibs[0][2]
+                # Apex V3 cap: truncate per-file admissions to the configured
+                # ceiling, preserving LLM #4's emission order (which correlates
+                # with confidence — first-emitted siblings tend to be the
+                # tightest contract matches).
+                per_file_cap = getattr(settings, "sibling_admit_max_per_file", 2)
+                if per_file_cap > 0 and len(admitted) > per_file_cap:
+                    logger.info(
+                        "[runner] Step 7.5: per-file cap — truncating {} admissions "
+                        "to top-{} for {}", len(admitted), per_file_cap, file_path,
+                    )
+                    capped_items = list(admitted.items())[:per_file_cap]
+                else:
+                    capped_items = list(admitted.items())
+                for sib_id, sib_just in capped_items:
+                    sibling_justifications[sib_id] = sib_just
+                    sibling_anchors[sib_id] = primary_anchor
+                    sibling_files[sib_id] = file_path
+
+            # Apex V3 cap: enforce per-CR admission ceiling. Drops the lowest-
+            # order admissions when the total exceeds the cap. The order is
+            # insertion order from the per-file loop, which roughly tracks
+            # anchor strength.
+            per_cr_cap = getattr(settings, "sibling_admit_max_per_cr", 5)
+            if per_cr_cap > 0 and len(sibling_justifications) > per_cr_cap:
+                logger.info(
+                    "[runner] Step 7.5: per-CR cap — truncating {} sibling "
+                    "admissions to top-{}",
+                    len(sibling_justifications), per_cr_cap,
+                )
+                kept_ids = list(sibling_justifications.keys())[:per_cr_cap]
+                sibling_justifications = {k: sibling_justifications[k] for k in kept_ids}
+                sibling_anchors = {k: sibling_anchors[k] for k in kept_ids}
+                sibling_files = {k: sibling_files[k] for k in kept_ids}
+
+            # Inject admitted siblings into the CIS as propagated nodes with
+            # a CONTAINS causal chain (severity_for_chain maps CONTAINS -> Rendah,
+            # which is fine — these are admitted on contract similarity, not
+            # primary behavioural change).
+            for sib_id, sib_just in sibling_justifications.items():
+                if sib_id in cis.sis_nodes or sib_id in cis.propagated_nodes:
+                    continue
+                anchor = sibling_anchors[sib_id]
+                cis.propagated_nodes[sib_id] = NodeTrace(
+                    depth=1,
+                    causal_chain=["CONTAINS"],
+                    path=[anchor, sib_id],
+                    source_seed=anchor,
+                    low_confidence_seed=False,
+                    justification=sib_just,
+                    justification_source="llm4_sibling",
+                )
+                llm4_justifications[sib_id] = sib_just
+                # Also register node_type / file_path so downstream maps see it.
+                meta = sib_meta.get(sib_id, {})
+                if meta:
+                    pass  # node_types map is rebuilt below
+                sibling_admitted_count += 1
+
+            logger.info(
+                "[runner] Step 7.5: sibling promotion admitted {} new siblings "
+                "across {} files (anchors={})",
+                sibling_admitted_count,
+                sum(1 for sibs in per_file_candidates.values() if sibs),
+                len(anchors_for_sibling),
+            )
+            _trace("step_7p5_sibling_promotion", {
+                "anchors": list(anchors_for_sibling),
+                "candidates_per_file": {
+                    fp: [sid for sid, _t, _a in sibs]
+                    for fp, sibs in per_file_candidates.items()
+                },
+                "admitted": list(sibling_justifications.keys()),
+                "justifications": sibling_justifications,
+            })
+
     # Generate synthetic justifications for propagated nodes not processed by
     # LLM #4 (BFS-only variants and exempt-edge auto-keeps). These are
     # deterministic renderings of the BFS chain, not LLM-generated text.
@@ -920,12 +1112,28 @@ def run_analysis(
     bfs_ran = variant_flags.enable_bfs and len(cis.propagated_nodes) > 0
     analysis_mode = "retrieval_plus_propagation" if bfs_ran else "retrieval_only"
 
+    # Apex Crucible A.1: extra impacted_files come from File-type CIS nodes
+    # (and bare path nodes) that we filtered out of impacted_entities. Their
+    # paths still belong in the file-level report.
+    extra_file_paths: list[str] = []
+    for nid in cis.combined().keys():
+        nt = node_types.get(nid, "")
+        if nt == "File":
+            fp = node_file_paths.get(nid) or nid
+            if fp:
+                extra_file_paths.append(fp)
+        elif "::" not in nid:
+            # Bare path CIS node (shouldn't happen often post-filter, but
+            # belt-and-braces). Treat the node_id itself as a file path.
+            extra_file_paths.append(nid)
+
     report = assemble_impact_report(
         summary=synthesis,
         impacted_entities=impacted_entities_deterministic,
         estimated_scope=computed_scope,
         analysis_mode=analysis_mode,
         degraded_run=degraded_run,
+        extra_impacted_file_paths=extra_file_paths,
     )
 
     _trace("final_report", report.model_dump())

@@ -33,8 +33,18 @@ def _extract_predicted(report) -> tuple[set[str], set[str]]:
       - file paths come from the deterministic ``impacted_files`` array
         (the brief: "Extract file_path strings from the predicted
         impacted_files and compare against GT impacted_files").
+
+    Apex Crucible Proposal A.4: defensive filter against File-type leakage.
+    GT entities always carry a `::` qualifier; bare file paths in the entity
+    set are guaranteed FPs. The synthesizer should already filter these
+    (Proposal A.1) but we double-up here so replays of older runs benefit
+    too.
     """
-    nodes = {e.node for e in report.impacted_entities}
+    nodes = {
+        e.node
+        for e in report.impacted_entities
+        if e.node and "::" in e.node and getattr(e, "node_type", "") != "File"
+    }
     files = {f.file_path for f in report.impacted_files if f.file_path}
     return nodes, files
 

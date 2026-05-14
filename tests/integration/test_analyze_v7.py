@@ -186,13 +186,13 @@ def test_v7_exactly_5_llm_calls_mocked() -> None:
     )
 
     # The resolver looks up doc_1 -> top-1 code in doc_code_candidates, which
-    # the mocked SQLite returns as code_seed_1. Trace validator MUST receive
+    # the mocked SQLite returns as src/lib/auth.ts::seedFn. Trace validator MUST receive
     # a verdict with the matching code_node_id or the seed is fail-closed dropped.
     trace_result = TraceValidationResult(
         verdicts=[
             TraceVerdict(
                 doc_chunk_id="doc_1",
-                code_node_id="code_seed_1",
+                code_node_id="src/lib/auth.ts::seedFn",
                 decision="CONFIRMED",
                 justification="Directly implements the requirement",
             )
@@ -202,7 +202,7 @@ def test_v7_exactly_5_llm_calls_mocked() -> None:
     prop_result = PropagationValidationResult(
         verdicts=[
             PropagationVerdict(
-                node_id="caller_fn",  # the BFS-propagated node from the mock graph
+                node_id="src/lib/auth.ts::callerFn",  # the BFS-propagated node from the mock graph
                 semantically_impacted=True,
                 justification="Caller of impacted function",
             )
@@ -248,7 +248,7 @@ def test_v7_exactly_5_llm_calls_mocked() -> None:
 
         # Build a tiny real graph for BFS to exercise.
         g = nx.MultiDiGraph()
-        g.add_edge("caller_fn", "code_seed_1", edge_type="CALLS")
+        g.add_edge("src/lib/auth.ts::callerFn", "src/lib/auth.ts::seedFn", edge_type="CALLS")
 
         mock_ctx = MagicMock()
         mock_ctx.llm_client = mock_client
@@ -260,13 +260,13 @@ def test_v7_exactly_5_llm_calls_mocked() -> None:
         def _mock_execute(sql, params=None):
             cur = MagicMock()
             if "SELECT node_id FROM code_nodes" in sql and params is None:
-                cur.fetchall.return_value = [("code_seed_1",)]
+                cur.fetchall.return_value = [("src/lib/auth.ts::seedFn",)]
             elif "SELECT code_id FROM doc_code_candidates" in sql:
-                cur.fetchall.return_value = [("code_seed_1",)]
+                cur.fetchall.return_value = [("src/lib/auth.ts::seedFn",)]
             elif "SELECT node_id, node_type, file_path" in sql:
                 cur.fetchall.return_value = [
-                    ("code_seed_1", "Function", "src/lib/auth.ts", None, None),
-                    ("caller_fn", "Function", "src/lib/auth.ts", None, None),
+                    ("src/lib/auth.ts::seedFn", "Function", "src/lib/auth.ts", None, None),
+                    ("src/lib/auth.ts::callerFn", "Function", "src/lib/auth.ts", None, None),
                 ]
             else:
                 cur.fetchall.return_value = []

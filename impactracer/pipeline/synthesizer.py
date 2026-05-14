@@ -107,6 +107,13 @@ def build_deterministic_impacted_entities(
     rows: list[ImpactedEntity] = []
 
     for node_id, trace in combined.items():
+        # Apex Crucible Proposal A.1: GT's `impacted_entities` only contains
+        # qualified `file::symbol` ids; emitting bare File nodes here is a
+        # guaranteed FP under exact-set scoring. File-level impact is already
+        # captured separately in `impacted_files`.
+        if node_types.get(node_id, "") == "File" or "::" not in node_id:
+            continue
+
         just = (
             trace.justification
             or justifications_extra.get(node_id, "")
@@ -142,6 +149,7 @@ build_deterministic_impacted_nodes = build_deterministic_impacted_entities
 def derive_impacted_files(
     entities: list[ImpactedEntity],
     file_justifications_from_llm5: dict[str, str] | None = None,
+    extra_file_paths: list[str] | None = None,
 ) -> list[ImpactedFile]:
     """Build the file-level rows DETERMINISTICALLY from impacted_entities.
 
@@ -173,16 +181,26 @@ def derive_impacted_files(
             seen_order.append(fp)
         file_to_entities.setdefault(fp, []).append(ent)
 
+    # Apex Crucible A.1: File-type CIS nodes were filtered out of entities, but
+    # the files themselves are still part of impacted_files (GT scores file-level
+    # separately). Append their paths if they aren't already covered.
+    for fp in (extra_file_paths or []):
+        if not fp or fp in seen_set:
+            continue
+        seen_set.add(fp)
+        seen_order.append(fp)
+        file_to_entities.setdefault(fp, [])
+
     rows: list[ImpactedFile] = []
     severity_rank = {"Tinggi": 0, "Menengah": 1, "Rendah": 2}
 
     for fp in seen_order:
-        ents = file_to_entities[fp]
+        ents = file_to_entities.get(fp, [])
         llm_just = file_justifications_from_llm5.get(fp, "").strip()
         if llm_just:
             justification = llm_just[:600]
-        else:
-            # Fallback: deterministic file summary.
+        elif ents:
+            # Fallback: deterministic file summary derived from contained entities.
             sev = min((severity_rank[e.severity] for e in ents), default=2)
             sev_label = ["Tinggi", "Menengah", "Rendah"][sev]
             n = len(ents)
@@ -192,6 +210,13 @@ def derive_impacted_files(
                 f"(highest severity: {sev_label}). Representative impact: "
                 f"{sample.justification[:300]}"
             )[:600]
+        else:
+            # File entered the impacted set as a bare File-type CIS node (no
+            # qualified children carried justifications). Synthesize a stub.
+            justification = (
+                "File-level impact admitted via structural propagation (no "
+                "qualified child entity carried a per-symbol justification)."
+            )
         rows.append(ImpactedFile(file_path=fp, justification=justification))
 
     return rows
@@ -203,6 +228,7 @@ def assemble_impact_report(
     estimated_scope: str,
     analysis_mode: str,
     degraded_run: bool,
+    extra_impacted_file_paths: list[str] | None = None,
 ) -> ImpactReport:
     """Assemble the final ImpactReport.
 
@@ -218,7 +244,9 @@ def assemble_impact_report(
         if item.file_path
     }
     impacted_files = derive_impacted_files(
-        impacted_entities, file_justifications_from_llm5=llm5_file_just
+        impacted_entities,
+        file_justifications_from_llm5=llm5_file_just,
+        extra_file_paths=extra_impacted_file_paths,
     )
 
     return ImpactReport(
