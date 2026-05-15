@@ -324,28 +324,38 @@ def run_analysis(
         return _minimal_rejection_report("No candidates retrieved — check index and affected_layers")
 
     # ------------------------------------------------------------------
-    # Step 3 — Cross-Encoder Rerank (FR-C3)
-    # Scores each candidate against ALL search_queries; takes the max.
+    # Step 3 — Cross-Encoder Rerank (FR-C3) + Apex Crucible Proposal C
+    # Graph-aware rerank inserted between the cross-encoder and the
+    # top-K truncation. Cross-encoder scores ALL 200 RRF candidates;
+    # graph propagation blends in a structural signal; the truncation
+    # to max_admitted_seeds happens on the blended score.
     # ------------------------------------------------------------------
     if variant_flags.enable_cross_encoder:
         logger.info("[runner] Step 3: Cross-encoder rerank (multi-query max scoring)")
+        # Apex C: when graph rerank is enabled, we pass top_k=len(candidates)
+        # so the reranker scores ALL pool members without truncating. Graph
+        # rerank then operates on the full cross-encoder output and we
+        # truncate to max_admitted_seeds AFTER the blend. When graph rerank
+        # is disabled (V4-canonical regime), the reranker truncates to
+        # max_admitted_seeds INSIDE rerank_multi_query, so traceability
+        # bonus / negative filter operate on the top-K only — matching the
+        # pre-Sprint-15 behaviour exactly.
+        _graph_rerank_on = getattr(settings, "enable_graph_rerank", False)
+        rerank_top_k = (
+            len(candidates) if _graph_rerank_on else settings.max_admitted_seeds
+        )
         candidates = ctx.reranker.rerank_multi_query(
             cr_interp.search_queries,
             cr_interp.primary_intent,
             candidates,
-            settings.max_admitted_seeds,
+            rerank_top_k,
         )
-        logger.info("[runner] Post-rerank candidates: {}", len(candidates))
-        _trace("step_3_reranked", [
-            {"node_id": c.node_id, "collection": c.collection,
-             "rrf_score": c.rrf_score, "reranker_score": c.reranker_score,
-             "raw_reranker_score": c.reranker_score, "file_path": c.file_path,
-             "name": c.name}
-            for c in candidates
-        ])
+        logger.info(
+            "[runner] Post-rerank (full_pool={}): {} candidates",
+            _graph_rerank_on, len(candidates),
+        )
 
-        # Snapshot raw cross-encoder logits before normalization so the score
-        # floor gate operates on absolute quality, not relative rank-within-15.
+        # Snapshot raw cross-encoder logits before any post-rerank adjustment.
         for c in candidates:
             c.raw_reranker_score = c.reranker_score
 
@@ -353,14 +363,69 @@ def run_analysis(
         # any retrieved doc chunk in the offline traceability table.
         candidates = apply_traceability_bonus(candidates, ctx.conn)
 
-        # Negative filter: additive penalty (-5.0) for candidates matching an
-        # out-of-scope operation. Additive preserves correctness across negative
-        # cross-encoder logits (multiplicative would invert the sign).
+        # Negative filter (Apex V2 softened: penalty -1.0, name-only).
         candidates = apply_negative_filter(
             candidates, cr_interp.out_of_scope_operations
         )
 
         candidates.sort(key=lambda c: c.raw_reranker_score, reverse=True)
+
+        # ----- Apex Crucible Proposal C: graph-aware label-propagation rerank
+        # Default-disabled post-Sprint-15. The full-pool cross-encoder pass
+        # above only fires when this flag is on, so the V4-canonical regime
+        # has IDENTICAL behaviour to pre-Sprint-15 code.
+        if _graph_rerank_on:
+            from impactracer.pipeline.graph_rerank import graph_rerank
+
+            # Mode B needs metadata for any node that could be graph-added.
+            # Bulk-fetch all code_nodes once (fast on 3,150-node citrakara).
+            code_meta_by_id: dict[str, dict] = {}
+            for row in ctx.conn.execute(
+                "SELECT node_id, node_type, file_path, file_classification, "
+                "internal_logic_abstraction, source_code FROM code_nodes"
+            ).fetchall():
+                code_meta_by_id[row[0]] = {
+                    "node_type": row[1],
+                    "file_path": row[2],
+                    "file_classification": row[3],
+                    "internal_logic_abstraction": row[4],
+                    "source_code": row[5],
+                }
+
+            pre_count = len(candidates)
+            candidates = graph_rerank(
+                candidates,
+                ctx.graph,
+                alpha=getattr(settings, "graph_rerank_alpha", 0.7),
+                iterations=getattr(settings, "graph_rerank_iterations", 2),
+                personalization_top_n=getattr(
+                    settings, "graph_rerank_personalization_top_n", 5
+                ),
+                add_top_n=getattr(settings, "graph_rerank_add_top_n", 10),
+                add_min_score=getattr(settings, "graph_rerank_add_min_score", 0.10),
+                code_meta_by_id=code_meta_by_id,
+            )
+            logger.info(
+                "[runner] Step 3 (Apex C): graph rerank produced {} candidates "
+                "(was {}, added {})",
+                len(candidates), pre_count, len(candidates) - pre_count,
+            )
+
+            # graph_rerank already wrote blended values to raw_reranker_score /
+            # reranker_score. Re-sort by blended score.
+            candidates.sort(key=lambda c: c.raw_reranker_score, reverse=True)
+
+        # Truncate to max_admitted_seeds AFTER all post-rerank adjustments.
+        if len(candidates) > settings.max_admitted_seeds:
+            candidates = candidates[: settings.max_admitted_seeds]
+
+        _trace("step_3_reranked", [
+            {"node_id": c.node_id, "collection": c.collection,
+             "rrf_score": c.rrf_score, "reranker_score": c.reranker_score,
+             "raw_reranker_score": c.raw_reranker_score, "file_path": c.file_path,
+             "name": c.name}
+            for c in candidates
+        ])
 
         # Min-max normalize to [0,1] for relative sorting in gates and context.
         if len(candidates) > 1:
@@ -761,17 +826,25 @@ def run_analysis(
 
         anchors_for_sibling: list[str] = []
         anchor_justifications: dict[str, str] = {}
-        # Anchors = qualified validated nodes (SIS + propagated post-LLM4).
+        # Apex Crucible Option 1 (Sprint 16): anchor pool restricted to LLM #2
+        # SIS-confirmed seeds with a NON-EMPTY mechanism_of_impact. Forensic
+        # on Apex V4 showed CR-04's 10-admit overshoot came from anchors that
+        # were SIS-confirmed but whose LLM #2 verdict had no concrete
+        # mechanism (e.g. CRUD funcs of an unrelated domain entity). When the
+        # anchor's mechanism is articulate, downstream sibling-batch admits
+        # share a real contract surface; when it's empty, sibling-batch
+        # generalises by domain analogy and over-admits.
         for nid in list(cis.sis_nodes.keys()) + list(cis.propagated_nodes.keys()):
             if "::" not in nid:
                 continue
+            v2 = sis_justifications.get(nid) or {}
+            mechanism = (v2.get("mechanism_of_impact") or "").strip()
+            if not mechanism:
+                # Anchor failed the "articulate LLM #2 mechanism" gate. Skip.
+                continue
             anchors_for_sibling.append(nid)
-            j = (
-                (sis_justifications.get(nid, {}) or {}).get("mechanism_of_impact")
-                or (sis_justifications.get(nid, {}) or {}).get("justification")
-                or trace_justifications.get(nid)
-                or llm4_justifications.get(nid)
-                or ""
+            j = mechanism or (
+                v2.get("justification") or ""
             )
             anchor_justifications[nid] = j
 

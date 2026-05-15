@@ -264,9 +264,13 @@ def test_v7_exactly_5_llm_calls_mocked() -> None:
             elif "SELECT code_id FROM doc_code_candidates" in sql:
                 cur.fetchall.return_value = [("src/lib/auth.ts::seedFn",)]
             elif "SELECT node_id, node_type, file_path" in sql:
+                # Apex C: 6-column variant for graph_rerank's code_meta bulk fetch
+                # (node_id, node_type, file_path, file_classification,
+                #  internal_logic_abstraction, source_code). Older 5-column
+                # callers ignore the trailing column.
                 cur.fetchall.return_value = [
-                    ("src/lib/auth.ts::seedFn", "Function", "src/lib/auth.ts", None, None),
-                    ("src/lib/auth.ts::callerFn", "Function", "src/lib/auth.ts", None, None),
+                    ("src/lib/auth.ts::seedFn", "Function", "src/lib/auth.ts", None, None, None),
+                    ("src/lib/auth.ts::callerFn", "Function", "src/lib/auth.ts", None, None, None),
                 ]
             else:
                 cur.fetchall.return_value = []

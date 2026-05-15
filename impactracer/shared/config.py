@@ -76,6 +76,28 @@ class Settings(BaseSettings):
     # are biased toward one architectural plane.
     per_layer_top_k: int = 12
 
+    # ---- Apex Crucible Proposal C: graph-aware label-propagation rerank --
+    # After cross-encoder rerank scores the full RRF pool, a 2-iteration label
+    # propagation over the structural graph blends a per-node "graph_score"
+    # with the cross-encoder score before the top-K truncation. Personalization
+    # is the top-N cross-encoder candidates (no extra LLM call).
+    #
+    # **Disabled by default per Sprint 15 postmortem.** Calibration on 5 CRs
+    # showed Proposal C trades file-level F1 for entity-level F1 with no
+    # configuration that wins both metrics. Mode B added zero GT entities on
+    # citrakara; mode A's entity-level precision tightening came at the cost
+    # of dropping file TPs from the rerank pool. Keep the code path and tests
+    # for future codebases where the structural graph more densely connects
+    # CR-described seeds to GT files (e.g. monorepos where forms directly
+    # import schemas). Re-enable by setting enable_graph_rerank=True or via
+    # GRAPH_RERANK_ALPHA env var override.
+    enable_graph_rerank: bool = False
+    graph_rerank_alpha: float = 0.7              # weight on cross-encoder; (1-alpha) on graph
+    graph_rerank_iterations: int = 2             # number of label-propagation rounds
+    graph_rerank_personalization_top_n: int = 5  # seeds for PPR (top-N by cross-encoder)
+    graph_rerank_add_top_n: int = 10             # mode B: add this many graph-discovered candidates
+    graph_rerank_add_min_score: float = 0.10     # mode B: minimum normalized graph_score to admit
+
     # ---- Apex Crucible Proposal A: file-local sibling promotion -----
     # After LLM #4 validation, the runner enumerates every qualified sibling
     # of each validated node within the same file (via CONTAINS) and lets

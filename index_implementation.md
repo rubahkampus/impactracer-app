@@ -395,6 +395,8 @@ Each annotated Change Request carries two independent GT sets:
 
 **Set-level only:** the primary metric is `f1_set` against the full unpruned predicted set, computed twice per CR per variant (entity-level and file-level). No `F1@K` exists anywhere in the codebase — bounded top-K metrics cannot distinguish a graph-flood result from a focused one and are therefore forbidden. The pre-registered Wilcoxon test (V7 vs V5) targets the **entity-level `f1_set`**.
 
+**Canonical post-Apex calibration result** (Sprint 14 V4, `eval/results_apex_v4/`): V7 entity F1 = 0.252, V7 file F1 = 0.442 — +26% and +17% lifts over the Sprint 13-W2 baseline of 0.200 / 0.377 in `eval/results_v2/`. Full empirical attrition table and mechanistic-signature analysis live in `analysis_implementation.md` §5.
+
 ---
 
 *End of index_implementation.md. Online pipeline detail in `analysis_implementation.md`. Sprint history in `implementation_report.md`.*
