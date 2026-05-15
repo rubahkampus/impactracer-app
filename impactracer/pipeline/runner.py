@@ -332,23 +332,26 @@ def run_analysis(
     # ------------------------------------------------------------------
     if variant_flags.enable_cross_encoder:
         logger.info("[runner] Step 3: Cross-encoder rerank (multi-query max scoring)")
-        # Apex C: when graph rerank is enabled, we pass top_k=len(candidates)
-        # so the reranker scores ALL pool members without truncating. Graph
-        # rerank then operates on the full cross-encoder output and we
-        # truncate to max_admitted_seeds AFTER the blend. When graph rerank
-        # is disabled (V4-canonical regime), the reranker truncates to
-        # max_admitted_seeds INSIDE rerank_multi_query, so traceability
-        # bonus / negative filter operate on the top-K only — matching the
-        # pre-Sprint-15 behaviour exactly.
+        # Sprint 17: cross-encoder ALWAYS scores the full pool (was top_k=
+        # max_admitted_seeds when graph_rerank was disabled). Three reasons:
+        #   1. step_3_reranked_full (Sprint 17 trace) needs the rank of every
+        #      candidate, not just the top-K. The K-widening diagnostic
+        #      (tools/diagnose_k_widening.py) reads this trace.
+        #   2. The traceability bonus and negative filter (lines below) then
+        #      operate on the full ranked pool; the final truncation at
+        #      candidates[:max_admitted_seeds] (line ~430) is mathematically
+        #      equivalent to the pre-Sprint-17 result at the final SIS — the
+        #      top-15 after sort is the same set whether you sort 15 or 200.
+        #   3. Symmetry with the graph-rerank path (Apex Proposal C, default-
+        #      disabled) which already required full-pool scoring.
+        # Performance cost: ~1s additional cross-encoder wall time per CR
+        # (200 vs 15 candidates on bge-reranker-v2-m3); negligible vs LLM cost.
         _graph_rerank_on = getattr(settings, "enable_graph_rerank", False)
-        rerank_top_k = (
-            len(candidates) if _graph_rerank_on else settings.max_admitted_seeds
-        )
         candidates = ctx.reranker.rerank_multi_query(
             cr_interp.search_queries,
             cr_interp.primary_intent,
             candidates,
-            rerank_top_k,
+            len(candidates),
         )
         logger.info(
             "[runner] Post-rerank (full_pool={}): {} candidates",
@@ -414,6 +417,19 @@ def run_analysis(
             # graph_rerank already wrote blended values to raw_reranker_score /
             # reranker_score. Re-sort by blended score.
             candidates.sort(key=lambda c: c.raw_reranker_score, reverse=True)
+
+        # Sprint 17 (Apex K-widening diagnostic): snapshot the FULL post-rerank
+        # pool BEFORE the max_admitted_seeds truncation. Captures up to 200
+        # candidates (or ~210 when graph-rerank mode B adds extras), letting
+        # tools/diagnose_k_widening.py count GT entities at ranks 16-30 from
+        # existing eval artefacts. Read-only trace; behaviour unchanged.
+        _trace("step_3_reranked_full", [
+            {"node_id": c.node_id, "collection": c.collection,
+             "rrf_score": c.rrf_score, "reranker_score": c.reranker_score,
+             "raw_reranker_score": c.raw_reranker_score, "file_path": c.file_path,
+             "name": c.name}
+            for c in candidates
+        ])
 
         # Truncate to max_admitted_seeds AFTER all post-rerank adjustments.
         if len(candidates) > settings.max_admitted_seeds:

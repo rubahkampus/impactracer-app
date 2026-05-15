@@ -1,5 +1,11 @@
 # Env and secrets
 .env
+implementation_report.md
+CLAUDE.md
+.claude/
+.kilo/
+eval/
+ground_truth/
 
 # Data stores (generated)
 data/
