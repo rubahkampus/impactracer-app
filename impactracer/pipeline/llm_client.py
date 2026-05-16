@@ -132,7 +132,6 @@ class LLMClient:
         }
 
         attempts = 0
-        last_exc: BaseException | None = None
 
         # Log the call attempt BEFORE making the request (for debugging).
         logger.info(
@@ -195,7 +194,6 @@ class LLMClient:
                 return result
 
             except Exception as exc:
-                last_exc = exc
                 attempts += 1
                 if attempts >= self.settings.llm_retry_max_attempts:
                     # Log failed call to audit before raising.

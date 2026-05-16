@@ -160,7 +160,7 @@ def _candidate(node_id: str, name: str, snippet: str, raw_score: float) -> Candi
 def test_negative_filter_demotes_substring_match():
     a = _candidate("a", "loginUser", "user login flow", 4.0)
     b = _candidate("b", "logoutUser", "user logout flow", 3.0)
-    out = apply_negative_filter(
+    apply_negative_filter(
         [a, b], out_of_scope_operations=["logout"], penalty=5.0
     )
     assert a.raw_reranker_score == 4.0   # untouched

@@ -178,7 +178,8 @@ def test_multi_query_prefers_ila_over_snippet():
             recorded_pairs.extend(pairs)
             return [0.5] * len(pairs)
 
-    import sys, types
+    import sys
+    import types
     flag_mod = types.ModuleType("FlagEmbedding")
     flag_mod.FlagReranker = _RecordingReranker
     sys.modules["FlagEmbedding"] = flag_mod

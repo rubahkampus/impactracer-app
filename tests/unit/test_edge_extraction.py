@@ -9,7 +9,6 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-import pytest
 
 from impactracer.indexer.code_indexer import extract_nodes, extract_edges
 from impactracer.persistence.sqlite_client import init_schema

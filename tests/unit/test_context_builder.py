@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sqlite3
 
-import pytest
 
 from impactracer.pipeline.context_builder import fetch_snippets, _ILA_NODE_TYPES
 from impactracer.pipeline.runner import _compute_scope

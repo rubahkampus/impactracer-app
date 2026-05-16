@@ -48,14 +48,12 @@ from impactracer.pipeline.validator import validate_sis_candidates_batched
 from impactracer.shared.config import Settings
 from impactracer.shared.constants import (
     PROPAGATION_VALIDATION_EXEMPT_EDGES,
-    severity_for_chain,
 )
 from impactracer.shared.models import (
     CISResult,
     Candidate,
     CRInterpretation,
     ImpactReport,
-    ImpactedEntity,
     LLMSynthesisOutput,
     NodeTrace,
 )
@@ -900,9 +898,8 @@ def run_analysis(
             # bad first-anchor caused LLM #4 to reject legitimate sibling GT
             # entities for off-target reasons.
             anchors_by_file: dict[str, list[tuple[str, str]]] = {}
-            for anc in anchors_for_sibling:
-                fp = (node_file_paths_unused := None)  # placeholder
-            # We need anchor file_paths. Fetch via SQLite.
+
+            # Fetch anchor file_paths via SQLite.
             if anchors_for_sibling:
                 placeholders_a = ",".join("?" * len(anchors_for_sibling))
                 rows_a = ctx.conn.execute(

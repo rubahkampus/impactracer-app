@@ -10,7 +10,6 @@ import sqlite3
 import pytest
 
 from impactracer.pipeline.prevalidation_filter import (
-    _affinity_factor,
     _matches_any_named,
     _primary_chunk_type,
     apply_prevalidation_gates,

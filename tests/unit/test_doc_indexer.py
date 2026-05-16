@@ -7,9 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
-from impactracer.indexer.doc_indexer import DocChunk, chunk_markdown, classify_chunk
+from impactracer.indexer.doc_indexer import chunk_markdown, classify_chunk
 
 
 # ---------------------------------------------------------------------------

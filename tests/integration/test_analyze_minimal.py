@@ -156,7 +156,6 @@ def test_llm_calls_count_v3(tmp_path):
     from impactracer.pipeline.runner import run_analysis
 
     import json
-    from pathlib import Path
 
     # Isolated settings: same DB/chroma as production, but a fresh audit log
     isolated_audit = tmp_path / "llm_audit.jsonl"

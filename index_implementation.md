@@ -395,7 +395,7 @@ Each annotated Change Request carries two independent GT sets:
 
 **Set-level only:** the primary metric is `f1_set` against the full unpruned predicted set, computed twice per CR per variant (entity-level and file-level). No `F1@K` exists anywhere in the codebase — bounded top-K metrics cannot distinguish a graph-flood result from a focused one and are therefore forbidden. The pre-registered Wilcoxon test (V7 vs V5) targets the **entity-level `f1_set`**.
 
-**Canonical post-Apex calibration result** (Sprint 14 V4, `eval/results_apex_v4/`): V7 entity F1 = 0.252, V7 file F1 = 0.442 — +26% and +17% lifts over the Sprint 13-W2 baseline of 0.200 / 0.377 in `eval/results_v2/`. Full empirical attrition table and mechanistic-signature analysis live in `analysis_implementation.md` §5.
+**Canonical calibration result** (post-Sprint-17 final sweep, `eval/results_final_sweep/`): V7 entity F1 = 0.232, V7 file F1 = 0.284 on the 5-CR calibration set; V5 entity F1 = 0.272 (with the full-pool cross-encoder regime lifting V5 substantially over its Sprint 13-W2 baseline of 0.181). The 5-CR sample is below the pre-registered Wilcoxon n=15 threshold and so V7-vs-V5 is reported descriptively pending the held-out 20-CR run. Full empirical attrition table, iteration history (Sprint 13-W2 → 14 V4 → 16 → final sweep), and mechanistic-signature analysis live in `analysis_implementation.md` §5.
 
 ---
 

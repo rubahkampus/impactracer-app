@@ -237,7 +237,6 @@ def test_stale_rows_replaced_on_rerun():
     _seed_code_nodes(conn, list(cv.keys()))
 
     compute_and_store(cv, dv_first, cm, dm_first, top_k=2, min_similarity=0.0, conn=conn)
-    rows_first = {(r[0], r[1]) for r in _rows(conn)}
 
     # Second run with completely different doc set
     dv_second = {"d2": _unit(20)}

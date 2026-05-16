@@ -9,7 +9,6 @@ Reference: master_blueprint.md §3.8.
 
 from __future__ import annotations
 
-import shutil
 import sqlite3
 import textwrap
 from pathlib import Path

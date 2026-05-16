@@ -137,7 +137,6 @@ def analyze(
         impactracer.pipeline.runner.run_analysis(cr_text, settings, flags)
     """
     import json as _json
-    import sys
 
     from impactracer.evaluation.variant_flags import VariantFlags
     from impactracer.pipeline.runner import run_analysis

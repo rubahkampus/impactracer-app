@@ -614,7 +614,6 @@ def test_variable_skips_lowercase_locals(conn):
 
 def test_variable_node_emits_contains_edge_from_file(conn):
     """The File node must CONTAIN any Variable extracted from it."""
-    from impactracer.indexer.code_indexer import extract_edges
 
     src = (
         b"import { Schema } from 'mongoose';\n"

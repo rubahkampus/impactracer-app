@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
 
 from impactracer.pipeline.validator import (
     _BATCH_SIZE,
@@ -282,7 +281,6 @@ def test_prompt_doc_chunk_has_documentation_section_header():
 
 def test_prompt_business_context_injected_for_merged_doc():
     """B1: merged_doc_contexts are injected as Business Context blocks."""
-    from impactracer.shared.models import Candidate
     cr = _make_cr()
     c = _make_code_candidate()
     c.merged_doc_contexts = [("FR-P01 Pin Feature", "Users can pin listings.")]

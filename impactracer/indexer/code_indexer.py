@@ -2,16 +2,21 @@
 
 Two-pass design:
 
-- Pass 1 (:func:`extract_nodes`): walks the AST to produce :class:`File`,
-  :class:`Class`, :class:`Function`, :class:`Method`, :class:`Interface`,
-  :class:`TypeAlias`, :class:`Enum`, and :class:`InterfaceField` nodes.
-  Populates ``internal_logic_abstraction`` via :func:`skeletonize_node`.
+- Pass 1 (:func:`extract_nodes`): walks the AST to produce all ten
+  canonical node kinds — ``File``, ``Class``, ``Function``, ``Method``,
+  ``Interface``, ``TypeAlias``, ``Enum``, ``InterfaceField``, ``Variable``,
+  and ``ExternalPackage``. Populates ``internal_logic_abstraction`` via
+  :func:`skeletonize_node`. ``Variable`` covers module-level ``const``
+  declarations whose RHS is a non-arrow expression (Mongoose schemas,
+  constant arrays, frozen objects), restoring GT-existence coverage that
+  the original nine-type vocabulary missed.
 
-- Pass 2 (:func:`extract_edges`): walks the AST again, with the full
-  set of node IDs from Pass 1 available, and emits all 13 edge types.
-  Populates ``file_dependencies`` for incremental reindex.
+- Pass 2 (:func:`extract_edges`): walks the AST again with the full
+  set of node IDs from Pass 1 available, and emits all 14 edge types
+  (the original 13 plus ``CONTAINS``, which bridges the File-to-symbol
+  membrane). Populates ``file_dependencies`` for incremental reindex.
 
-Reference: master_blueprint.md §3.2 (Pass 1), §3.4 (Pass 2)
+Reference: master_blueprint.md §3.2 (Pass 1), §3.4 (Pass 2).
 """
 
 from __future__ import annotations
@@ -865,8 +870,7 @@ def _build_class_nodes(
     is_exported, _ = _is_exported(decl)
     docstring = _extract_jsdoc(raw_child, src)
 
-    # Extract heritage
-    heritage = decl.child_by_field_name("body")
+    # Extract heritage clause (the explicit ``extends X implements Y`` block).
     heritage_node = None
     for c in decl.children:
         if c.type == "class_heritage":
@@ -2083,19 +2087,6 @@ def _emit_jsx_edges(
 
     if attrs_parent is None:
         return
-
-    # Tag name
-    tag_name_node = None
-    for c in (attrs_parent.children if attrs_parent else []):
-        if c.type in ("jsx_opening_element", "jsx_self_closing_element"):
-            # shouldn't happen at this level, but guard
-            break
-        if c.type in ("identifier", "jsx_namespace_name", "member_expression"):
-            tag_name_node = c
-            break
-        if c.type == "type_identifier":
-            tag_name_node = c
-            break
 
     # For jsx_element, the open_tag is a child
     # tree-sitter TSX: jsx_element -> jsx_opening_element + children + jsx_closing_element

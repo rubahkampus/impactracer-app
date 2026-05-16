@@ -15,10 +15,8 @@ Reference: master_blueprint.md §2 (invariants), §3.7 (traceability), §3.8 (ru
 from __future__ import annotations
 
 import datetime as dt
-import math
 import sqlite3
 import statistics
-from pathlib import Path
 from typing import Any
 
 from impactracer.shared.config import Settings
@@ -259,7 +257,7 @@ def generate_report(settings: Settings) -> str:
     if total_pairs > 0:
         mean_s = statistics.mean(all_scores)
         std_s = statistics.stdev(all_scores) if len(all_scores) > 1 else 0.0
-        lines.append(f"- **Score distribution:**")
+        lines.append("- **Score distribution:**")
         lines.append(f"  - min : {_fmt(min(all_scores))}")
         lines.append(f"  - max : {_fmt(max(all_scores))}")
         lines.append(f"  - mean: {_fmt(mean_s)}")
@@ -464,7 +462,7 @@ def generate_report(settings: Settings) -> str:
     lines.append(f"| stranded doc chunks (0 candidates) | {len(stranded_docs)} ({_pct(len(stranded_docs), chroma_doc_count)}) |")
     lines.append(f"| traceability pairs | {total_pairs} |")
     lines.append(f"| FK violations | {'0 — CLEAN' if all_clean else 'VIOLATIONS'} |")
-    lines.append(f"| semantic benchmarks | 4/4 PASS |")
+    lines.append("| semantic benchmarks | 4/4 PASS |")
     blank()
 
     conn.close()

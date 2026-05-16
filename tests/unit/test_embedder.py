@@ -18,8 +18,6 @@ class _FakeBGEM3:
         assert return_dense is True
         assert return_sparse is False
         assert return_colbert_vecs is False
-        rng = np.random.default_rng(seed=sum(ord(c) for t in texts for c in t))
-        vecs = rng.random((len(texts), self._dim), dtype=np.float32)
         # Return same deterministic vector for identical text by keying on content
         result = []
         for t in texts:

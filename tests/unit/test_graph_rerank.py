@@ -7,7 +7,6 @@ candidates and admits new graph-discovered nodes in mode B.
 from __future__ import annotations
 
 import networkx as nx
-import pytest
 
 from impactracer.pipeline.graph_rerank import graph_rerank
 from impactracer.shared.models import Candidate
@@ -138,10 +137,6 @@ def test_graph_rerank_blends_with_alpha():
     """
     g = nx.MultiDiGraph()
     g.add_edge("schema", "consumer", edge_type="TYPED_BY")
-
-    seed = _cand("schema", score=1.0)
-    adjacent = _cand("consumer", score=0.0)
-    other = _cand("other", score=0.5)
 
     # alpha=1 (cross-encoder only): seed > other > adjacent
     out_alpha1 = graph_rerank(

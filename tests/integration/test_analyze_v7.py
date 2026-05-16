@@ -13,10 +13,7 @@ Acceptance criteria verified:
 
 from __future__ import annotations
 
-import json
 import sqlite3
-import tempfile
-from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -152,8 +149,6 @@ def test_v7_exactly_5_llm_calls_mocked() -> None:
     """V7 executes exactly 5 LLM calls for an actionable CR (all mocked)."""
     from impactracer.shared.models import (
         CandidateVerdict,
-        ImpactReport,
-        ImpactedNode,
         PropagationValidationResult,
         PropagationVerdict,
         SISValidationResult,
@@ -319,7 +314,7 @@ def test_v7_exactly_5_llm_calls_mocked() -> None:
                         from impactracer.shared.config import Settings
 
                         settings = Settings(_env_file=None)
-                        result = run_analysis(
+                        run_analysis(
                             cr_text="Tambahkan fitur duplikasi listing komisi",
                             settings=settings,
                             variant_flags=VariantFlags.v7_full(),

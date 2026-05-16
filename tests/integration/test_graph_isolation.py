@@ -12,9 +12,8 @@ catch regressions in the isolation guarantee.
 from __future__ import annotations
 
 import networkx as nx
-import pytest
 
-from impactracer.pipeline.graph_bfs import bfs_propagate, build_graph_from_sqlite
+from impactracer.pipeline.graph_bfs import bfs_propagate
 
 
 # ---------------------------------------------------------------------------

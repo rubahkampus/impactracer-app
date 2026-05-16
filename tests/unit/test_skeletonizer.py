@@ -3,7 +3,6 @@
 Sprint 4. Blueprint §3.3.
 """
 
-import pytest
 from tree_sitter_languages import get_parser
 
 from impactracer.indexer.skeletonizer import skeletonize_node

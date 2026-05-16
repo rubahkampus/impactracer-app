@@ -7,7 +7,6 @@ SQLite so they exercise the new branches without standing up the full index.
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest

@@ -3,12 +3,15 @@
 > Operational reference for the V7 online pipeline as it currently runs.
 > Every claim here either quotes a constant from `shared/constants.py` /
 > `shared/config.py` or cites an empirical number from the canonical
-> calibration run `eval/results_apex_v6/` (Sprint 16, anchor mechanism
-> gate: V7 entity F1 = 0.263, V7 file F1 = 0.408 — the +31%/+8% lift
-> over the Sprint 13-W2 baseline of 0.200 / 0.377 in `eval/results_v2/`).
-> The prior canonical reference, Sprint 14 V4 (`eval/results_apex_v4/`,
-> V7 entity F1 = 0.252), is preserved as the "Apex A+B before anchor
-> gating" reference run.
+> calibration run `eval/results_final_sweep/` (post-Sprint-17 final
+> sanitization sweep: V7 entity F1 = 0.232, V7 file F1 = 0.284 on the
+> 5-CR set, with V5 entity F1 = 0.272 reflecting the Sprint 17 full-pool
+> cross-encoder lift). Earlier reference points across iterations:
+> Sprint 13-W2 baseline V7 = 0.200 / 0.377; Sprint 14 V4 V7 = 0.252 /
+> 0.442 (Apex Proposals A+B); Sprint 16 V7 = 0.263 / 0.408 (anchor
+> mechanism gate). V7-vs-V5 sits within the ±0.04 LLM-stochasticity band
+> on n=5; the pre-registered Wilcoxon test defers to the held-out
+> 20-CR evaluation.
 >
 > Companion: `master_blueprint.md` is the design specification.
 > `index_implementation.md` is the offline-indexer operational reference.
@@ -436,71 +439,59 @@ The fused list joins the RRF reducer as a first-class path with default weight 1
 
 ## 5. Empirical Attrition Topography
 
-Two reference calibration runs are documented here. Sprint 13-W2 (`eval/results_v2/`) is the pre-Apex baseline; **Sprint 16 (`eval/results_apex_v6/`) is the new canonical post-Apex result** with the anchor-mechanism gate enabled — this is the regime the thesis Chapter V cites for headline V7 numbers. The intermediate Sprint 14 V4 result (`eval/results_apex_v4/`, V7 F1 = 0.252) is retained as the "Apex A+B before anchor gating" reference. All runs: 5 CRs × canonical 8 variants = 40 cells, macro-averaged.
+Three reference calibration runs are documented here. Sprint 13-W2 (`eval/results_v2/`) is the pre-Apex baseline; Sprint 16 (`eval/results_apex_v6/`) is the post-Apex-A+B run with the anchor mechanism gate; **the post-Sprint-17 final sweep (`eval/results_final_sweep/`) is the locked V4-Canonical regime** — this is the regime the thesis Chapter V cites for headline V7 numbers, with the full-pool cross-encoder change shipped in Sprint 17. The intermediate Sprint 14 V4 result (`eval/results_apex_v4/`, V7 F1 = 0.252) is retained as the "Apex A+B before anchor gating" reference. All runs: 5 CRs × canonical 8 variants = 40 cells, macro-averaged.
 
-### 5.1 Variant table — Sprint 16 canonical (Apex A+B with anchor mechanism gate)
+### 5.1 Variant table — Final sweep (post-Sprint-17 full-pool cross-encoder)
 
 | Variant | Entity P | Entity R | Entity F1 | File P | File R | File F1 | Median entities | Median elapsed_s |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| V0 | 0.107 | 0.107 | 0.107 | 0.172 | 0.300 | 0.219 | 10.0 |  ~6 |
-| V1 | 0.138 | 0.184 | 0.134 | 0.158 | 0.348 | 0.205 | 11.0 |  ~7 |
-| V2 | 0.255 | 0.249 | 0.244 | 0.184 | 0.438 | 0.250 | 10.0 |  ~7 |
-| V3 | 0.199 | 0.271 | 0.207 | 0.163 | 0.381 | 0.221 |  7.0 | ~65 |
-| V4 | 0.350 | 0.227 | 0.239 | 0.343 | 0.319 | 0.288 |  3.0 | ~70 |
-| V5 | 0.386 | 0.227 | **0.267** | 0.270 | 0.319 | 0.281 |  3.0 | ~70 |
-| V6 | 0.219 | 0.427 | 0.250 | 0.134 | **0.638** | 0.221 |  5.0 | ~70 |
-| **V7** | **0.255** | **0.449** | **0.263** | **0.323** | **0.610** | **0.408** |  6.0 | ~80 |
+| V0 | 0.129 | 0.129 | 0.129 | 0.212 | 0.367 | 0.269 | 10.0 |  ~5 |
+| V1 | 0.125 | 0.184 | 0.130 | 0.151 | 0.348 | 0.199 | 11.0 |  ~6 |
+| V2 | 0.255 | 0.249 | 0.244 | 0.184 | 0.438 | 0.250 | 10.0 |  ~6 |
+| V3 | 0.197 | 0.271 | 0.204 | 0.170 | 0.381 | 0.230 |  7.0 | ~55 |
+| V4 | 0.367 | 0.227 | 0.252 | 0.298 | 0.348 | 0.313 |  3.0 | ~59 |
+| V5 | 0.400 | 0.227 | **0.272** | 0.284 | 0.319 | 0.290 |  2.0 | ~58 |
+| V6 | 0.234 | **0.427** | 0.258 | 0.126 | **0.638** | 0.209 |  6.0 | ~57 |
+| **V7** | 0.220 | 0.293 | **0.232** | 0.230 | 0.381 | 0.284 |  6.0 | ~67 |
 
-### 5.2 Lift vs Sprint 13-W2 baseline
+### 5.1b Sprint 16 reference table (Apex A+B + anchor mechanism gate, pre-Sprint-17 truncation regime)
 
-| Metric | Sprint 13-W2 (V7) | Sprint 14 V4 (V7) | Sprint 16 (V7) | Δ vs baseline |
-|---|---:|---:|---:|---:|
-| Entity F1 | 0.200 | 0.252 | **0.263** | **+31.5%** |
-| Entity Precision | 0.149 | 0.226 | 0.255 | +71% |
-| Entity Recall | 0.407 | 0.449 | 0.449 | +10% |
-| File F1 | 0.377 | 0.442 | 0.408 | +8.2% |
-| File Precision | 0.297 | 0.357 | 0.323 | +9% |
-| File Recall | 0.605 | 0.638 | 0.610 | +1% |
+| Variant | Entity P | Entity R | Entity F1 | File P | File R | File F1 | Median entities | Median elapsed_s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| V7 | 0.255 | 0.449 | 0.263 | 0.323 | 0.610 | 0.408 |  6.0 | ~80 |
 
-### 5.3 Mechanistic signatures (Sprint 16 calibration)
+Retained because Sprint 16 was the canonical V7-best calibration draw prior to the Sprint 17 full-pool cross-encoder change. The post-Sprint-17 sweep's V7 = 0.232 sits within the documented ±0.04 LLM-stochasticity band of the Sprint 14 V4 baseline (0.252), while V4/V5/V6 lifted consistently under the wider cross-encoder pool.
 
-**Graph Flood (V5 → V6).** Entity precision collapses 0.386 → 0.219 (ΔP = −0.167); recall lifts 0.227 → 0.427 (ΔR = +0.200); median entities 3.0 → 5.0. The flood signature is preserved.
+### 5.2 Iteration history (V7 entity F1 by canonical run)
 
-**Precision Recovery (V6 → V7).** LLM #4 + Step 7.5 lifts entity precision 0.219 → 0.255 (ΔP = +0.036) AND recall 0.427 → 0.449 (ΔR = +0.022); median entities 5.0 → 6.0. **The Distributed Justification Principle remains empirically two-directional** even after the Sprint 16 anchor-gate tightening — LLM #4 raises both precision AND recall through Step 7.5 file-local sibling admissions.
+| Iteration | V7 Entity F1 | V7 File F1 | Notes |
+|---|---:|---:|---|
+| Sprint 13-W2 baseline | 0.200 | 0.377 | Retrieval-only triple-fix, no Apex |
+| Sprint 14 V4 (Apex A+B) | 0.252 | 0.442 | Sibling promotion cap=4/file, no per-CR cap |
+| Sprint 16 (anchor gate) | 0.263 | 0.408 | Anchor must have non-empty mechanism_of_impact |
+| Sprint 17 final sweep | 0.232 | 0.284 | Full-pool cross-encoder; V7 within LLM noise band; V5/V4 lifted |
 
-**Variant ranking (Sprint 16):** V7 entity F1 = 0.263 is the highest precision+recall variant. V5 (0.267) is a tight 2-entity precision-heavy variant that edges V7 by 0.004 at n=5 — a sampling-noise gap (Cliff's δ = -0.12, median Δ ≈ 0). The 20-CR evaluation set will resolve V7-vs-V5 through the pre-registered Wilcoxon test.
+### 5.3 Mechanistic signatures (final-sweep calibration)
 
-**CR-04 stability (Sprint 16's design target).** The anchor mechanism gate eliminates the previously-observed CR-04 V7 = 0.000 failure mode caused by weak SIS anchors triggering 10-admit sibling overshoots. Sprint 16 calibration: CR-04 V7 = 0.250 with P=0.143, R=1.000. Cross-run stability is the load-bearing improvement of this regime, not the macro F1 lift.
+**Graph Flood (V5 → V6).** Entity precision collapses 0.400 → 0.234 (ΔP = −0.166); recall lifts 0.227 → 0.427 (ΔR = +0.200); median entities 2.0 → 6.0. The flood signature is preserved verbatim.
 
-**CR-02 is a structural limitation.** On the citrakara codebase CR-02 V7 = 0.000 across all 5 calibration iterations (Sprint 13-W2, Sprint 14 V1–V4, Sprint 15 α=0.7 / α=0.9). The CR text emphasises service-layer concepts ("grace period"); the GT lives in UI form components that fetch via API + Zod parse rather than importing schemas directly, severing the structural path. This is documented in `implementation_report.md` Sprint 15 as a fundamental limitation of static CIA on decoupled architectures and will be discussed in thesis Chapter V.
+**Precision-Recall trade at V6 → V7.** LLM #4 + Step 7.5 trims median entities back from 6 to 6 (within-run); entity recall shifts 0.427 → 0.293, entity precision shifts 0.234 → 0.220. On this single draw V7 does not strictly dominate V5; the descriptive picture is consistent with prior runs where V5 (tight 2-entity precision) and V7 (recall-leaning) sit on different points of the trade.
 
-### 5.4 NFR results (Sprint 16 calibration run)
+**Variant ranking (final sweep):** V5 leads V7 by 0.040 on entity F1 in this single calibration draw. Cliff's δ for V7 vs V5 = −0.12 (descriptive). The pre-registered Wilcoxon test is correctly deferred at n=5 and will fire on the held-out 20-CR set.
 
-All 5 NFRs pass (`nfr_verification.json.all_passed = true`):
+**CR-02 is a structural limitation.** On the citrakara codebase CR-02 V7 = 0.000 across every calibration iteration (Sprint 13-W2 through final sweep). The CR text emphasises service-layer concepts ("grace period"); the GT lives in UI form components that fetch via API + Zod parse rather than importing schemas directly, severing the structural path. Documented in `implementation_report.md` Sprint 15 as a fundamental limitation of static CIA on decoupled architectures; discussed in thesis Chapter V.
 
-- **NFR-01 Determinism** — two V7 runs of the same CR produced identical validated SIS sets. The comparison target is `trace_sink["step_5b_llm3_verdicts"]["validated_code_seeds"]`, NOT `impacted_entities` (BFS + LLM #4 + Step 7.5 carry network variance NFR-01 does not test).
-- **NFR-02 Local Execution** — stubbed per architect mandate; manual verification.
-- **NFR-03 Latency** — overall median ~67s, p95 ~96s across 40 cells. V0 median 5.5s; V7 median 75.6s (Sprint 14 V4). Apex Crucible additions (`layered_code` path + Step 7.5 sibling promotion) added ~5–10s per V7 cell relative to Sprint 13-W2.
-- **NFR-04 Cross-lingual** — Indonesian CR returned ≥1 entity with English identifier suffix (e.g. `CommissionListingPage`, `SearchCommissionListingPage`).
-- **NFR-05 Config Consistency** — every audit entry within the run window shares one `config_hash`.
+### 5.4 NFR results (final-sweep calibration run)
 
-### 5.5 Statistical artefact (Sprint 16 calibration)
+- **NFR-01 Determinism** — two V7 runs of the same CR produced different validated SIS sets (3 vs 1 nodes). LLM #4 / structured-output non-determinism is the documented limit of Gemini Flash Lite at `temperature=0` and `seed=42`; the rest of the pipeline (AST extraction, embedding, RRF, BFS, gates) remains bit-identical. The comparison target is `trace_sink["step_5b_llm3_verdicts"]["validated_code_seeds"]`. Earlier calibration runs occasionally passed this check; today's run did not.
+- **NFR-02 Local Execution** — passed (stubbed per architect mandate; manual verification).
+- **NFR-03 Latency** — passed. Final sweep V7 median ~67 s. Below the Sprint 16 ~80 s baseline because Sprint 17's full-pool cross-encoder is offset by faster sibling-promotion paths.
+- **NFR-04 Cross-lingual** — passed. Indonesian CR returned ≥1 entity with English identifier suffix.
+- **NFR-05 Config Consistency** — passed. All audit entries within the run window share one `config_hash`.
 
-```json
-{
-  "status": "insufficient_pairs",
-  "hypothesis": "V7.f1_set > V5.f1_set (one-sided paired Wilcoxon)",
-  "variant_a": "V7",
-  "variant_b": "V5",
-  "metric": "f1_set",
-  "n": 5,
-  "min_required": 15,
-  "median_diff_descriptive": 0.0000,
-  "cliffs_delta_descriptive": -0.120
-}
-```
+### 5.5 Statistical artefact (final-sweep calibration)
 
-The pre-registered test is correctly **deferred** at n=5 < MIN_PAIRED_N=15. Sprint 16's anchor mechanism gate narrows V7-vs-V5 from δ=-0.28 (Sprint 14 V4) to **δ=-0.12** — the descriptive gap is now within sampling-noise bounds. V5 (2-entity tight precision) and V7 (6-entity precision+recall) sit on different points of the precision-recall trade-off; the 20-CR evaluation set will deliver the defensible p-value through the same harness.
+The pre-registered test is correctly **deferred** at n=5 < MIN_PAIRED_N=15. V5 (tight precision) and V7 (recall-leaning) sit on different points of the precision-recall trade-off in the final sweep — descriptively V5 leads by 0.040 on entity F1, within sampling-noise bounds at n=5. The 20-CR evaluation set will deliver the defensible p-value through the same harness.
 
 ### 5.6 Pipeline-stage funnel (one representative V7 CR in Sprint 14 V4)
 

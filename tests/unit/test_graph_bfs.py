@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import sqlite3
 
-import pytest
 
 from impactracer.persistence.sqlite_client import init_schema
 from impactracer.pipeline.graph_bfs import (

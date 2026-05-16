@@ -108,7 +108,7 @@ def _build_trace_prompt(
         lines += [
             f"[{i}]",
             f"DOCUMENT CHUNK ID: <<DOC_ID_START>>{doc_id}<<DOC_ID_END>>",
-            f"Document Text:",
+            "Document Text:",
             doc_text,
             "",
             f"CODE NODE ID: <<CODE_ID_START>>{code_id}<<CODE_ID_END>>",

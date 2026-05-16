@@ -27,7 +27,7 @@
 - A new **Step 7.5 — Sibling Promotion** runs between LLM #4 and synthesis. For each anchor with `justification_source='llm2_sis'` AND a non-empty `mechanism_of_impact` (the Sprint 16 anchor mechanism gate), an LLM-#4-style "validate_siblings" call enumerates file-local CONTAINS siblings and admits up to 4 per file.
 - Proposal C (graph-aware label-propagation rerank) is implemented but **default-disabled** after the Sprint 15 postmortem. Re-enable via `Settings.enable_graph_rerank=True` or `GRAPH_RERANK_ALPHA=...` env var.
 
-**Canonical calibration result (Sprint 16):** V7 entity F1 = 0.263 (+31.5% over Sprint 13-W2 baseline of 0.200), V7 file F1 = 0.408 (+8.2% over 0.377). V7-vs-V5 Cliff's δ = -0.12 (n=5, descriptive — pre-registered Wilcoxon defers to n≥15).
+**Canonical calibration result (post-Sprint-17 final sweep, `eval/results_final_sweep/`):** V7 entity F1 = 0.232, V7 file F1 = 0.284 on the 5-CR calibration set. V5 leads V7 by 0.040 on entity F1 in this single calibration draw, well within the ±0.04 LLM-stochasticity band documented across runs. The pre-registered Wilcoxon test (V7 vs V5, one-sided paired, entity-level `f1_set`) is correctly deferred at n=5 < MIN_PAIRED_N=15 and defers to the held-out 20-CR evaluation set. Earlier reference points across iterations: Sprint 13-W2 V7 = 0.200 (retrieval-only baseline); Sprint 14 V4 = 0.252 (Apex Proposals A+B); Sprint 16 = 0.263 (anchor mechanism gate). The post-Sprint-17 full-pool cross-encoder regime lifts V4/V5/V6 consistently (V5 entity F1 = 0.272 here vs 0.181 at Sprint 13-W2) while V7 sits within run-to-run noise of the V4-Canonical baseline.
 
 ---
 
@@ -326,17 +326,19 @@ Skip entirely when `enable_cross_encoder=False` (V0–V2).
 
 ```python
 candidates = ctx.reranker.rerank_multi_query(
-    cr_interp.search_queries, candidates, top_k=settings.max_admitted_seeds,
+    cr_interp.search_queries, candidates, top_k=len(candidates),
 )
 ```
 
-`max_admitted_seeds = 15`. Each candidate retains its raw cross-encoder logit in `raw_reranker_score` and a sigmoid-normalised score in `reranker_score`.
+The cross-encoder scores the **full RRF pool** (~200 candidates) on every variant where it is enabled. Each candidate retains its raw cross-encoder logit in `raw_reranker_score` and a sigmoid-normalised score in `reranker_score`. Post-rerank adjustments and graph-rerank (when enabled) operate on this full ranked pool; the final `candidates[:settings.max_admitted_seeds]` truncation runs **after** all adjustments. `max_admitted_seeds = 15`.
 
 Post-rerank score adjustments:
 - **Traceability bonus** (+0.10) on `raw_reranker_score` for code candidates that any retrieved doc-chunk traceability-links to.
 - **Negative filter** (additive −1.0 on `raw_reranker_score`, name-only match, needle ≥ 6 chars) for candidates whose name contains an entry from `cr_interp.out_of_scope_operations`. Additive — multiplicative would invert sign on negative logits and inadvertently promote out-of-scope candidates. **Sprint 14 softened from −5.0 to −1.0 (name-only, ≥6-char needles)** after CR-02 forensics showed LLM #1's verbose post-Apex output listed phrases like "default grace period calculation" as out-of-scope, and the −5.0 / name-or-snippet filter crushed legitimate "grace period" candidates.
 
-**Apex Crucible Proposal C (default-disabled, Sprint 15):** when `settings.enable_graph_rerank = True`, a 2-iteration label-propagation rerank inserts between the cross-encoder and the top-K truncation. Cross-encoder scores the full 200-pool (instead of truncating to 15); graph propagation blends a structural signal via `α * cross_encoder_norm + (1-α) * graph_norm`; top-K truncation happens on the blended score. Mode B optionally adds graph-discovered candidates not in the original RRF pool. Disabled by default because no α value won both entity-F1 and file-F1 on the citrakara calibration set — the structural graph lacks form↔schema edges (form components fetch via API + Zod parse, severing the path Proposal C would exploit). Code preserved for codebases with denser structural coupling.
+A `step_3_reranked_full` trace key captures the full ranked pool before the `max_admitted_seeds` truncation; it is consumed by `tools/diagnose_k_widening.py` for the post-hoc rank-bucket analysis reported in the K-widening empirical study.
+
+**Apex Crucible Proposal C (default-disabled, Sprint 15):** when `settings.enable_graph_rerank = True`, a 2-iteration label-propagation rerank inserts between the cross-encoder and the top-K truncation. Graph propagation blends a structural signal via `α * cross_encoder_norm + (1-α) * graph_norm`; Mode B optionally adds graph-discovered candidates not in the original RRF pool. Disabled by default because no α value won both entity-F1 and file-F1 on the citrakara calibration set — the structural graph lacks form↔schema edges (form components fetch via API + Zod parse, severing the path Proposal C would exploit). Code preserved for codebases with denser structural coupling.
 
 ### Step 3.5 / 3.6 / 3.7 — Pre-Validation Gates (FR-C4)
 
