@@ -281,10 +281,19 @@ class _TransientHTTPError(Exception):
 
 
 def _is_transient(exc: BaseException) -> bool:
-    """True for 429/5xx HTTP errors and network-level timeouts."""
+    """True for 429/5xx HTTP errors, network timeouts, and truncated JSON.
+
+    Truncated JSON appears as a Pydantic ``ValidationError`` whose message
+    contains ``"Invalid JSON"`` with an ``EOF while parsing`` suffix. The
+    upstream provider (OpenRouter -> Gemini) occasionally cuts the response
+    stream mid-token. Resubmitting the same prompt usually returns a complete
+    payload, so this is treated as transient.
+    """
     if isinstance(exc, _TransientHTTPError):
         return True
     msg = str(exc).lower()
+    if "invalid json" in msg and "eof while parsing" in msg:
+        return True
     return any(
         token in msg
         for token in ("429", "500", "502", "503", "504", "timeout", "connection", "unavailable")

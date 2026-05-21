@@ -79,7 +79,14 @@ def step_3_5_score_filter(
             return c.raw_reranker_score
         return 0.0
 
-    return [c for c in candidates if _effective_score(c) >= threshold]
+    # Sprint 19 Salvage Fix 1: candidates pinned by named_entry_points
+    # bypass the score floor. The cross-encoder body-similarity score is
+    # not a meaningful quality signal for files the CR text explicitly
+    # names; the pin is a stronger signal of intent.
+    return [
+        c for c in candidates
+        if c.pinned_by_named_entry or _effective_score(c) >= threshold
+    ]
 
 
 def step_3_6_semantic_dedup(
@@ -124,6 +131,11 @@ def step_3_6_semantic_dedup(
 
     for c in candidates:
         if c.collection != "doc_chunks":
+            result.append(c)
+            continue
+
+        # Sprint 19 Salvage Fix 1: pinned doc chunks survive dedup.
+        if c.pinned_by_named_entry:
             result.append(c)
             continue
 
@@ -205,6 +217,11 @@ def step_3_7_plausibility_and_affinity(
             continue
 
         if c.file_path not in flooded_files:
+            result.append(c)
+            continue
+
+        # Sprint 19 Salvage Fix 1: pinned candidates bypass density gate.
+        if c.pinned_by_named_entry:
             result.append(c)
             continue
 

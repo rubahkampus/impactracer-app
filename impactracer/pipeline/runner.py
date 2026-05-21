@@ -429,15 +429,62 @@ def run_analysis(
             for c in candidates
         ])
 
+        # Sprint 19 (Salvage Fix 1): named-entry-point hard pass-through.
+        # Before the top-K truncation, force-include any candidate whose
+        # node_id, file_path, or name matches a token in
+        # cr_interp.named_entry_points. The cross-encoder may rank the
+        # CR-named file out of the top-K when the CR text body is short
+        # (e.g. "delete formatters.ts") while service-method bodies score
+        # higher on lexical density. The exemption ensures that files the
+        # LLM #1 interpreter explicitly named survive into the SIS.
+        named_patterns_raw = list(cr_interp.named_entry_points or [])
+        named_patterns = [p.lower() for p in named_patterns_raw if p]
+
+        def _is_named(c) -> bool:
+            if not named_patterns:
+                return False
+            fields = [c.node_id or "", c.file_path or "", c.name or ""]
+            haystacks = [f.lower() for f in fields]
+            for p in named_patterns:
+                for h in haystacks:
+                    if p in h:
+                        return True
+            return False
+
+        # Partition into pinned (named) and rest, preserving relative order.
+        # Tag pinned candidates so downstream gates respect the pin.
+        pinned = []
+        rest = []
+        for c in candidates:
+            if _is_named(c):
+                c.pinned_by_named_entry = True
+                pinned.append(c)
+            else:
+                rest.append(c)
+
+        if pinned:
+            logger.info(
+                "[runner] Named-entry-point pinning: {} candidates pinned by patterns={}",
+                len(pinned), named_patterns_raw,
+            )
+
         # Truncate to max_admitted_seeds AFTER all post-rerank adjustments.
-        if len(candidates) > settings.max_admitted_seeds:
-            candidates = candidates[: settings.max_admitted_seeds]
+        # Pinned candidates always survive; remaining slots filled by top
+        # cross-encoder ranks. If pinned count exceeds the cap, all pinned
+        # are kept (the cap is a soft floor in that case).
+        seat_cap = settings.max_admitted_seeds
+        if len(pinned) >= seat_cap:
+            candidates = pinned
+        else:
+            remaining = seat_cap - len(pinned)
+            candidates = pinned + rest[:remaining]
 
         _trace("step_3_reranked", [
             {"node_id": c.node_id, "collection": c.collection,
              "rrf_score": c.rrf_score, "reranker_score": c.reranker_score,
              "raw_reranker_score": c.raw_reranker_score, "file_path": c.file_path,
-             "name": c.name}
+             "name": c.name,
+             "named_entry_point_pinned": _is_named(c)}
             for c in candidates
         ])
 
@@ -456,8 +503,41 @@ def run_analysis(
                 min_s, max_s,
             )
     else:
-        # V0–V2: no reranker — cap at max_admitted_seeds from the RRF pool
-        candidates = candidates[:settings.max_admitted_seeds]
+        # V0–V2: no reranker — cap at max_admitted_seeds from the RRF pool.
+        # Sprint 19 Salvage Fix 1 also applies here for consistency: named
+        # entry points are pinned before the truncation.
+        named_patterns_raw = list(cr_interp.named_entry_points or [])
+        named_patterns = [p.lower() for p in named_patterns_raw if p]
+
+        def _is_named_v012(c) -> bool:
+            if not named_patterns:
+                return False
+            fields = [c.node_id or "", c.file_path or "", c.name or ""]
+            haystacks = [f.lower() for f in fields]
+            for p in named_patterns:
+                for h in haystacks:
+                    if p in h:
+                        return True
+            return False
+
+        pinned = []
+        rest = []
+        for c in candidates:
+            if _is_named_v012(c):
+                c.pinned_by_named_entry = True
+                pinned.append(c)
+            else:
+                rest.append(c)
+        seat_cap = settings.max_admitted_seeds
+        if len(pinned) >= seat_cap:
+            candidates = pinned
+        else:
+            candidates = pinned + rest[: seat_cap - len(pinned)]
+        if pinned:
+            logger.info(
+                "[runner] Named-entry-point pinning (no rerank): {} pinned",
+                len(pinned),
+            )
         logger.info("[runner] Step 3: Cross-encoder DISABLED ({})", variant_flags.variant_id)
 
     # ------------------------------------------------------------------

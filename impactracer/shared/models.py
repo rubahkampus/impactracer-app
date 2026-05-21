@@ -46,13 +46,21 @@ class TruncatingModel(BaseModel):
             return data
         for field_name, field_info in cls.model_fields.items():
             value = data.get(field_name)
-            if not isinstance(value, str):
-                continue
-            for meta in field_info.metadata:
-                max_len = getattr(meta, "max_length", None)
-                if max_len is not None and len(value) > max_len:
-                    data[field_name] = value[:max_len]
-                    break
+            if isinstance(value, str):
+                for meta in field_info.metadata:
+                    max_len = getattr(meta, "max_length", None)
+                    if max_len is not None and len(value) > max_len:
+                        data[field_name] = value[:max_len]
+                        break
+            elif isinstance(value, list):
+                # LLMs cannot reliably count list items either. Apply the
+                # same silent-truncation policy to list lengths when a
+                # ``max_length`` constraint is declared.
+                for meta in field_info.metadata:
+                    max_len = getattr(meta, "max_length", None)
+                    if max_len is not None and len(value) > max_len:
+                        data[field_name] = value[:max_len]
+                        break
         return data
 
 
@@ -112,7 +120,7 @@ TraceDecision = Literal["CONFIRMED", "PARTIAL", "REJECTED"]
 # =========================================================================
 
 
-class CRInterpretation(BaseModel):
+class CRInterpretation(TruncatingModel):
     """Output of LLM Call #1 (FR-B1 + FR-B2).
 
     Nine attributes exactly. The ``is_actionable`` flag gates the entire
@@ -141,7 +149,7 @@ class CRInterpretation(BaseModel):
     domain_concepts: list[str] = Field(
         description="Business-domain concepts, both explicit and implied.",
         min_length=1,
-        max_length=10,
+        max_length=30,
     )
     search_queries: list[str] = Field(
         description=(
@@ -150,7 +158,7 @@ class CRInterpretation(BaseModel):
             "Must be English even when the CR is in Indonesian."
         ),
         min_length=2,
-        max_length=5,
+        max_length=30,
     )
     named_entry_points: list[str] = Field(
         default_factory=list,
@@ -159,7 +167,7 @@ class CRInterpretation(BaseModel):
             "explicitly describes. Used by the plausibility gate to exempt "
             "named elements from file-density limits."
         ),
-        max_length=4,
+        max_length=30,
     )
     out_of_scope_operations: list[str] = Field(
         default_factory=list,
@@ -170,7 +178,7 @@ class CRInterpretation(BaseModel):
             "additive demotion penalty (-5.0) on candidates whose names or "
             "snippets contain these substrings."
         ),
-        max_length=4,
+        max_length=30,
     )
     layered_search_queries: dict[str, list[str]] | None = Field(
         default=None,
@@ -628,3 +636,10 @@ class Candidate:
     merged_doc_contexts: list[tuple[str, str]] = field(default_factory=list)
     bm25_score: float = 0.0
     cosine_score: float = 0.0
+    # pinned_by_named_entry: True if this candidate was matched to a token in
+    # cr_interp.named_entry_points during the cross-encoder admission step
+    # (Sprint 19 Salvage Fix 1). Pinned candidates bypass max_admitted_seeds
+    # truncation and all pre-validation gates (score floor, semantic dedup,
+    # plausibility). They still face LLM #2 validation as the source-of-truth
+    # gate.
+    pinned_by_named_entry: bool = False
