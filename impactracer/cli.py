@@ -195,6 +195,15 @@ def evaluate(
     output_dir: Path = typer.Option(Path("./eval/results/"), "--output"),
     run_full_ablation: bool = typer.Option(True, "--run-full-ablation"),
     verify_nfr: bool = typer.Option(False, "--verify-nfr"),
+    anchor_priming: bool = typer.Option(
+        True,
+        "--anchor-priming/--no-anchor-priming",
+        help=(
+            "Amendment 1 toggle: when True (default), LLM #1 extracts "
+            "anchor_candidates and the score-floor gate applies a soft boost. "
+            "Pass --no-anchor-priming to reproduce the pre-amendment baseline."
+        ),
+    ),
 ) -> None:
     """Run the full evaluation protocol on a GT dataset directory.
 
@@ -260,6 +269,7 @@ def evaluate(
     typer.echo(
         f"\nLoaded {len(cr_dataset)} GT entries from {dataset}\n"
         f"Variants: {_VF.ALL_VARIANTS}\n"
+        f"Anchor priming: {anchor_priming}\n"
         f"Output  : {output_dir}\n",
         err=True,
     )
@@ -272,7 +282,7 @@ def evaluate(
     if not run_full_ablation:
         typer.echo("--run-full-ablation=False is currently a no-op (no partial mode wired).", err=True)
 
-    csv_path = run_full_evaluation(cr_dataset, settings, output_dir)
+    csv_path = run_full_evaluation(cr_dataset, settings, output_dir, anchor_priming=anchor_priming)
     long_df = pd.read_csv(csv_path)
 
     # ------------------------------------------------------------------

@@ -169,6 +169,22 @@ class CRInterpretation(TruncatingModel):
         ),
         max_length=30,
     )
+    anchor_candidates: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Amendment 1: 0 to 10 bare identifier names of likely host or "
+            "sibling symbols in the codebase that the new code will live "
+            "next to, call, or modify. Emitted only when variant_flags."
+            "anchor_priming is True. Unlike named_entry_points, these are "
+            "hypotheses about the codebase the CR does not explicitly name; "
+            "retrieval treats them as a soft additive boost to the score-"
+            "floor admission check, not a hard pin. If the LLM hallucinates "
+            "a non-existent identifier the soft boost still leaves the "
+            "validator chain free to reject it. List is empty when "
+            "anchor_priming is False."
+        ),
+        max_length=10,
+    )
     out_of_scope_operations: list[str] = Field(
         default_factory=list,
         description=(
@@ -218,6 +234,113 @@ class CRInterpretation(TruncatingModel):
             # so retrieval casts the widest net (maximum inclusivity mandate).
             self.affected_layers = ["requirement", "design", "code"]  # type: ignore[assignment]
         return self
+
+
+# =========================================================================
+# LLM #1 (Amendment 3): two-stage interpretation schemas
+# =========================================================================
+
+
+class CRIntent(TruncatingModel):
+    """Stage 1a output: pure intent extraction, no project context.
+
+    This is the cheap first call in the two-stage interpreter. It uses
+    only the CR text; no codebase information is in the prompt. Its
+    output is fed into stage 1b alongside the project skeleton.
+
+    Unlike the legacy :class:`CRInterpretation`, ``domain_concepts`` is
+    NOT required to be non-empty: a CR judged not-actionable in stage 1a
+    legitimately has no domain to extract. The dispatcher in
+    ``interpret_cr_two_stage`` synthesises a placeholder domain concept
+    when it builds the final glued CRInterpretation for non-actionable
+    CRs, so downstream consumers still see a non-empty list.
+    """
+
+    is_actionable: bool = Field(
+        description=(
+            "False if the CR is too ambiguous, contains no identifiable "
+            "change intent, or is less than one full sentence."
+        ),
+    )
+    actionability_reason: str | None = Field(
+        default=None,
+        description=(
+            "One sentence explaining why the CR was rejected. "
+            "Null when is_actionable is True."
+        ),
+    )
+    primary_intent: str = Field(
+        description="Single sentence describing what is being changed and why.",
+    )
+    change_type: ChangeType
+    affected_layers: list[Literal["requirement", "design", "code"]] = Field(
+        default_factory=list,
+    )
+    domain_concepts: list[str] = Field(
+        default_factory=list,
+        description="Business-domain concepts, both explicit and implied.",
+        max_length=30,
+    )
+    is_nfr: bool = Field(
+        default=False,
+        description="True if the CR primarily concerns a non-functional requirement.",
+    )
+
+
+class CRAnchors(TruncatingModel):
+    """Stage 1b output: project-grounded anchor + search-query extraction.
+
+    Receives stage 1a's CRIntent AND the cached project skeleton in its
+    user prompt. Emits the retrieval-side fields LLM #1 used to emit
+    monolithically.
+    """
+
+    search_queries: list[str] = Field(
+        description=(
+            "2 to 5 English technical phrases that match function "
+            "signatures, class names, or API endpoints in the indexed "
+            "code. Must be English even when the CR is in Indonesian."
+        ),
+        min_length=2,
+        max_length=30,
+    )
+    layered_search_queries: dict[str, list[str]] | None = Field(
+        default=None,
+        description=(
+            "Per-architectural-layer query grid with EXACTLY these keys: "
+            "'api_route', 'page_component', 'ui_component', 'utility', "
+            "'type_definition'. Each value is 1-2 English phrases that "
+            "target THAT layer's vocabulary as observed in the project "
+            "skeleton. Null only when is_actionable was False in stage 1a."
+        ),
+    )
+    named_entry_points: list[str] = Field(
+        default_factory=list,
+        description=(
+            "0 to 4 specific function or component name patterns the CR "
+            "explicitly describes. Do NOT infer."
+        ),
+        max_length=30,
+    )
+    anchor_candidates: list[str] = Field(
+        default_factory=list,
+        description=(
+            "0 to 10 bare identifier names of likely host or sibling "
+            "symbols VISIBLE IN THE PROJECT SKELETON. Use the skeleton's "
+            "domain vocabulary and naming conventions to guess names that "
+            "match the actual index, not invented PascalCase classes when "
+            "the project uses camelCase functions."
+        ),
+        max_length=10,
+    )
+    out_of_scope_operations: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Business operations that share vocabulary with the CR but "
+            "are NOT being changed."
+        ),
+        max_length=30,
+    )
 
 
 # =========================================================================
@@ -643,3 +766,11 @@ class Candidate:
     # plausibility). They still face LLM #2 validation as the source-of-truth
     # gate.
     pinned_by_named_entry: bool = False
+    # anchor_boost_applied: True if this candidate matched a substring of any
+    # cr_interp.anchor_candidates token during the score-floor admission step
+    # (Amendment 1). Unlike pinned_by_named_entry, this is a SOFT signal: the
+    # candidate's effective score gets an additive boost
+    # (settings.anchor_priming_boost) BEFORE the floor comparison; if the
+    # boosted score still fails the floor the candidate is dropped. Trace-only
+    # field; no downstream code branches on it.
+    anchor_boost_applied: bool = False

@@ -7,7 +7,13 @@ Each (CR, variant) row records both entity-level and file-level metrics.
 The output CSV feeds ``statistical.run_primary_test`` for the V7 vs V5
 Wilcoxon test on f1_set.
 
-Reference: 09_ablation_harness.md.
+Amendment 2: the harness instantiates one ``VariantCache`` per
+(cr_id, anchor_priming) tuple and passes it through to every variant.
+Cumulative pipeline boundaries (LLM #1, retrieval, rerank+gates, LLM #2,
+LLM #3, BFS+collapse, LLM #4) are then memoised so V_{n+1} resumes from
+V_n's cached output instead of recomputing.
+
+Reference: 09_ablation_harness.md; docs/evaluation_protocol.md Amendment 2.
 """
 
 from __future__ import annotations
@@ -15,13 +21,15 @@ from __future__ import annotations
 import csv
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from loguru import logger
 
 from impactracer.evaluation.metrics import compute_dual_granularity_metrics
 from impactracer.evaluation.schemas import GTEntry
-from impactracer.evaluation.variant_flags import VariantFlags
+from impactracer.evaluation.variant_flags import VariantFlags, with_anchor_priming
+from impactracer.pipeline.variant_cache import VariantCache
 from impactracer.shared.config import Settings
 
 
@@ -58,6 +66,9 @@ def run_single_cr_all_variants(
     shared_embedder=None,
     shared_reranker=None,
     shared_llm_client=None,
+    anchor_priming: bool = True,
+    cache_root: Path | None = None,
+    run_tag: str | None = None,
 ) -> dict[str, dict]:
     """Execute every variant in VariantFlags.ALL_VARIANTS on one CR.
 
@@ -77,10 +88,22 @@ def run_single_cr_all_variants(
     gt_nodes = gt_entry.entity_node_ids()
     gt_files = gt_entry.file_paths()
 
+    # Amendment 2: per-CR cache scoped by (run_tag, cr_id, anchor_priming).
+    # All eight variants on this CR share one VariantCache; intermediate
+    # outputs computed by V_n are reused by V_{n+1}.
+    variant_cache: VariantCache | None = None
+    if cache_root is not None and run_tag is not None:
+        variant_cache = VariantCache(
+            root_dir=cache_root,
+            run_tag=run_tag,
+            cr_id=cr_id,
+            anchor_priming=anchor_priming,
+        )
+
     results: dict[str, dict] = {}
 
     for variant_id in VariantFlags.ALL_VARIANTS:
-        flags = VariantFlags.for_id(variant_id)
+        flags = with_anchor_priming(VariantFlags.for_id(variant_id), anchor_priming)
         variant_dir = cr_root / variant_id
         variant_dir.mkdir(parents=True, exist_ok=True)
         trace_sink: dict = {"cr_text": cr_text, "variant": variant_id, "cr_id": cr_id}
@@ -94,6 +117,7 @@ def run_single_cr_all_variants(
                 shared_reranker=shared_reranker,
                 shared_llm_client=shared_llm_client,
                 trace_sink=trace_sink,
+                variant_cache=variant_cache,
             )
         except Exception as exc:
             logger.error(
@@ -111,6 +135,7 @@ def run_single_cr_all_variants(
                 "status": "error",
                 "error": str(exc),
                 "elapsed_s": time.perf_counter() - t0,
+                "anchor_priming": flags.anchor_priming,
                 "f1_set": None,
                 "precision_set": None,
                 "recall_set": None,
@@ -147,6 +172,7 @@ def run_single_cr_all_variants(
             "degraded_run": report.degraded_run,
             "analysis_mode": report.analysis_mode,
             "estimated_scope": report.estimated_scope,
+            "anchor_priming": flags.anchor_priming,
             **metrics,
             # Promote the primary metrics to top-level for stat-test ease.
             "f1_set": metrics["entity_f1_set"],
@@ -173,6 +199,9 @@ def run_full_evaluation(
     cr_dataset: list[GTEntry],
     settings: Settings,
     output_dir: Path,
+    anchor_priming: bool = True,
+    cache_root: Path | None = None,
+    run_tag: str | None = None,
 ) -> Path:
     """Execute the full ablation × CR matrix.
 
@@ -190,6 +219,19 @@ def run_full_evaluation(
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Amendment 2: variant-chain cache root + run_tag. Defaults to the same
+    # output directory under a `cache` subfolder, with a fresh UTC timestamp
+    # tag so cache trees never collide across runs.
+    if cache_root is None:
+        cache_root = output_dir / "cache"
+    if run_tag is None:
+        run_tag = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    cache_root = Path(cache_root)
+    logger.info(
+        "[ablation] Variant cache: root={} run_tag={} anchor_priming={}",
+        cache_root, run_tag, anchor_priming,
+    )
 
     # Load shared infrastructure ONCE.
     from impactracer.pipeline.runner import load_pipeline_context
@@ -211,6 +253,8 @@ def run_full_evaluation(
         "status", "elapsed_s",
         "n_impacted_nodes", "n_impacted_files",
         "degraded_run", "analysis_mode", "estimated_scope",
+        # Amendment 1: anchor-priming methodology flag per cell.
+        "anchor_priming",
         # Entity-level
         "entity_precision_set", "entity_recall_set", "entity_f1_set",
         "entity_n_predicted", "entity_n_gt", "entity_n_intersect",
@@ -239,6 +283,9 @@ def run_full_evaluation(
                 shared_embedder=shared_embedder,
                 shared_reranker=shared_reranker,
                 shared_llm_client=shared_llm_client,
+                anchor_priming=anchor_priming,
+                cache_root=cache_root,
+                run_tag=run_tag,
             )
 
             for variant_id, payload in results.items():

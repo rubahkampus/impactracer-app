@@ -27,7 +27,7 @@ Reference: 09_ablation_harness.md.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import ClassVar
 
 
@@ -62,6 +62,28 @@ class VariantFlags:
     # from all CIS nodes. Retained for diagnostic use; not exercised by the
     # canonical ablation matrix.
     force_include_all_cis_nodes: bool = False
+
+    # Amendment 1: LLM #1 anchor priming. When True (default), LLM #1's system
+    # prompt instructs the model to populate CRInterpretation.anchor_candidates
+    # with 1-3 likely host/sibling symbols from the codebase even when the CR
+    # does not explicitly name them. The prevalidation score-floor gate then
+    # applies an additive boost (settings.anchor_priming_boost) to any
+    # candidate whose name substring-matches an anchor candidate. When False,
+    # LLM #1 emits an empty anchor_candidates list and no boost is applied.
+    # All V0-V7 variants inherit this default; toggling it produces the
+    # before-and-after ablation reported in the thesis methodology amendment.
+    anchor_priming: bool = True
+
+    # Amendment 3: project-grounded two-stage interpretation. When True
+    # (default), LLM #1 is split into two calls:
+    #   1a (intent): actionability + change_type + layers + domain_concepts
+    #      (no anchor reasoning, no project context).
+    #   1b (anchors): receives stage-1 output PLUS the cached project
+    #      skeleton, emits search_queries, layered_search_queries,
+    #      named_entry_points, anchor_candidates, out_of_scope_operations.
+    # The runner glues both outputs into one CRInterpretation. When False,
+    # the legacy single-stage interpreter is used.
+    two_stage_interpret: bool = True
 
     ALL_VARIANTS: ClassVar[list[str]] = [
         "V0", "V1", "V2", "V3", "V4", "V5", "V6", "V7"
@@ -182,3 +204,24 @@ class VariantFlags:
             "V6": cls.v6(),
             "V7": cls.v7_full(),
         }[variant_id]
+
+
+def with_anchor_priming(flags: VariantFlags, value: bool) -> VariantFlags:
+    """Return a copy of ``flags`` with ``anchor_priming`` set to ``value``.
+
+    ``VariantFlags`` is frozen, so this wraps ``dataclasses.replace``. Used by
+    the Amendment 1 before-and-after ablation: ``with_anchor_priming(flags,
+    False)`` reproduces the pre-amendment baseline, ``True`` is the post-
+    amendment default.
+    """
+    return replace(flags, anchor_priming=value)
+
+
+def with_two_stage_interpret(flags: VariantFlags, value: bool) -> VariantFlags:
+    """Return a copy of ``flags`` with ``two_stage_interpret`` set to ``value``.
+
+    Used by the Amendment 3 before-and-after ablation:
+    ``with_two_stage_interpret(flags, False)`` reproduces the single-stage
+    LLM #1 (pre-Amendment-3 behaviour), ``True`` is the new default.
+    """
+    return replace(flags, two_stage_interpret=value)

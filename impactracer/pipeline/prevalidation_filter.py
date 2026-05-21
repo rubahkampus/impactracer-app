@@ -40,7 +40,13 @@ def apply_prevalidation_gates(
     """
     if enable_score_floor:
         threshold = settings.min_reranker_score_for_validation  # type: ignore[attr-defined]
-        candidates = step_3_5_score_filter(candidates, threshold)
+        anchor_boost = float(getattr(settings, "anchor_priming_boost", 0.10))
+        candidates = step_3_5_score_filter(
+            candidates,
+            threshold,
+            cr_interp=cr_interp,
+            anchor_boost=anchor_boost,
+        )
         logger.info("[gates] Post-3.5 (score floor ≥{}): {} candidates", threshold, len(candidates))
     else:
         logger.debug("[gates] Step 3.5 DISABLED (enable_score_floor=False)")
@@ -63,6 +69,8 @@ def apply_prevalidation_gates(
 def step_3_5_score_filter(
     candidates: list[Candidate],
     threshold: float,
+    cr_interp: CRInterpretation | None = None,
+    anchor_boost: float = 0.10,
 ) -> list[Candidate]:
     """Drop candidates whose absolute cross-encoder score is below threshold.
 
@@ -72,12 +80,27 @@ def step_3_5_score_filter(
 
     Falls back to 0.0 for V0–V2 where the reranker was not run.
 
+    Amendment 1: when ``cr_interp.anchor_candidates`` is non-empty, the
+    candidate's effective score receives an additive boost of ``anchor_boost``
+    if its ``name`` substring-matches any anchor candidate (case-insensitive).
+    The boost is SOFT: a candidate whose boosted score is still below the
+    floor is dropped. ``c.anchor_boost_applied`` is set True for trace
+    inspection. Hallucinated anchor identifiers therefore cannot inject
+    irrelevant candidates above the floor by themselves; the validator
+    chain remains the source of truth.
+
     Blueprint §4 Step 3.5.
     """
+    anchor_patterns: list[str] = []
+    if cr_interp is not None and cr_interp.anchor_candidates:
+        anchor_patterns = [p.lower() for p in cr_interp.anchor_candidates if p]
+
     def _effective_score(c: Candidate) -> float:
-        if c.raw_reranker_score != 0.0:
-            return c.raw_reranker_score
-        return 0.0
+        base = c.raw_reranker_score if c.raw_reranker_score != 0.0 else 0.0
+        if anchor_patterns and _matches_any_named(c.name, anchor_patterns):
+            c.anchor_boost_applied = True
+            return base + anchor_boost
+        return base
 
     # Sprint 19 Salvage Fix 1: candidates pinned by named_entry_points
     # bypass the score floor. The cross-encoder body-similarity score is

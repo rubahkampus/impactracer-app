@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import networkx as nx
@@ -60,6 +61,7 @@ from impactracer.shared.models import (
 
 if TYPE_CHECKING:
     from impactracer.evaluation.variant_flags import VariantFlags
+    from impactracer.pipeline.variant_cache import VariantCache
 
 
 @dataclass
@@ -233,6 +235,7 @@ def run_analysis(
     shared_reranker: Any = None,
     shared_llm_client: Any = None,
     trace_sink: dict | None = None,
+    variant_cache: "VariantCache | None" = None,
 ) -> ImpactReport:
     """End-to-end online analysis for one CR.
 
@@ -265,9 +268,44 @@ def run_analysis(
 
     # ------------------------------------------------------------------
     # Step 1 — Interpret CR (LLM #1, always-on)
+    #
+    # Amendment 3: when variant_flags.two_stage_interpret is True AND a
+    # project-skeleton file is available on disk, LLM #1 is split into
+    # two calls (intent + project-grounded anchors). The cached
+    # CRInterpretation memoises the glued result so V1-V7 share it.
     # ------------------------------------------------------------------
     logger.info("[runner] Step 1: Interpret CR")
-    cr_interp = interpret_cr(cr_text, ctx.llm_client)
+    if variant_cache is not None:
+        cached_interp = variant_cache.get_interp()
+    else:
+        cached_interp = None
+    if cached_interp is not None:
+        logger.info("[runner] [cache HIT] interp (LLM #1 skipped)")
+        cr_interp = cached_interp
+    else:
+        # Load the project skeleton at most once per process. The runner
+        # reads it from settings.project_skeleton_path; missing file is
+        # tolerated (interpret_cr falls back to single-stage).
+        project_skeleton: str | None = None
+        if variant_flags is not None and variant_flags.two_stage_interpret:
+            from impactracer.indexer.project_skeleton import read_project_skeleton
+            project_skeleton = read_project_skeleton(
+                Path(settings.project_skeleton_path)
+            )
+            if project_skeleton is None:
+                logger.warning(
+                    "[runner] two_stage_interpret enabled but no project "
+                    "skeleton at {} — falling back to single-stage.",
+                    settings.project_skeleton_path,
+                )
+        cr_interp = interpret_cr(
+            cr_text,
+            ctx.llm_client,
+            variant_flags=variant_flags,
+            project_skeleton=project_skeleton,
+        )
+        if variant_cache is not None:
+            variant_cache.put_interp(cr_interp)
 
     logger.info(
         "[runner] === INTERPRETER OUTPUT ===\n"
@@ -278,6 +316,7 @@ def run_analysis(
         "  domain_concepts: {}\n"
         "  search_queries  : {}\n"
         "  named_entry_points: {}\n"
+        "  anchor_candidates: {}\n"
         "  out_of_scope_operations: {}",
         cr_interp.is_actionable,
         cr_interp.change_type,
@@ -286,6 +325,7 @@ def run_analysis(
         cr_interp.domain_concepts,
         cr_interp.search_queries,
         cr_interp.named_entry_points,
+        cr_interp.anchor_candidates,
         cr_interp.out_of_scope_operations,
     )
 
@@ -306,9 +346,38 @@ def run_analysis(
 
     # ------------------------------------------------------------------
     # Step 2 — Adaptive RRF Hybrid Search (FR-C1, FR-C2)
+    #
+    # Cache key (Amendment 2): the hybrid_search output depends on which
+    # of bm25/dense/rrf are enabled. V0 (bm25-only), V1 (dense-only), and
+    # V2+ (bm25+dense+RRF) each produce a different candidate list and
+    # cache under a separate key. V2-V7 share the V2+ retrieval key.
     # ------------------------------------------------------------------
     logger.info("[runner] Step 2: Hybrid search (variant={})", variant_flags.variant_id)
-    candidates = hybrid_search(cr_interp, ctx, settings, cr_text=cr_text)
+    if variant_cache is not None:
+        if variant_flags.variant_id == "V0":
+            _retr_key = "retrieval_v0"
+            _retr_get = variant_cache.get_retrieval_v0
+            _retr_put = variant_cache.put_retrieval_v0
+        elif variant_flags.variant_id == "V1":
+            _retr_key = "retrieval_v1"
+            _retr_get = variant_cache.get_retrieval_v1
+            _retr_put = variant_cache.put_retrieval_v1
+        else:
+            _retr_key = "retrieval_v2plus"
+            _retr_get = variant_cache.get_retrieval_v2plus
+            _retr_put = variant_cache.put_retrieval_v2plus
+        cached_candidates = _retr_get()
+    else:
+        cached_candidates = None
+        _retr_put = None
+    if cached_candidates is not None:
+        logger.info("[runner] [cache HIT] {} ({} candidates skipped recompute)",
+                    _retr_key, len(cached_candidates))
+        candidates = cached_candidates
+    else:
+        candidates = hybrid_search(cr_interp, ctx, settings, cr_text=cr_text)
+        if _retr_put is not None:
+            _retr_put(candidates)
     logger.info("[runner] Post-RRF pool: {}", len(candidates))
     _trace("step_2_rrf_pool", [
         {"node_id": c.node_id, "collection": c.collection,
@@ -327,8 +396,42 @@ def run_analysis(
     # top-K truncation. Cross-encoder scores ALL 200 RRF candidates;
     # graph propagation blends in a structural signal; the truncation
     # to max_admitted_seeds happens on the blended score.
+    #
+    # Cache key (Amendment 2): V3-V7 all reach the same post-gate
+    # candidate list (rerank + 3 gates is a pure function of the V2+
+    # retrieval pool + cr_interp). Cache the post-gate result under
+    # `rerank_gated`. On hit, skip the rerank, pinning, normalisation,
+    # and the three gates entirely.
     # ------------------------------------------------------------------
-    if variant_flags.enable_cross_encoder:
+    _rerank_gated_cache_hit = False
+    if (
+        variant_cache is not None
+        and variant_flags.enable_cross_encoder
+        and variant_flags.enable_score_floor
+        and variant_flags.enable_dedup_gate
+        and variant_flags.enable_plausibility_gate
+    ):
+        _cached_rerank_gated = variant_cache.get_rerank_gated()
+        if _cached_rerank_gated is not None:
+            logger.info(
+                "[runner] [cache HIT] rerank_gated ({} candidates, "
+                "rerank + 3 gates skipped)",
+                len(_cached_rerank_gated),
+            )
+            candidates = _cached_rerank_gated
+            _rerank_gated_cache_hit = True
+            # Replay the trace logs the gates would have emitted.
+            _trace("step_3_gates_survivors", [
+                {"node_id": c.node_id, "collection": c.collection,
+                 "raw_reranker_score": c.raw_reranker_score,
+                 "reranker_score": c.reranker_score, "file_path": c.file_path,
+                 "merged_doc_ids": list(c.merged_doc_ids)}
+                for c in candidates
+            ])
+
+    if _rerank_gated_cache_hit:
+        pass  # Skip the rerank + gates block entirely.
+    elif variant_flags.enable_cross_encoder:
         logger.info("[runner] Step 3: Cross-encoder rerank (multi-query max scoring)")
         # Sprint 17: cross-encoder ALWAYS scores the full pool (was top_k=
         # max_admitted_seeds when graph_rerank was disabled). Three reasons:
@@ -542,32 +645,45 @@ def run_analysis(
 
     # ------------------------------------------------------------------
     # Steps 3.5, 3.6, 3.7 — Pre-validation gates (FR-C4)
+    #
+    # Skipped on cache hit for the post-gate candidate list.
     # ------------------------------------------------------------------
-    post_rerank_count = len(candidates)
-    candidates = apply_prevalidation_gates(
-        candidates,
-        cr_interp,
-        settings,
-        ctx.conn,
-        enable_score_floor=variant_flags.enable_score_floor,
-        enable_dedup=variant_flags.enable_dedup_gate,
-        enable_plausibility=variant_flags.enable_plausibility_gate,
-    )
+    if not _rerank_gated_cache_hit:
+        post_rerank_count = len(candidates)
+        candidates = apply_prevalidation_gates(
+            candidates,
+            cr_interp,
+            settings,
+            ctx.conn,
+            enable_score_floor=variant_flags.enable_score_floor,
+            enable_dedup=variant_flags.enable_dedup_gate,
+            enable_plausibility=variant_flags.enable_plausibility_gate,
+        )
 
-    logger.info(
-        "[runner] admission_summary variant={} post_rerank={} post_gates={} admitted={}",
-        variant_flags.variant_id,
-        post_rerank_count,
-        len(candidates),
-        len(candidates),
-    )
-    _trace("step_3_gates_survivors", [
-        {"node_id": c.node_id, "collection": c.collection,
-         "raw_reranker_score": c.raw_reranker_score,
-         "reranker_score": c.reranker_score, "file_path": c.file_path,
-         "merged_doc_ids": list(c.merged_doc_ids)}
-        for c in candidates
-    ])
+        logger.info(
+            "[runner] admission_summary variant={} post_rerank={} post_gates={} admitted={}",
+            variant_flags.variant_id,
+            post_rerank_count,
+            len(candidates),
+            len(candidates),
+        )
+        _trace("step_3_gates_survivors", [
+            {"node_id": c.node_id, "collection": c.collection,
+             "raw_reranker_score": c.raw_reranker_score,
+             "reranker_score": c.reranker_score, "file_path": c.file_path,
+             "merged_doc_ids": list(c.merged_doc_ids)}
+            for c in candidates
+        ])
+
+        # Cache the post-gate candidates for V3-V7 sharing (Amendment 2).
+        if (
+            variant_cache is not None
+            and variant_flags.enable_cross_encoder
+            and variant_flags.enable_score_floor
+            and variant_flags.enable_dedup_gate
+            and variant_flags.enable_plausibility_gate
+        ):
+            variant_cache.put_rerank_gated(candidates)
 
     if not candidates:
         logger.warning("[runner] Zero candidates after gates — returning empty report")
@@ -576,13 +692,33 @@ def run_analysis(
     # ------------------------------------------------------------------
     # Step 4 — SIS Validation (LLM #2, FR-C5)
     # Batched max 5. Returns (ids, justifications, degraded).
+    #
+    # Cache key (Amendment 2): the LLM #2 verdicts on the post-gate
+    # candidate list are a pure function of (candidates, cr_interp).
+    # V4-V7 all share the same post-gate candidates (via rerank_gated
+    # cache) and the same cr_interp, so the LLM #2 verdicts are
+    # cacheable across V4-V7 under one key.
     # ------------------------------------------------------------------
     sis_justifications: dict[str, dict[str, str]] = {}
     if variant_flags.enable_sis_validation:
         logger.info("[runner] Step 4: SIS validation (batched, fail-closed)")
-        sis_ids, sis_justifications, llm2_degraded = validate_sis_candidates_batched(
-            cr_interp, candidates, ctx.llm_client
+        _cached_sis = (
+            variant_cache.get_sis_verdicts() if variant_cache is not None else None
         )
+        if _cached_sis is not None:
+            sis_ids, sis_justifications, llm2_degraded = _cached_sis
+            logger.info(
+                "[runner] [cache HIT] sis_verdicts ({} confirmed, LLM #2 skipped)",
+                len(sis_ids),
+            )
+        else:
+            sis_ids, sis_justifications, llm2_degraded = validate_sis_candidates_batched(
+                cr_interp, candidates, ctx.llm_client
+            )
+            if variant_cache is not None:
+                variant_cache.put_sis_verdicts(
+                    sis_ids, sis_justifications, llm2_degraded
+                )
         if llm2_degraded:
             degraded_run = True
         _trace("step_4_llm2_verdicts", {
@@ -645,6 +781,11 @@ def run_analysis(
 
     # ------------------------------------------------------------------
     # Step 5b — Trace validation (LLM #3, FR-C7)
+    #
+    # Cache key (Amendment 2): LLM #3 verdicts on the resolutions are a
+    # pure function of (resolutions, cr_interp). V5-V7 share the same
+    # resolutions (because they share SIS verdicts) and the same
+    # cr_interp, so trace_verdicts is cacheable across V5-V7.
     # ------------------------------------------------------------------
     low_conf: dict[str, bool] = {}
     trace_justifications: dict[str, str] = {}
@@ -652,52 +793,70 @@ def run_analysis(
     if variant_flags.enable_trace_validation and resolutions:
         logger.info("[runner] Step 5b: Trace validation (LLM #3, batched max 5)")
 
-        # Hydrate doc texts from ChromaDB doc_meta_cache (pre-cached in ctx).
-        doc_text_by_id: dict[str, str] = {}
-        for r in resolutions:
-            doc_id = r["doc_id"]
-            if doc_id in ctx.doc_meta_cache:
-                doc_text_by_id[doc_id] = ctx.doc_meta_cache[doc_id].get("document", "")
-            else:
-                # Fallback: fetch from ChromaDB directly.
-                try:
-                    res = ctx.doc_col.get(ids=[doc_id], include=["documents"])
-                    if res["documents"]:
-                        doc_text_by_id[doc_id] = res["documents"][0]
-                except Exception:
-                    doc_text_by_id[doc_id] = ""
-
-        # Collect all resolved code IDs and fetch their metadata from SQLite.
-        all_resolved_code_ids: set[str] = set()
-        for r in resolutions:
-            all_resolved_code_ids.update(r["code_ids"])
-
-        code_meta_by_id: dict[str, dict] = {}
-        if all_resolved_code_ids:
-            placeholders = ",".join("?" * len(all_resolved_code_ids))
-            rows = ctx.conn.execute(
-                f"SELECT node_id, node_type, file_path, "
-                f"internal_logic_abstraction, source_code "
-                f"FROM code_nodes WHERE node_id IN ({placeholders})",
-                list(all_resolved_code_ids),
-            ).fetchall()
-            for row in rows:
-                code_meta_by_id[row[0]] = {
-                    "node_type": row[1],
-                    "file_path": row[2],
-                    "internal_logic_abstraction": row[3],
-                    "source_code": row[4],
-                }
-
-        validated_code_seeds, low_conf, trace_justifications, llm3_degraded = (
-            validate_trace_resolutions(
-                resolutions=resolutions,
-                doc_text_by_id=doc_text_by_id,
-                code_meta_by_id=code_meta_by_id,
-                client=ctx.llm_client,
-                cr_interp=cr_interp,
-            )
+        _cached_trace = (
+            variant_cache.get_trace_verdicts() if variant_cache is not None else None
         )
+        if _cached_trace is not None:
+            validated_code_seeds, low_conf, trace_justifications, llm3_degraded = _cached_trace
+            logger.info(
+                "[runner] [cache HIT] trace_verdicts ({} seeds, LLM #3 skipped)",
+                len(validated_code_seeds),
+            )
+        else:
+            # Hydrate doc texts from ChromaDB doc_meta_cache (pre-cached in ctx).
+            doc_text_by_id: dict[str, str] = {}
+            for r in resolutions:
+                doc_id = r["doc_id"]
+                if doc_id in ctx.doc_meta_cache:
+                    doc_text_by_id[doc_id] = ctx.doc_meta_cache[doc_id].get("document", "")
+                else:
+                    # Fallback: fetch from ChromaDB directly.
+                    try:
+                        res = ctx.doc_col.get(ids=[doc_id], include=["documents"])
+                        if res["documents"]:
+                            doc_text_by_id[doc_id] = res["documents"][0]
+                    except Exception:
+                        doc_text_by_id[doc_id] = ""
+
+            # Collect all resolved code IDs and fetch their metadata from SQLite.
+            all_resolved_code_ids: set[str] = set()
+            for r in resolutions:
+                all_resolved_code_ids.update(r["code_ids"])
+
+            code_meta_by_id: dict[str, dict] = {}
+            if all_resolved_code_ids:
+                placeholders = ",".join("?" * len(all_resolved_code_ids))
+                rows = ctx.conn.execute(
+                    f"SELECT node_id, node_type, file_path, "
+                    f"internal_logic_abstraction, source_code "
+                    f"FROM code_nodes WHERE node_id IN ({placeholders})",
+                    list(all_resolved_code_ids),
+                ).fetchall()
+                for row in rows:
+                    code_meta_by_id[row[0]] = {
+                        "node_type": row[1],
+                        "file_path": row[2],
+                        "internal_logic_abstraction": row[3],
+                        "source_code": row[4],
+                    }
+
+            validated_code_seeds, low_conf, trace_justifications, llm3_degraded = (
+                validate_trace_resolutions(
+                    resolutions=resolutions,
+                    doc_text_by_id=doc_text_by_id,
+                    code_meta_by_id=code_meta_by_id,
+                    client=ctx.llm_client,
+                    cr_interp=cr_interp,
+                )
+            )
+            if variant_cache is not None:
+                variant_cache.put_trace_verdicts(
+                    validated_code_seeds,
+                    low_conf,
+                    trace_justifications,
+                    llm3_degraded,
+                )
+
         if llm3_degraded:
             degraded_run = True
         logger.info(
@@ -732,8 +891,40 @@ def run_analysis(
 
     # ------------------------------------------------------------------
     # Step 6 — BFS propagation (FR-D1)
+    #
+    # Cache key (Amendment 2): the BFS output is a pure function of
+    # (all_code_seeds, low_conf, graph, settings). V6 and V7 share all
+    # of those, so the post-BFS-and-collapse CIS is cacheable across
+    # the two variants under one `bfs_cis` key. The cache covers both
+    # Step 6 (BFS) and Step 6.5 (graph collapse), since the collapse is
+    # also deterministic given the BFS CIS.
     # ------------------------------------------------------------------
-    if variant_flags.enable_bfs and all_code_seeds:
+    _bfs_cis_cache_hit = False
+    if variant_cache is not None and variant_flags.enable_bfs and all_code_seeds:
+        _cached_bfs_cis = variant_cache.get_bfs_cis()
+        if _cached_bfs_cis is not None:
+            cis = _cached_bfs_cis
+            logger.info(
+                "[runner] [cache HIT] bfs_cis ({} sis + {} propagated, "
+                "BFS + collapse skipped)",
+                len(cis.sis_nodes), len(cis.propagated_nodes),
+            )
+            _trace("step_6_bfs_raw_cis", {
+                "sis_seeds": [
+                    {"node_id": k, "depth": v.depth, "source_seed": v.source_seed}
+                    for k, v in cis.sis_nodes.items()
+                ],
+                "propagated_nodes": [
+                    {"node_id": k, "depth": v.depth,
+                     "causal_chain": v.causal_chain, "source_seed": v.source_seed}
+                    for k, v in cis.propagated_nodes.items()
+                ],
+            })
+            _bfs_cis_cache_hit = True
+
+    if _bfs_cis_cache_hit:
+        pass  # CIS already loaded from cache; skip Step 6 and Step 6.5.
+    elif variant_flags.enable_bfs and all_code_seeds:
         logger.info("[runner] Step 6: BFS propagation")
         from impactracer.pipeline.graph_bfs import bfs_propagate, compute_confidence_tiers
 
@@ -824,8 +1015,10 @@ def run_analysis(
     # ------------------------------------------------------------------
     # Step 6.5 — Graph Collapse: CONTAINS sub-tree aggregation
     # Runs after BFS, before LLM #4, to reduce prompt token count.
+    #
+    # Skipped on cache hit; otherwise runs and the result is cached.
     # ------------------------------------------------------------------
-    if variant_flags.enable_bfs and cis.propagated_nodes:
+    if not _bfs_cis_cache_hit and variant_flags.enable_bfs and cis.propagated_nodes:
         from impactracer.pipeline.graph_bfs import collapse_contains_subtrees
 
         # We need node_meta_by_id to check parent/child types.  Build a
@@ -851,6 +1044,15 @@ def run_analysis(
             len(cis.propagated_nodes),
             pre_collapse_propagated - len(cis.propagated_nodes),
         )
+
+    # Cache the post-BFS post-collapse CIS for V6-V7 sharing (Amendment 2).
+    if (
+        not _bfs_cis_cache_hit
+        and variant_cache is not None
+        and variant_flags.enable_bfs
+        and all_code_seeds
+    ):
+        variant_cache.put_bfs_cis(cis)
 
     # ------------------------------------------------------------------
     # Step 7 — Propagation validation (LLM #4, FR-D2)
@@ -880,12 +1082,24 @@ def run_analysis(
                     "source_code": row[4],
                 }
 
-        cis, llm4_justifications, llm4_degraded = validate_propagation(
-            cis=cis,
-            cr_interp=cr_interp,
-            node_meta_by_id=node_meta_by_id,
-            client=ctx.llm_client,
+        _cached_llm4 = (
+            variant_cache.get_llm4_verdicts() if variant_cache is not None else None
         )
+        if _cached_llm4 is not None:
+            cis, llm4_justifications, llm4_degraded = _cached_llm4
+            logger.info(
+                "[runner] [cache HIT] llm4_verdicts ({} kept, LLM #4 skipped)",
+                len(cis.propagated_nodes),
+            )
+        else:
+            cis, llm4_justifications, llm4_degraded = validate_propagation(
+                cis=cis,
+                cr_interp=cr_interp,
+                node_meta_by_id=node_meta_by_id,
+                client=ctx.llm_client,
+            )
+            if variant_cache is not None:
+                variant_cache.put_llm4_verdicts(cis, llm4_justifications, llm4_degraded)
         if llm4_degraded:
             degraded_run = True
         _trace("step_7_llm4_verdicts", {

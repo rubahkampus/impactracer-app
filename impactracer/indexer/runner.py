@@ -30,6 +30,7 @@ from loguru import logger
 from impactracer.indexer.code_indexer import extract_edges, extract_nodes
 from impactracer.indexer.doc_indexer import chunk_markdown
 from impactracer.indexer.embedder import Embedder
+from impactracer.indexer.project_skeleton import write_project_skeleton
 from impactracer.indexer.traceability import compute_and_store
 from impactracer.persistence.chroma_client import get_client, init_collections
 from impactracer.persistence.sqlite_client import connect, init_schema
@@ -485,6 +486,11 @@ def run_indexing(
         conn=conn,
     )
     logger.info("Traceability pairs stored: {}", pairs_stored)
+
+    # ── Step 8.5: project-skeleton extraction (Amendment 3) ───────────────────
+    # Build the cached textual summary the two-stage interpreter feeds to
+    # LLM #1. Deterministic given the current index state.
+    write_project_skeleton(conn, Path(settings.project_skeleton_path))
 
     # ── Step 9: update file_hashes ────────────────────────────────────────────
     now = dt.datetime.now(dt.timezone.utc).isoformat()

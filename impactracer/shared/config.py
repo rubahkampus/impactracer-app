@@ -141,6 +141,15 @@ class Settings(BaseSettings):
     # Density threshold: rejects candidates when a single file exceeds this
     # fraction of the total pool. Density-only; no per-file count cap.
     plausibility_gate_density_threshold: float = 0.50
+    # Amendment 1: additive boost applied to a candidate's raw_reranker_score
+    # at the score-floor admission step when its name substring-matches any
+    # of cr_interp.anchor_candidates. Soft semantics — a candidate whose
+    # boosted score is still below min_reranker_score_for_validation is
+    # dropped. Default 0.10 sits roughly one cross-encoder logit step above
+    # the floor, enough to admit borderline anchors without overwhelming the
+    # validator chain. Set to 0.0 to disable the boost while keeping
+    # anchor_candidates extraction.
+    anchor_priming_boost: float = 0.10
 
     # ---- BFS --------------------------------------------------------
     bfs_global_max_depth: int = 3
@@ -160,6 +169,11 @@ class Settings(BaseSettings):
     llm_audit_log_path: str = "./data/llm_audit.jsonl"
     locked_parameters_path: str = "./data/locked_parameters.json"
     alpha: float = 0.05
+
+    # Amendment 3: cached project-skeleton text written at index time and
+    # consumed by the two-stage interpreter at run time. Missing file is
+    # treated as a graceful degrade signal (single-stage interpreter only).
+    project_skeleton_path: str = "./data/project_skeleton.txt"
 
 
 def get_settings() -> Settings:
