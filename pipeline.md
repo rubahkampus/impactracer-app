@@ -887,7 +887,7 @@ to run.
 - **CIS** — Change Impact Set. The output: every entity predicted to be
   affected by the CR. Two parts: `sis_nodes` (depth-0 seeds) and
   `propagated_nodes` (BFS-discovered).
-- **SIS** — Search Impact Set. The retrieval-and-validation result that
+- **SIS** — Starting Impact Set. The retrieval-and-validation result that
   becomes the seeds for BFS. SIS ⊆ CIS.
 - **RRF** — Reciprocal Rank Fusion. Combines multiple ranked lists into one
   via `1 / (rrf_k + rank)`.

@@ -97,13 +97,13 @@ def _build_trace_prompt(
         "",
     ]
     for i, (doc_id, code_id) in enumerate(pairs, start=1):
-        doc_text = doc_text_by_id.get(doc_id, "")[:800]
+        doc_text = doc_text_by_id.get(doc_id, "")[:2500]
         meta = code_meta_by_id.get(code_id, {})
         node_type = meta.get("node_type", "Unknown")
         file_path = meta.get("file_path", "")
         abstraction = meta.get("internal_logic_abstraction") or meta.get("source_code", "")
         if abstraction:
-            abstraction = abstraction[:800]
+            abstraction = abstraction[:2500]
 
         lines += [
             f"[{i}]",

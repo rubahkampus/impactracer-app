@@ -130,6 +130,7 @@ def build_validator_prompt(
     Includes: CR intent, change type, domain concepts, out-of-scope
     operations, named entry points, and per-candidate node_id / type /
     file path / snippet (prefers internal_logic_abstraction, full length).
+    All text fields sent at full length — no truncation.
 
     DELIBERATELY EXCLUDES all retrieval scores (reranker_score, rrf_score,
     cosine_score). The LLM must judge structural relevance independently.
@@ -192,8 +193,7 @@ def build_validator_prompt(
                 lines.append("Business Context (requirement sections that reference this code node):")
                 for section_title, section_text in c.merged_doc_contexts:
                     lines.append(f"  [Section: {section_title}]")
-                    preview = section_text[:500] if len(section_text) > 500 else section_text
-                    lines.append(f"  {preview}")
+                    lines.append(f"  {section_text}")
 
         lines.append("")
 

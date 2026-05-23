@@ -132,7 +132,7 @@ def _build_propagation_prompt(
         file_path = meta.get("file_path", "")
         abstraction = meta.get("internal_logic_abstraction") or meta.get("source_code", "")
         if abstraction:
-            abstraction = abstraction[:1200]
+            abstraction = abstraction[:2500]
 
         chain_display = " -> ".join(trace.causal_chain) if trace.causal_chain else "(direct seed)"
 
@@ -484,7 +484,7 @@ def validate_siblings_for_file(
         meta = node_meta_by_id.get(sib_id, {})
         abstraction = meta.get("internal_logic_abstraction") or meta.get("source_code", "")
         if abstraction:
-            abstraction = abstraction[:800]
+            abstraction = abstraction[:2500]
         lines += [
             f"[{i}]",
             f"NODE ID: <<NODE_ID_START>>{sib_id}<<NODE_ID_END>>",
