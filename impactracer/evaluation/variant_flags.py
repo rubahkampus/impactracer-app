@@ -2,16 +2,23 @@
 
 Canonical 8-variant additive chain:
 
-    V0   BM25 only                          + blind resolution
-    V1   Dense only                         + blind resolution
-    V2   V1 + RRF fusion                    + blind resolution
-    V3   V2 + cross-encoder rerank + all three deterministic gates
-         (score floor, dedup, plausibility) + blind resolution.
-         V3 is the deterministic-filtering peak (no LLM gating).
+    V0   BM25 only          + dedup + plausibility  + blind resolution
+    V1   Dense only         + dedup + plausibility  + blind resolution
+    V2   V1 + RRF fusion    + dedup + plausibility  + blind resolution
+    V3   V2 + cross-encoder rerank + score floor    + blind resolution.
+         V3 is the deterministic-filtering peak (no LLM gating). Only V3
+         enables the score floor because that gate consumes a cross-encoder
+         raw_reranker_score that V0-V2 do not produce.
     V4   V3 + LLM #2 SIS validation         + blind resolution
     V5   V4 + LLM #3 trace validation       + validated SIS
     V6   V5 + BFS propagation               + blind propagation
     V7   V6 + LLM #4 propagation validation + full system
+
+Universal-gates convention: 3.6 dedup and 3.7 plausibility run on every
+variant V0-V7. The V0->V2 -> V3 boundary used to be "no gates" -> "all
+gates"; it is now "no score floor" -> "score floor". The dedup and
+plausibility filters are unconditional retrieval-level hygiene, not a
+deterministic-vs-LLM ablation distinction.
 
 The diagnostic-only V3.5 (gates without LLM #2) is folded into V3, and
 V6.5 (BFS + LLM #4, no LLM #5 synthesis) is folded into V7 since LLM #5
@@ -63,7 +70,7 @@ class VariantFlags:
     # canonical ablation matrix.
     force_include_all_cis_nodes: bool = False
 
-    # Amendment 1: LLM #1 anchor priming. When True (default), LLM #1's system
+    # LLM #1 anchor priming. When True (default), LLM #1's system
     # prompt instructs the model to populate CRInterpretation.anchor_candidates
     # with 1-3 likely host/sibling symbols from the codebase even when the CR
     # does not explicitly name them. The prevalidation score-floor gate then
@@ -74,7 +81,7 @@ class VariantFlags:
     # before-and-after ablation reported in the thesis methodology amendment.
     anchor_priming: bool = True
 
-    # Amendment 3: project-grounded two-stage interpretation. When True
+    # Project-grounded two-stage interpretation. When True
     # (default), LLM #1 is split into two calls:
     #   1a (intent): actionability + change_type + layers + domain_concepts
     #      (no anchor reasoning, no project context).
@@ -91,12 +98,16 @@ class VariantFlags:
 
     @classmethod
     def v0(cls) -> "VariantFlags":
+        # 3.6 dedup and 3.7 plausibility run universally on
+        # every variant. 3.5 score floor stays gated on the cross-encoder
+        # (V3+) because it depends on a meaningful raw_reranker_score that
+        # V0-V2 do not produce.
         return cls(
             variant_id="V0",
             enable_bm25=True, enable_dense=False, enable_rrf=False,
             enable_cross_encoder=False,
             enable_score_floor=False,
-            enable_dedup_gate=False, enable_plausibility_gate=False,
+            enable_dedup_gate=True, enable_plausibility_gate=True,
             enable_sis_validation=False, enable_trace_validation=False,
             enable_bfs=False, enable_propagation_validation=False,
         )
@@ -108,7 +119,7 @@ class VariantFlags:
             enable_bm25=False, enable_dense=True, enable_rrf=False,
             enable_cross_encoder=False,
             enable_score_floor=False,
-            enable_dedup_gate=False, enable_plausibility_gate=False,
+            enable_dedup_gate=True, enable_plausibility_gate=True,
             enable_sis_validation=False, enable_trace_validation=False,
             enable_bfs=False, enable_propagation_validation=False,
         )
@@ -120,7 +131,7 @@ class VariantFlags:
             enable_bm25=True, enable_dense=True, enable_rrf=True,
             enable_cross_encoder=False,
             enable_score_floor=False,
-            enable_dedup_gate=False, enable_plausibility_gate=False,
+            enable_dedup_gate=True, enable_plausibility_gate=True,
             enable_sis_validation=False, enable_trace_validation=False,
             enable_bfs=False, enable_propagation_validation=False,
         )
@@ -210,9 +221,9 @@ def with_anchor_priming(flags: VariantFlags, value: bool) -> VariantFlags:
     """Return a copy of ``flags`` with ``anchor_priming`` set to ``value``.
 
     ``VariantFlags`` is frozen, so this wraps ``dataclasses.replace``. Used by
-    the Amendment 1 before-and-after ablation: ``with_anchor_priming(flags,
-    False)`` reproduces the pre-amendment baseline, ``True`` is the post-
-    amendment default.
+    the anchor-priming before-and-after ablation: ``with_anchor_priming(flags,
+    False)`` reproduces the baseline without anchor extraction, ``True`` is
+    the production default.
     """
     return replace(flags, anchor_priming=value)
 
@@ -220,8 +231,8 @@ def with_anchor_priming(flags: VariantFlags, value: bool) -> VariantFlags:
 def with_two_stage_interpret(flags: VariantFlags, value: bool) -> VariantFlags:
     """Return a copy of ``flags`` with ``two_stage_interpret`` set to ``value``.
 
-    Used by the Amendment 3 before-and-after ablation:
+    Used by the two-stage-vs-single-stage ablation:
     ``with_two_stage_interpret(flags, False)`` reproduces the single-stage
-    LLM #1 (pre-Amendment-3 behaviour), ``True`` is the new default.
+    LLM #1 behaviour, ``True`` is the production default.
     """
     return replace(flags, two_stage_interpret=value)

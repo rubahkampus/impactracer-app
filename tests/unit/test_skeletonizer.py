@@ -1,6 +1,6 @@
 """Tests for skeletonizer.py — fold-rule acceptance criteria.
 
-Sprint 4. Blueprint §3.3.
+Blueprint §3.3.
 """
 
 from tree_sitter_languages import get_parser

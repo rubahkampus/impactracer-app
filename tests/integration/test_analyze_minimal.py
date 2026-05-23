@@ -160,9 +160,9 @@ def test_llm_calls_count_v3(tmp_path):
     # Isolated settings: same DB/chroma as production, but a fresh audit log
     isolated_audit = tmp_path / "llm_audit.jsonl"
     settings = Settings(llm_audit_log_path=str(isolated_audit))  # type: ignore[call-arg]
-    # Amendment 3 splits LLM #1 into 2 calls (interpret_intent +
+    # Two-stage interpretation splits LLM #1 into 2 calls (interpret_intent +
     # interpret_anchors) when two_stage_interpret is True (the default).
-    # This test asserts the LEGACY 2-call invariant for V3, so disable
+    # This test asserts the SINGLE-STAGE 2-call invariant for V3, so disable
     # two-stage explicitly.
     from impactracer.evaluation.variant_flags import with_two_stage_interpret
     flags = with_two_stage_interpret(VariantFlags.v3(), False)

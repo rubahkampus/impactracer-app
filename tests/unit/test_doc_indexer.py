@@ -1,4 +1,4 @@
-"""Acceptance tests for Sprint 3 — doc_indexer.py (FR-A1, FR-A2).
+"""Acceptance tests for doc_indexer.py (FR-A1, FR-A2).
 
 Blueprint reference: master_blueprint.md §3.1.
 """

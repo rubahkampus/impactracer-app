@@ -1,4 +1,4 @@
-"""Unit tests for Apex Crucible Proposal C — graph_rerank.
+"""Unit tests for graph_rerank (Step 3 optional extension).
 
 Verifies the 2-iteration label propagation lifts structurally-connected
 candidates and admits new graph-discovered nodes in mode B.

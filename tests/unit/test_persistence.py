@@ -1,4 +1,4 @@
-"""Sprint 2 acceptance tests: SQLite schema and ChromaDB collection initialization."""
+"""Acceptance tests for SQLite schema and ChromaDB collection initialization."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ _ALL_NODE_TYPES = (
     "ExternalPackage", "InterfaceField",
 )
 
-_ALL_EDGE_TYPES = tuple(EDGE_CONFIG.keys())  # 14 canonical values (Sprint 7.75: +CONTAINS)
+_ALL_EDGE_TYPES = tuple(EDGE_CONFIG.keys())  # 14 canonical values (incl. CONTAINS)
 
 
 def _fresh_conn() -> sqlite3.Connection:
@@ -144,7 +144,7 @@ def test_all_14_edge_types_accepted() -> None:
 
 
 def test_edge_config_has_exactly_14_entries() -> None:
-    """EDGE_CONFIG must define exactly 14 edge types (Sprint 7.75: +CONTAINS)."""
+    """EDGE_CONFIG must define exactly 14 edge types (13 + CONTAINS)."""
     assert len(EDGE_CONFIG) == 14
 
 

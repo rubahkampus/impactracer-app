@@ -1,4 +1,4 @@
-"""Project-skeleton extraction (Amendment 3, S1).
+"""Project-skeleton extraction (consumed by LLM #1, Step 1).
 
 Produces a token-budgeted textual summary of the indexed codebase that
 LLM #1 can use to ground its anchor-candidate guesses in real project
@@ -20,7 +20,7 @@ The skeleton contains four sections, in order:
 Section 4 is the most valuable for anchor extraction; section 3
 disambiguates camelCase functions from PascalCase classes.
 
-Reference: docs/evaluation_protocol.md §4 Amendment 3.
+Reference: docs/evaluation_protocol.md §4.
 """
 
 from __future__ import annotations

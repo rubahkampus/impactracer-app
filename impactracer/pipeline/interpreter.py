@@ -6,7 +6,7 @@ Two execution modes share one return shape (:class:`CRInterpretation`):
   schema. Controlled by ``variant_flags.anchor_priming`` for whether
   ``anchor_candidates`` is populated.
 
-  Two-stage (Amendment 3, default-on via ``variant_flags.two_stage_
+  Two-stage (default-on via ``variant_flags.two_stage_
   interpret``): one cheap LLM call extracts intent (:class:`CRIntent`);
   a second call receives the stage-1 output plus the cached project
   skeleton and extracts anchors + search queries (:class:`CRAnchors`).
@@ -128,7 +128,7 @@ Return valid JSON matching the schema exactly.
 """
 
 
-_ANCHOR_CANDIDATES_ON_BLOCK = """For anchor_candidates (Amendment 1), the CR may PROPOSE a new function,
+_ANCHOR_CANDIDATES_ON_BLOCK = """For anchor_candidates, the CR may PROPOSE a new function,
 component, or page using imperative verbs ("Tambah", "Refactor",
 "Implementasi", "Add", "Replace"). When that happens, list 1 to 3 bare
 identifier names of likely HOST or SIBLING symbols in the existing
@@ -167,7 +167,7 @@ _ANCHOR_CANDIDATES_OFF_SCHEMA_LINE = (
 
 
 def _build_system_prompt(anchor_priming: bool) -> str:
-    """Assemble the LLM #1 system prompt for the requested baseline."""
+    """Assemble the LLM #1 single-stage system prompt."""
     if anchor_priming:
         block = _ANCHOR_CANDIDATES_ON_BLOCK
         schema_line = _ANCHOR_CANDIDATES_ON_SCHEMA_LINE
@@ -207,7 +207,7 @@ def interpret_cr_single_stage(
 
 
 # ----------------------------------------------------------------------
-# Amendment 3: two-stage interpretation
+# Two-stage interpretation (intent + project-grounded anchors)
 # ----------------------------------------------------------------------
 
 
@@ -238,7 +238,9 @@ SCHEMA CONSTRAINTS:
 - is_actionable: boolean
 - actionability_reason: string or null
 - primary_intent: string (use "" when not actionable)
-- change_type: one of "ADDITION", "MODIFICATION", "DELETION"
+- change_type: one of "ADDITION", "MODIFICATION", "DELETION".
+  REQUIRED even when is_actionable=false; default to "MODIFICATION" when
+  no clear change action can be extracted. Never emit an empty string.
 - affected_layers: list of "requirement"/"design"/"code"
 - domain_concepts: list of 1-30 strings, minimum 1 even when not actionable
 - is_nfr: boolean

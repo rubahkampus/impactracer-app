@@ -487,7 +487,7 @@ def run_indexing(
     )
     logger.info("Traceability pairs stored: {}", pairs_stored)
 
-    # ── Step 8.5: project-skeleton extraction (Amendment 3) ───────────────────
+    # ── Project-skeleton extraction (consumed by LLM #1 Step 1) ──────────────
     # Build the cached textual summary the two-stage interpreter feeds to
     # LLM #1. Deterministic given the current index state.
     write_project_skeleton(conn, Path(settings.project_skeleton_path))

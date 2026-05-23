@@ -17,17 +17,17 @@
 - `impactracer/pipeline/llm_client.py` (OpenRouter transport, audit log)
 - `impactracer/pipeline/interpreter.py` (LLM #1 wrapper)
 - `impactracer/pipeline/synthesizer.py` (LLM #5 wrapper)
-- `impactracer/pipeline/graph_rerank.py` (Apex Crucible Proposal C, default-disabled — Sprint 15)
+- `impactracer/pipeline/graph_rerank.py` (graph-aware rerank, default-disabled)
 - `impactracer/evaluation/variant_flags.py` (canonical 8 variants V0..V7)
 
-**Sprint 14+15+16 additions** (canonical post-Apex-Crucible architecture):
+**Canonical architecture additions** beyond the original blueprint:
 - LLM #1 emits an additional `layered_search_queries` field (5 layers × 1–2 phrases) consumed by the retriever as a first-class RRF path.
 - The synthesizer's `impacted_entities` list is HARD-FILTERED to qualified `file::symbol` entries only (File-type nodes never appear). File-type CIS nodes still drive `impacted_files`.
 - `TYPED_BY` is no longer in `PROPAGATION_VALIDATION_EXEMPT_EDGES`; depth-1 TYPED_BY now goes through LLM #4.
-- A new **Step 7.5 — Sibling Promotion** runs between LLM #4 and synthesis. For each anchor with `justification_source='llm2_sis'` AND a non-empty `mechanism_of_impact` (the Sprint 16 anchor mechanism gate), an LLM-#4-style "validate_siblings" call enumerates file-local CONTAINS siblings and admits up to 4 per file.
-- Proposal C (graph-aware label-propagation rerank) is implemented but **default-disabled** after the Sprint 15 postmortem. Re-enable via `Settings.enable_graph_rerank=True` or `GRAPH_RERANK_ALPHA=...` env var.
+- A new **Step 7.5 — Sibling Promotion** runs between LLM #4 and synthesis. For each anchor with `justification_source='llm2_sis'` AND a non-empty `mechanism_of_impact`, an LLM-#4-style "validate_siblings" call enumerates file-local CONTAINS siblings and admits up to 4 per file.
+- Graph-aware label-propagation rerank is implemented but **default-disabled**. Re-enable via `Settings.enable_graph_rerank=True` or `GRAPH_RERANK_ALPHA=...` env var.
 
-**Canonical calibration result (post-Sprint-17 final sweep, `eval/results_final_sweep/`):** V7 entity F1 = 0.232, V7 file F1 = 0.284 on the 5-CR calibration set. V5 leads V7 by 0.040 on entity F1 in this single calibration draw, well within the ±0.04 LLM-stochasticity band documented across runs. The pre-registered Wilcoxon test (V7 vs V5, one-sided paired, entity-level `f1_set`) is correctly deferred at n=5 < MIN_PAIRED_N=15 and defers to the held-out 20-CR evaluation set. Earlier reference points across iterations: Sprint 13-W2 V7 = 0.200 (retrieval-only baseline); Sprint 14 V4 = 0.252 (Apex Proposals A+B); Sprint 16 = 0.263 (anchor mechanism gate). The post-Sprint-17 full-pool cross-encoder regime lifts V4/V5/V6 consistently (V5 entity F1 = 0.272 here vs 0.181 at Sprint 13-W2) while V7 sits within run-to-run noise of the V4-Canonical baseline.
+For the timeline of how these reached the current canonical state, see `implementation_report.md`.
 
 ---
 
@@ -79,7 +79,7 @@ Forward slashes in all node IDs and file paths, even on Windows. `pathlib.Path.a
 
 ## 2. Architectural Invariants (Non-Negotiable)
 
-1. **Five primary LLM invocations in V7.** Names: `interpret`, `validate_sis`, `validate_trace`, `validate_propagation`, `synthesize`. Step 7 additionally runs an internal child-validation call (`validate_collapsed_children`, parameterised with the same LLM #4 prompt) for collapsed children. Step 7.5 (Sprint 14+) runs `validate_siblings` micro-batches, one per file with a qualifying anchor — also parameterised from the LLM #4 module. Per-CR LLM call counts can therefore exceed 5 in practice (typically 5–25 distinct calls including child + sibling batches), but the **five canonical stage names** remain the architectural contract.
+1. **Five primary LLM invocations in V7.** Names: `interpret`, `validate_sis`, `validate_trace`, `validate_propagation`, `synthesize`. Step 7 additionally runs an internal child-validation call (`validate_collapsed_children`, parameterised with the same LLM #4 prompt) for collapsed children. Step 7.5 runs `validate_siblings` micro-batches, one per file with a qualifying anchor — also parameterised from the LLM #4 module. Per-CR LLM call counts can therefore exceed 5 in practice (typically 5–25 distinct calls including child + sibling batches), but the **five canonical stage names** remain the architectural contract.
 2. **Deterministic structural pipeline.** AST extraction, embedding, RRF fusion, BFS propagation, and all three gates produce bit-identical output on identical input. Determinism in LLM steps is enforced by `temperature=0`, `seed=42`, Pydantic `response_schema`.
 3. **All LLM outputs are Pydantic-schema-constrained** via `LLMClient.call(response_schema=...)`. Never free-form text. Every schema inherits from `TruncatingModel` (in `shared/models.py`).
 4. **3 `change_type` values only:** `ADDITION`, `MODIFICATION`, `DELETION`. Uppercase, no others.
@@ -174,7 +174,7 @@ Emit **14 edge types**. Pass 2 runs after Pass 1 has populated `code_nodes` for 
 
 These depths and directions are encoded in `shared/constants.py::EDGE_CONFIG`. Use that constant; never hard-code per-edge BFS rules elsewhere.
 
-**LLM #4 auto-exempt edges:** depth-1 IMPLEMENTS and DEFINES_METHOD skip propagation validation. They receive a synthetic justification `"Direct <edge> contract from <seed> — auto-admitted exempt edge."`. **Sprint 14 (Apex Crucible Proposal A) removed TYPED_BY from this set** — on the citrakara calibration set, auto-exempt TYPED_BY admissions produced 10 of 28 V7 false positives on CR-01. LLM #4 now adjudicates depth-1 TYPED_BY on the same footing as deeper propagation chains.
+**LLM #4 auto-exempt edges:** depth-1 IMPLEMENTS and DEFINES_METHOD skip propagation validation. They receive a synthetic justification `"Direct <edge> contract from <seed> — auto-admitted exempt edge."`. `TYPED_BY` is intentionally NOT in this set — auto-exempt TYPED_BY admissions historically produced too many false positives, so LLM #4 adjudicates depth-1 TYPED_BY on the same footing as deeper propagation chains.
 
 **File classification (path glob, first match wins):**
 
@@ -279,7 +279,7 @@ change_type: ADDITION | MODIFICATION | DELETION
 affected_layers: list[Literal["requirement", "design", "code"]]
 domain_concepts: list[str]
 search_queries: list[str]                              # English even when CR is Indonesian
-layered_search_queries: dict[str, list[str]] | None    # Sprint 14 (Apex Crucible Proposal B)
+layered_search_queries: dict[str, list[str]] | None    # per-layer query grid
 named_entry_points: list[str]
 out_of_scope_operations: list[str]
 is_nfr: bool
@@ -293,13 +293,13 @@ If `is_actionable=False`, the runner short-circuits to a minimal rejection Impac
 
 `pipeline/retriever.py::hybrid_search(cr_interp, ctx, settings, cr_text)`.
 
-Five ranked lists are assembled (the fifth was added in Sprint 14 / Apex Crucible Proposal B), then RRF-fused:
+Five ranked lists are assembled, then RRF-fused:
 
 1. **dense_doc** — `BGE-M3 embedding × ChromaDB doc_chunks` (filtered by `doc_filter` derived from `affected_layers`).
 2. **bm25_doc** — `rank_bm25` over chunked SRS/SDD. Tokenizer: camelCase split, length ≥ 2, English + Indonesian stop-word list.
 3. **dense_code** — `BGE-M3 embedding × ChromaDB code_units` (when `"code" ∈ affected_layers`).
 4. **bm25_code** — `rank_bm25` over code embed_text.
-5. **layered_code** — Apex Crucible Proposal B. For each canonical layer (`api_route, page_component, ui_component, utility, type_definition`), run that layer's queries (dense + BM25) against the code collection scoped by `file_classification` metadata. Up to `settings.per_layer_top_k = 12` candidates per layer feed the merged `layered_code` path. Guarantees no architectural layer is starved when LLM #1's flat `search_queries` are biased toward one plane (e.g. CR text emphasises service-layer concepts but the actual GT is UI form components).
+5. **layered_code** — Per-layer code retrieval. For each canonical layer (`api_route, page_component, ui_component, utility, type_definition`), run that layer's queries (dense + BM25) against the code collection scoped by `file_classification` metadata. Up to `settings.per_layer_top_k = 12` candidates per layer feed the merged `layered_code` path. Guarantees no architectural layer is starved when LLM #1's flat `search_queries` are biased toward one plane (e.g. CR text emphasises service-layer concepts but the actual GT is UI form components).
 
 The `dense_code` path additionally:
 
@@ -334,11 +334,11 @@ The cross-encoder scores the **full RRF pool** (~200 candidates) on every varian
 
 Post-rerank score adjustments:
 - **Traceability bonus** (+0.10) on `raw_reranker_score` for code candidates that any retrieved doc-chunk traceability-links to.
-- **Negative filter** (additive −1.0 on `raw_reranker_score`, name-only match, needle ≥ 6 chars) for candidates whose name contains an entry from `cr_interp.out_of_scope_operations`. Additive — multiplicative would invert sign on negative logits and inadvertently promote out-of-scope candidates. **Sprint 14 softened from −5.0 to −1.0 (name-only, ≥6-char needles)** after CR-02 forensics showed LLM #1's verbose post-Apex output listed phrases like "default grace period calculation" as out-of-scope, and the −5.0 / name-or-snippet filter crushed legitimate "grace period" candidates.
+- **Negative filter** (additive −1.0 on `raw_reranker_score`, name-only match, needle ≥ 6 chars) for candidates whose name contains an entry from `cr_interp.out_of_scope_operations`. Additive — multiplicative would invert sign on negative logits and inadvertently promote out-of-scope candidates. The current parameters (−1.0 penalty, name-only matching, needle ≥ 6 chars) were chosen to avoid crushing legitimate matches: an earlier −5.0 penalty with name-or-snippet matching incorrectly demoted CR-02 candidates whose snippets contained out-of-scope vocabulary as substrings.
 
 A `step_3_reranked_full` trace key captures the full ranked pool before the `max_admitted_seeds` truncation; it is consumed by `tools/diagnose_k_widening.py` for the post-hoc rank-bucket analysis reported in the K-widening empirical study.
 
-**Apex Crucible Proposal C (default-disabled, Sprint 15):** when `settings.enable_graph_rerank = True`, a 2-iteration label-propagation rerank inserts between the cross-encoder and the top-K truncation. Graph propagation blends a structural signal via `α * cross_encoder_norm + (1-α) * graph_norm`; Mode B optionally adds graph-discovered candidates not in the original RRF pool. Disabled by default because no α value won both entity-F1 and file-F1 on the citrakara calibration set — the structural graph lacks form↔schema edges (form components fetch via API + Zod parse, severing the path Proposal C would exploit). Code preserved for codebases with denser structural coupling.
+**Graph-aware rerank (default-disabled):** when `settings.enable_graph_rerank = True`, a 2-iteration label-propagation rerank inserts between the cross-encoder and the top-K truncation. Graph propagation blends a structural signal via `α * cross_encoder_norm + (1-α) * graph_norm`; Mode B optionally adds graph-discovered candidates not in the original RRF pool. Disabled by default because no α value won both entity-F1 and file-F1 on the target codebase's calibration set — its structural graph lacks form↔schema edges (form components fetch via API + Zod parse, severing the path graph rerank would exploit). Code preserved for codebases with denser structural coupling.
 
 ### Step 3.5 / 3.6 / 3.7 — Pre-Validation Gates (FR-C4)
 
@@ -418,17 +418,17 @@ The prompt shows the causal chain as factual context but forbids edge-type-as-ev
 
 **Fail-CLOSED** at per-node, per-batch, and per-child-batch levels.
 
-### Step 7.5 — Sibling Promotion (Sprint 14 Apex Crucible Proposal A)
+### Step 7.5 — Sibling Promotion
 
 `pipeline/traversal_validator.py::validate_siblings_for_file` driven by `runner.py`. Runs only when `variant_flags.enable_propagation_validation` is True (V7) AND `settings.enable_sibling_promotion = True` (default True).
 
-**Purpose:** recover GT entities that live in files where another entity is already in the validated CIS — the dominant pre-Apex failure mode on the calibration set (7 of 8 missed entities on CR-01 lived in files we'd already partially named).
+**Purpose:** recover GT entities that live in files where another entity is already in the validated CIS — a documented failure mode where many missed entities lived in files the pipeline had already partially named.
 
-**Anchor selection** (Sprint 16 — Option 1): an anchor qualifies for sibling promotion only if it is in `sis_justifications` AND its LLM #2 verdict has a non-empty `mechanism_of_impact` string. The rationale is that an articulate LLM #2 mechanism gives the sibling-batch prompt a real contract surface to reason from; an empty mechanism causes the sibling LLM to generalise by domain analogy and over-admit (the CR-04 escrow-CRUD blowout in Apex V2). Propagated nodes (justified by LLM #4) and trace-resolved nodes (justified by LLM #3) are deliberately excluded — they go through Step 7's existing validation gates but do not anchor lateral expansion.
+**Anchor selection:** an anchor qualifies for sibling promotion only if it is in `sis_justifications` AND its LLM #2 verdict has a non-empty `mechanism_of_impact` string. The rationale is that an articulate LLM #2 mechanism gives the sibling-batch prompt a real contract surface to reason from; an empty mechanism causes the sibling LLM to generalise by domain analogy and over-admit. Propagated nodes (justified by LLM #4) and trace-resolved nodes (justified by LLM #3) are deliberately excluded — they go through Step 7's existing validation gates but do not anchor lateral expansion.
 
 **File-local sibling collection** (`graph_bfs.py::collect_file_local_siblings`): for each qualifying anchor, query `code_nodes` for all qualified (`::`-bearing) symbols in the same file with `node_type ∈ {Function, Method, Interface, TypeAlias, Enum, Class, Variable}`. `InterfaceField` is excluded (already collapsed in Step 6.5; never in GT). Per-file candidate cap `settings.sibling_promotion_max_per_file = 12`.
 
-**Sibling validation** (`validate_siblings_for_file`): one LLM call per file with siblings. The prompt receives every CR-validated anchor in that file (multi-anchor batch — Sprint 14 V2 fix) plus their justifications, then asks the LLM to admit/reject each sibling based on whether it must change to coherently support the CR. Per-file admission cap `settings.sibling_admit_max_per_file = 4`. No per-CR global cap (`sibling_admit_max_per_cr = 0` disabled — Sprint 14 V4 tuning).
+**Sibling validation** (`validate_siblings_for_file`): one LLM call per file with siblings. The prompt receives every CR-validated anchor in that file (multi-anchor batch) plus their justifications, then asks the LLM to admit/reject each sibling based on whether it must change to coherently support the CR. Per-file admission cap `settings.sibling_admit_max_per_file = 4`. No per-CR global cap (`sibling_admit_max_per_cr = 0` disabled).
 
 **Fail-CLOSED:** per-sibling missing verdict → DROP that sibling; batch exception → DROP the entire file's batch, continue.
 
@@ -470,7 +470,7 @@ file_justifications: list[FileJustificationItem]  # one row per file in the cano
 
 LLM #5 NEVER produces an `impacted_entities` array. The runner reconciles `file_justifications` against the deterministic file set: hallucinated files are dropped silently; omitted files receive a deterministic fallback summarising the entity-level justifications inside that file.
 
-**Sprint 14 (Apex Crucible Proposal A) — File-type filter:** `build_deterministic_impacted_entities` skips every CIS node whose `node_type == "File"` or whose `node_id` lacks `::`. GT's `impacted_entities` only contains qualified `file::symbol` ids; emitting bare File nodes was producing 24/30 V7 predictions on CR-01 as guaranteed FPs. File-level impact is captured separately in `impacted_files` (which still receives the file_path of every File-type CIS node via `extra_impacted_file_paths`).
+**File-type filter:** `build_deterministic_impacted_entities` skips every CIS node whose `node_type == "File"` or whose `node_id` lacks `::`. GT's `impacted_entities` only contains qualified `file::symbol` ids; emitting bare File nodes there would produce guaranteed FPs under exact-set scoring. File-level impact is captured separately in `impacted_files` (which still receives the file_path of every File-type CIS node via `extra_impacted_file_paths`).
 
 **Fail-closed:** if `LLMClient.call` raises after retry exhaustion, the runner falls back to `build_minimal_summary` (deterministic; `degraded_run=True`). `impacted_entities` and `impacted_files` are emitted regardless — they exist independently of LLM #5.
 
@@ -662,10 +662,10 @@ traceability_seed_top_k_per_doc  = 5
 traceability_seed_min_score      = 0.40
 traceability_seed_synthetic_rank = 5
 
-# Apex Crucible Proposal B (Sprint 14) — per-layer code retrieval
+# Step 2 — per-layer code retrieval
 per_layer_top_k                  = 12
 
-# Apex Crucible Proposal C (Sprint 15) — graph-aware rerank (default off)
+# Step 3 — graph-aware rerank (default off)
 enable_graph_rerank                  = False
 graph_rerank_alpha                   = 0.7
 graph_rerank_iterations              = 2
@@ -673,7 +673,7 @@ graph_rerank_personalization_top_n   = 5
 graph_rerank_add_top_n               = 10
 graph_rerank_add_min_score           = 0.10
 
-# Apex Crucible Proposal A (Sprint 14) — sibling promotion (Step 7.5)
+# Step 7.5 — sibling promotion
 enable_sibling_promotion             = True
 sibling_promotion_max_per_file       = 12       # candidate ceiling per file
 sibling_admit_max_per_file           = 4        # admission ceiling per file

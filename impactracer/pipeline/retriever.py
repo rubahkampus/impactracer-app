@@ -18,7 +18,7 @@ from impactracer.shared.constants import RRF_PATH_WEIGHTS
 from impactracer.shared.models import Candidate, CRInterpretation
 
 
-# Apex Crucible Proposal B: canonical layer keys. These match exactly the
+# Canonical layer keys for per-layer retrieval. These match exactly the
 # FileClassification literal in models.py (lowercased). The interpreter's
 # `layered_search_queries` dict must key on these strings.
 _CANONICAL_LAYERS: tuple[str, ...] = (
@@ -124,7 +124,7 @@ def apply_negative_filter(
 ) -> list[Candidate]:
     """Additive demotion for out-of-scope candidates.
 
-    Apex Crucible V2: penalty softened from -5.0 to -1.0 after forensic
+    Penalty softened from -5.0 to -1.0 after forensic
     analysis on CR-02 showed LLM #1 emits phrases like "default grace period
     calculation" as out_of_scope_operations. The substring "grace period"
     matches every GT-relevant candidate, and -5.0 crushed them out of the
@@ -140,7 +140,7 @@ def apply_negative_filter(
     """
     if not out_of_scope_operations or not candidates:
         return candidates
-    # Apex V2: require >=3 chars and reject overly generic phrases.
+    # Require >=3 chars and reject overly generic phrases.
     needles = [op.lower() for op in out_of_scope_operations if op and len(op) >= 6]
     if not needles:
         return candidates
@@ -211,7 +211,7 @@ def apply_traceability_bonus(
         boosted.add(code_id)
     if boosted:
         logger.info(
-            "[retriever] Traceability bonus (Fix 12.2) +{:.2f} applied to {} "
+            "[retriever] Traceability bonus +{:.2f} applied to {} "
             "code candidates linked from {} retrieved doc chunks",
             bonus, len(boosted), len(doc_ids),
         )
@@ -389,17 +389,24 @@ def hybrid_search(
     for downstream reranking. The reranker then selects up to
     settings.max_admitted_seeds from this pool.
 
-    Sprint 13-W2 additions (apply only when the dense path is enabled):
-      - **2B raw-CR dense pass**: if ``cr_text`` is provided and
+    Optional extensions (apply only when the dense path is enabled):
+      - **Raw-CR dense pass**: if ``cr_text`` is provided and
         ``settings.enable_raw_cr_dense_pass``, runs one extra dense query
         against the code collection using the raw multilingual CR text and
         merges results into the dense_code ranked list. BGE-M3 bridges the
         Indonesian-CR ↔ English-identifier gap directly.
-      - **2C traceability pool seeding**: if ``settings.enable_traceability_pool_seeding``,
+      - **Traceability pool seeding**: if ``settings.enable_traceability_pool_seeding``,
         after dense_doc retrieves doc chunks, the offline traceability matrix
         seeds code-node neighbours of those chunks into the RRF pool with a
         synthetic rank. Promotes the offline precomputation from a +0.1
         rerank bonus to a pool-membership signal.
+      - **Anchor-priming BM25 boost**: when ``cr_interp.anchor_candidates``
+        is non-empty and ``settings.anchor_priming_bm25_boost > 1.0``, each
+        anchor identifier is fed through the BM25 index as an extra query
+        whose contribution is scaled by ``(boost - 1.0)``. Surfaces
+        anchor-matching code identifiers earlier in the bm25_code path
+        before RRF fusion. Complements the score-floor boost applied to
+        anchor_candidates downstream.
     """
     flags = ctx.variant_flags
     top_k = settings.top_k_per_query
@@ -496,7 +503,7 @@ def hybrid_search(
                 if cid not in seen_dc or seen_dc[cid] < cos:
                     seen_dc[cid] = cos
 
-        # ---- Sprint 13-W2B: raw-CR multilingual bridge --------------
+        # ---- Raw-CR multilingual bridge --------------
         # Embed the full CR text once and ask the code collection for its
         # nearest neighbours. BGE-M3 is multilingual, so an Indonesian CR
         # reaches English-identifier code without going through LLM #1.
@@ -546,13 +553,38 @@ def hybrid_search(
                 cid = ctx.code_bm25_ids[i]
                 if cid not in seen_bc or seen_bc[cid] < score:
                     seen_bc[cid] = score
+
+        # Anchor-priming BM25 boost. Each anchor_candidate identifier is
+        # fed through the BM25 index as an extra query whose max-score
+        # contribution is multiplied by ``anchor_priming_bm25_boost - 1.0``
+        # (default 0.5, equivalent to a 1.5x boost factor). This lifts
+        # code identifiers that share tokens with the anchor candidates
+        # earlier into the bm25_code ranking, complementing the score-
+        # floor boost applied to anchor_candidates downstream.
+        bm25_anchor_boost = float(getattr(settings, "anchor_priming_bm25_boost", 1.5))
+        anchor_candidates = list(getattr(cr_interp, "anchor_candidates", []) or [])
+        if bm25_anchor_boost > 1.0 and anchor_candidates:
+            extra_weight = bm25_anchor_boost - 1.0
+            for anchor in anchor_candidates:
+                tokens = _tokenize_for_bm25(anchor)
+                if not tokens:
+                    continue
+                raw_scores = ctx.code_bm25.get_scores(tokens)
+                for i, score in enumerate(raw_scores):
+                    if score <= 0:
+                        continue
+                    cid = ctx.code_bm25_ids[i]
+                    boosted = score * extra_weight
+                    if cid not in seen_bc or seen_bc[cid] < boosted:
+                        seen_bc[cid] = max(seen_bc.get(cid, 0.0), boosted)
+
         bm25_code_ids = sorted(seen_bc, key=seen_bc.__getitem__, reverse=True)[:top_k]
         for cid in bm25_code_ids:
             bm25_scores_map[cid] = max(bm25_scores_map.get(cid, 0.0), seen_bc[cid])
         logger.debug("[retriever] bm25_code: {} candidates", len(bm25_code_ids))
 
     # -------------------------------------------------------------------
-    # Apex Crucible Proposal B: per-layer code retrieval
+    # Per-layer code retrieval
     # For each (architectural layer, set of layer-targeted queries) pair,
     # run dense + BM25 against the code collection scoped to that layer
     # via the file_classification metadata. This guarantees that every
@@ -671,7 +703,7 @@ def hybrid_search(
             )
 
     # -------------------------------------------------------------------
-    # Sprint 13-W2C: traceability-matrix pool seeding
+    # Traceability-matrix pool seeding
     # -------------------------------------------------------------------
     # Inject code-nodes that the offline doc<->code traceability matrix
     # links to any retrieved doc-chunk into the dense_code ranked list. This
@@ -737,7 +769,7 @@ def hybrid_search(
     if bm25_code_ids:
         ranked_lists.append(("bm25_code", bm25_code_ids))
     if layered_code_ids:
-        # Apex Crucible Proposal B: per-layer code retrieval as a first-class
+        # Per-layer code retrieval as a first-class
         # path. RRF weight defaults to 1.0 for unknown labels — parity with
         # the other code paths is intentional.
         ranked_lists.append(("layered_code", layered_code_ids))

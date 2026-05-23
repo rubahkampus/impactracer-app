@@ -107,7 +107,7 @@ def build_deterministic_impacted_entities(
     rows: list[ImpactedEntity] = []
 
     for node_id, trace in combined.items():
-        # Apex Crucible Proposal A.1: GT's `impacted_entities` only contains
+        # GT's `impacted_entities` only contains
         # qualified `file::symbol` ids; emitting bare File nodes here is a
         # guaranteed FP under exact-set scoring. File-level impact is already
         # captured separately in `impacted_files`.
@@ -181,7 +181,7 @@ def derive_impacted_files(
             seen_order.append(fp)
         file_to_entities.setdefault(fp, []).append(ent)
 
-    # Apex Crucible A.1: File-type CIS nodes were filtered out of entities, but
+    # File-type CIS nodes are filtered out of entities, but
     # the files themselves are still part of impacted_files (GT scores file-level
     # separately). Append their paths if they aren't already covered.
     for fp in (extra_file_paths or []):

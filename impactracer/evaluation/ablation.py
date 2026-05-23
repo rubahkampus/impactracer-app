@@ -7,13 +7,13 @@ Each (CR, variant) row records both entity-level and file-level metrics.
 The output CSV feeds ``statistical.run_primary_test`` for the V7 vs V5
 Wilcoxon test on f1_set.
 
-Amendment 2: the harness instantiates one ``VariantCache`` per
-(cr_id, anchor_priming) tuple and passes it through to every variant.
-Cumulative pipeline boundaries (LLM #1, retrieval, rerank+gates, LLM #2,
-LLM #3, BFS+collapse, LLM #4) are then memoised so V_{n+1} resumes from
-V_n's cached output instead of recomputing.
+The harness instantiates one ``VariantCache`` per (cr_id, anchor_priming)
+tuple and passes it through to every variant. Cumulative pipeline
+boundaries (LLM #1, retrieval, rerank+gates, LLM #2, LLM #3, BFS+collapse,
+LLM #4) are then memoised so V_{n+1} resumes from V_n's cached output
+instead of recomputing.
 
-Reference: 09_ablation_harness.md; docs/evaluation_protocol.md Amendment 2.
+Reference: 09_ablation_harness.md; docs/evaluation_protocol.md.
 """
 
 from __future__ import annotations
@@ -42,11 +42,10 @@ def _extract_predicted(report) -> tuple[set[str], set[str]]:
         (the brief: "Extract file_path strings from the predicted
         impacted_files and compare against GT impacted_files").
 
-    Apex Crucible Proposal A.4: defensive filter against File-type leakage.
-    GT entities always carry a `::` qualifier; bare file paths in the entity
-    set are guaranteed FPs. The synthesizer should already filter these
-    (Proposal A.1) but we double-up here so replays of older runs benefit
-    too.
+    Defensive filter against File-type leakage. GT entities always carry
+    a `::` qualifier; bare file paths in the entity set are guaranteed
+    FPs. The synthesizer already filters these but we double-up here so
+    replays of older runs benefit too.
     """
     nodes = {
         e.node
@@ -88,7 +87,7 @@ def run_single_cr_all_variants(
     gt_nodes = gt_entry.entity_node_ids()
     gt_files = gt_entry.file_paths()
 
-    # Amendment 2: per-CR cache scoped by (run_tag, cr_id, anchor_priming).
+    # Per-CR cache scoped by (run_tag, cr_id, anchor_priming).
     # All eight variants on this CR share one VariantCache; intermediate
     # outputs computed by V_n are reused by V_{n+1}.
     variant_cache: VariantCache | None = None
@@ -136,6 +135,7 @@ def run_single_cr_all_variants(
                 "error": str(exc),
                 "elapsed_s": time.perf_counter() - t0,
                 "anchor_priming": flags.anchor_priming,
+                "code_only_mode": bool(getattr(settings, "code_only_mode", False)),
                 "f1_set": None,
                 "precision_set": None,
                 "recall_set": None,
@@ -173,6 +173,7 @@ def run_single_cr_all_variants(
             "analysis_mode": report.analysis_mode,
             "estimated_scope": report.estimated_scope,
             "anchor_priming": flags.anchor_priming,
+            "code_only_mode": bool(getattr(settings, "code_only_mode", False)),
             **metrics,
             # Promote the primary metrics to top-level for stat-test ease.
             "f1_set": metrics["entity_f1_set"],
@@ -220,7 +221,7 @@ def run_full_evaluation(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Amendment 2: variant-chain cache root + run_tag. Defaults to the same
+    # Variant-chain cache root + run_tag. Defaults to the same
     # output directory under a `cache` subfolder, with a fresh UTC timestamp
     # tag so cache trees never collide across runs.
     if cache_root is None:
@@ -253,8 +254,10 @@ def run_full_evaluation(
         "status", "elapsed_s",
         "n_impacted_nodes", "n_impacted_files",
         "degraded_run", "analysis_mode", "estimated_scope",
-        # Amendment 1: anchor-priming methodology flag per cell.
+        # Anchor-priming methodology flag per cell.
         "anchor_priming",
+        # Code-only sensitivity-analysis flag per cell.
+        "code_only_mode",
         # Entity-level
         "entity_precision_set", "entity_recall_set", "entity_f1_set",
         "entity_n_predicted", "entity_n_gt", "entity_n_intersect",

@@ -14,7 +14,7 @@ The cache must also tolerate full Candidate field surface, including
 ``anchor_boost_applied``. CISResult round-trip preserves NodeTrace
 metadata.
 
-Reference: ``docs/evaluation_protocol.md`` Amendment 2.
+Reference: ``docs/evaluation_protocol.md``.
 """
 
 from __future__ import annotations

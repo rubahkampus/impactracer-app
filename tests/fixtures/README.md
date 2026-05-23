@@ -1,9 +1,9 @@
 # Test Fixtures
 
 This directory houses the minimal reproducible test-bed used by the unit and
-integration suites. Populated progressively as sprints land.
+integration suites.
 
-Required structure (to be created by Sprint 3-5 fixture work):
+Required structure:
 
 ```
 fixtures/

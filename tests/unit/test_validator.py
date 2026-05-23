@@ -363,7 +363,7 @@ def test_validate_call_name_is_validate_sis():
 
 
 def test_validate_fail_closed_on_empty_verdicts():
-    """Crucible Fix 1 (FF-1): missing verdict -> DROP (was admit)."""
+    """Fail-closed: missing verdict -> DROP."""
     cr = _make_cr()
     candidates = [_make_code_candidate(node_id="fn1")]
     client = MagicMock()
@@ -375,7 +375,7 @@ def test_validate_fail_closed_on_empty_verdicts():
 
 
 def test_validate_fail_closed_per_node_partial_coverage():
-    """Crucible Fix 1 (FF-1): nodes with NO verdict are DROPPED (fail-closed)."""
+    """Fail-closed: nodes with NO verdict are DROPPED."""
     cr = _make_cr()
     c1 = _make_code_candidate(node_id="fn1")
     c2 = _make_code_candidate(node_id="fn2")
@@ -393,7 +393,7 @@ def test_validate_fail_closed_per_node_partial_coverage():
 
 
 def test_validate_batch_exception_drops_batch_continues():
-    """Crucible Amendment 1: batch exception -> drop batch, continue."""
+    """Batch exception -> drop batch, continue with next batch."""
     cr = _make_cr()
     # Two batches: 5 + 1. First raises, second succeeds.
     candidates = [_make_code_candidate(node_id=f"fn{i}") for i in range(6)]

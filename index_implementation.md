@@ -299,7 +299,7 @@ SHA-256 file hashes stored in the `file_hashes` table (absolute POSIX path as ke
 
 Root-level TS files with no `src/` ancestor (e.g. `jest.config.ts`) fall back to just the filename.
 
-### 7.2 Observed timings (citrakara, post Sprint 13-W1 reindex)
+### 7.2 Observed timings (citrakara, current production index)
 
 | Run | Trigger | Files reindexed | Elapsed |
 |---|---|---:|---|
@@ -395,7 +395,7 @@ Each annotated Change Request carries two independent GT sets:
 
 **Set-level only:** the primary metric is `f1_set` against the full unpruned predicted set, computed twice per CR per variant (entity-level and file-level). No `F1@K` exists anywhere in the codebase — bounded top-K metrics cannot distinguish a graph-flood result from a focused one and are therefore forbidden. The pre-registered Wilcoxon test (V7 vs V5) targets the **entity-level `f1_set`**.
 
-**Canonical calibration result** (post-Sprint-17 final sweep, `eval/results_final_sweep/`): V7 entity F1 = 0.232, V7 file F1 = 0.284 on the 5-CR calibration set; V5 entity F1 = 0.272 (with the full-pool cross-encoder regime lifting V5 substantially over its Sprint 13-W2 baseline of 0.181). The 5-CR sample is below the pre-registered Wilcoxon n=15 threshold and so V7-vs-V5 is reported descriptively pending the held-out 20-CR run. Full empirical attrition table, iteration history (Sprint 13-W2 → 14 V4 → 16 → final sweep), and mechanistic-signature analysis live in `analysis_implementation.md` §5.
+**Canonical calibration result**: see `analysis_implementation.md` §5 for the current calibration table and empirical attrition analysis. The pre-registered Wilcoxon test (V7 vs V5, entity-level `f1_set`) defers to the held-out evaluation set when calibration n is below the n=15 threshold.
 
 ---
 

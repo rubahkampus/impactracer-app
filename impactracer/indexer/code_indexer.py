@@ -2738,6 +2738,7 @@ def _walk_mongoose(
                                 if target:
                                     _emit_edge(source_id, target, "TYPED_BY", conn, counter)
 
+
     # Pattern 2: pair node `ref: 'ModelName'` inside a Schema object
     if node.type == "pair":
         key_node = node.child_by_field_name("key")

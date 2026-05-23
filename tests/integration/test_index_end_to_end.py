@@ -1,4 +1,4 @@
-"""Integration tests for the offline indexing pipeline (Sprint 7).
+"""Integration tests for the offline indexing pipeline.
 
 Tests run against:
 1. A small synthetic fixture repo (fast, no GPU needed — uses a stub embedder).

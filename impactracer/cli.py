@@ -152,7 +152,7 @@ def analyze(
 
     typer.echo(f"Analyzing CR with variant {variant_upper}...", err=True)
 
-    # Crucible E2E Task 2b: full-traceability dump.
+    # Full-traceability dump (per-step diagnostic trace).
     trace_sink: dict = {"cr_text": cr_text, "variant": variant_upper}
     report = run_analysis(
         cr_text=cr_text,
@@ -167,7 +167,7 @@ def analyze(
         encoding="utf-8",
     )
 
-    # Crucible E2E Task 2b: write the full step-by-step trace alongside.
+    # Write the full step-by-step trace alongside the impact report.
     full_path = output.with_name(output.stem + "_full.json")
     full_path.write_text(
         _json.dumps(trace_sink, indent=2, ensure_ascii=False, default=str),
@@ -199,9 +199,34 @@ def evaluate(
         True,
         "--anchor-priming/--no-anchor-priming",
         help=(
-            "Amendment 1 toggle: when True (default), LLM #1 extracts "
+            "Anchor-priming toggle: when True (default), LLM #1 extracts "
             "anchor_candidates and the score-floor gate applies a soft boost. "
-            "Pass --no-anchor-priming to reproduce the pre-amendment baseline."
+            "Pass --no-anchor-priming to reproduce the baseline without "
+            "anchor extraction."
+        ),
+    ),
+    code_only: bool = typer.Option(
+        False,
+        "--code-only/--with-docs",
+        help=(
+            "Sensitivity-analysis toggle: when set, disables every "
+            "documentation entry point (doc retrieval paths, traceability pool "
+            "seeding, and merged_doc_contexts attachment to LLM-2). Isolates "
+            "the contribution of SRS / SDD artefacts to the pipeline score. "
+            "Reported descriptively; not part of the pre-registered Wilcoxon "
+            "test."
+        ),
+    ),
+    graph_rerank: bool = typer.Option(
+        False,
+        "--graph-rerank/--no-graph-rerank",
+        help=(
+            "Graph-aware rerank (default off): blend cross-encoder scores "
+            "with personalised PageRank over the structural graph between "
+            "Step 3 and Step 3.5. Preserved for future codebases where the "
+            "structural graph more densely connects CR-described seeds to "
+            "GT files. Code path lives in "
+            "impactracer/pipeline/graph_rerank.py."
         ),
     ),
 ) -> None:
@@ -238,6 +263,13 @@ def evaluate(
     from impactracer.shared.config import get_settings
 
     settings = get_settings()
+    if code_only:
+        settings.code_only_mode = True
+        # Compose with the existing traceability toggle so the retriever sees
+        # the right value via the standard read site.
+        settings.enable_traceability_pool_seeding = False
+    if graph_rerank:
+        settings.enable_graph_rerank = True
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -270,6 +302,8 @@ def evaluate(
         f"\nLoaded {len(cr_dataset)} GT entries from {dataset}\n"
         f"Variants: {_VF.ALL_VARIANTS}\n"
         f"Anchor priming: {anchor_priming}\n"
+        f"Code-only mode: {code_only}\n"
+        f"Graph rerank : {graph_rerank}\n"
         f"Output  : {output_dir}\n",
         err=True,
     )
@@ -440,7 +474,7 @@ def _write_mock_gt(target_dir: Path) -> None:
 
 
 def _calibration_analysis(summary_df, long_df, stat_result: dict) -> str:
-    """Generate the written Data-Scientist analysis (Task 6 of Sprint 11+12).
+    """Generate the written Data-Scientist analysis (evaluation deliverable).
 
     Reads the actual numbers from summary_df / long_df / stat_result and
     answers the three pre-registered questions from the brief.

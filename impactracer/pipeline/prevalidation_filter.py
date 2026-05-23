@@ -52,7 +52,10 @@ def apply_prevalidation_gates(
         logger.debug("[gates] Step 3.5 DISABLED (enable_score_floor=False)")
 
     if enable_dedup:
-        candidates = step_3_6_semantic_dedup(candidates, conn)
+        attach_doc_contexts = not bool(getattr(settings, "code_only_mode", False))
+        candidates = step_3_6_semantic_dedup(
+            candidates, conn, attach_doc_contexts=attach_doc_contexts
+        )
         logger.info("[gates] Post-3.6 (semantic dedup): {} candidates", len(candidates))
     else:
         logger.debug("[gates] Step 3.6 DISABLED (enable_dedup=False)")
@@ -80,7 +83,7 @@ def step_3_5_score_filter(
 
     Falls back to 0.0 for V0–V2 where the reranker was not run.
 
-    Amendment 1: when ``cr_interp.anchor_candidates`` is non-empty, the
+    Anchor priming: when ``cr_interp.anchor_candidates`` is non-empty, the
     candidate's effective score receives an additive boost of ``anchor_boost``
     if its ``name`` substring-matches any anchor candidate (case-insensitive).
     The boost is SOFT: a candidate whose boosted score is still below the
@@ -102,7 +105,7 @@ def step_3_5_score_filter(
             return base + anchor_boost
         return base
 
-    # Sprint 19 Salvage Fix 1: candidates pinned by named_entry_points
+    # Candidates pinned by named_entry_points
     # bypass the score floor. The cross-encoder body-similarity score is
     # not a meaningful quality signal for files the CR text explicitly
     # names; the pin is a stronger signal of intent.
@@ -115,6 +118,7 @@ def step_3_5_score_filter(
 def step_3_6_semantic_dedup(
     candidates: list[Candidate],
     conn: sqlite3.Connection,
+    attach_doc_contexts: bool = True,
 ) -> list[Candidate]:
     """Merge doc chunks whose top-1 code resolution is already in the list.
 
@@ -123,6 +127,14 @@ def step_3_6_semantic_dedup(
     the doc chunk's ID to the code candidate's merged_doc_ids and also
     store the doc chunk's (section_title, text) in merged_doc_contexts so
     the LLM #2 validator prompt can inject it as "Business Context" (B1).
+
+    Code-only evaluation mode (``attach_doc_contexts=False``): the merge
+    behaviour is preserved (so the doc chunk is still dropped from the
+    candidate list to avoid duplicate scoring), but the
+    ``merged_doc_contexts`` field on the target code candidate is left
+    empty. LLM-2 therefore receives no Business Context block. Used by
+    the Sprint-24 supervisor experiment to isolate the documentation
+    contribution.
 
     Blueprint §4 Step 3.6.
     """
@@ -157,7 +169,7 @@ def step_3_6_semantic_dedup(
             result.append(c)
             continue
 
-        # Sprint 19 Salvage Fix 1: pinned doc chunks survive dedup.
+        # Pinned doc chunks survive dedup.
         if c.pinned_by_named_entry:
             result.append(c)
             continue
@@ -168,11 +180,12 @@ def step_3_6_semantic_dedup(
             target_code = code_candidate_idx[top1_code]
             target_code.merged_doc_ids.append(c.node_id)
 
-            # B1: carry (section_title, text) so the validator prompt can show
-            # "Business Context" explaining WHY this code node is relevant.
-            section_title = c.name or c.node_id
-            source_text = c.text_snippet or ""
-            target_code.merged_doc_contexts.append((section_title, source_text))
+            if attach_doc_contexts:
+                # B1: carry (section_title, text) so the validator prompt can show
+                # "Business Context" explaining WHY this code node is relevant.
+                section_title = c.name or c.node_id
+                source_text = c.text_snippet or ""
+                target_code.merged_doc_contexts.append((section_title, source_text))
 
             merged.add(c.node_id)
             logger.debug(
@@ -243,7 +256,7 @@ def step_3_7_plausibility_and_affinity(
             result.append(c)
             continue
 
-        # Sprint 19 Salvage Fix 1: pinned candidates bypass density gate.
+        # Pinned candidates bypass density gate.
         if c.pinned_by_named_entry:
             result.append(c)
             continue

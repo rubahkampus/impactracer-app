@@ -269,10 +269,10 @@ def run_analysis(
     # ------------------------------------------------------------------
     # Step 1 — Interpret CR (LLM #1, always-on)
     #
-    # Amendment 3: when variant_flags.two_stage_interpret is True AND a
-    # project-skeleton file is available on disk, LLM #1 is split into
-    # two calls (intent + project-grounded anchors). The cached
-    # CRInterpretation memoises the glued result so V1-V7 share it.
+    # When variant_flags.two_stage_interpret is True AND a project-skeleton
+    # file is available on disk, LLM #1 is split into two calls (intent +
+    # project-grounded anchors). The cached CRInterpretation memoises the
+    # glued result so V1-V7 share it.
     # ------------------------------------------------------------------
     logger.info("[runner] Step 1: Interpret CR")
     if variant_cache is not None:
@@ -341,13 +341,27 @@ def run_analysis(
 
     cr_interp = _validate_cr_interpretation_coherence(cr_interp)
 
+    # Code-only mode (sensitivity-analysis toggle): coerce
+    # affected_layers to ["code"] so the retriever skips both doc paths.
+    # Placement matters: the coercion must run AFTER
+    # _validate_cr_interpretation_coherence, which otherwise broadens
+    # ADDITION CRs to include "requirement" and would re-enable doc
+    # retrieval. By running last, this block has the final word.
+    if getattr(settings, "code_only_mode", False) and cr_interp.is_actionable:
+        if cr_interp.affected_layers != ["code"]:
+            logger.info(
+                "[runner] code_only_mode: coerced affected_layers from {} to ['code']",
+                cr_interp.affected_layers,
+            )
+            cr_interp = cr_interp.model_copy(update={"affected_layers": ["code"]})
+
     # Aggregate degraded flag across all LLM batches in this run.
     degraded_run: bool = False
 
     # ------------------------------------------------------------------
     # Step 2 — Adaptive RRF Hybrid Search (FR-C1, FR-C2)
     #
-    # Cache key (Amendment 2): the hybrid_search output depends on which
+    # Cache key: the hybrid_search output depends on which
     # of bm25/dense/rrf are enabled. V0 (bm25-only), V1 (dense-only), and
     # V2+ (bm25+dense+RRF) each produce a different candidate list and
     # cache under a separate key. V2-V7 share the V2+ retrieval key.
@@ -391,13 +405,13 @@ def run_analysis(
         return _minimal_rejection_report("No candidates retrieved — check index and affected_layers")
 
     # ------------------------------------------------------------------
-    # Step 3 — Cross-Encoder Rerank (FR-C3) + Apex Crucible Proposal C
+    # Step 3 — Cross-Encoder Rerank (FR-C3) + optional graph-aware rerank
     # Graph-aware rerank inserted between the cross-encoder and the
     # top-K truncation. Cross-encoder scores ALL 200 RRF candidates;
     # graph propagation blends in a structural signal; the truncation
     # to max_admitted_seeds happens on the blended score.
     #
-    # Cache key (Amendment 2): V3-V7 all reach the same post-gate
+    # Cache key: V3-V7 all reach the same post-gate
     # candidate list (rerank + 3 gates is a pure function of the V2+
     # retrieval pool + cr_interp). Cache the post-gate result under
     # `rerank_gated`. On hit, skip the rerank, pinning, normalisation,
@@ -433,18 +447,18 @@ def run_analysis(
         pass  # Skip the rerank + gates block entirely.
     elif variant_flags.enable_cross_encoder:
         logger.info("[runner] Step 3: Cross-encoder rerank (multi-query max scoring)")
-        # Sprint 17: cross-encoder ALWAYS scores the full pool (was top_k=
-        # max_admitted_seeds when graph_rerank was disabled). Three reasons:
-        #   1. step_3_reranked_full (Sprint 17 trace) needs the rank of every
-        #      candidate, not just the top-K. The K-widening diagnostic
+        # Cross-encoder ALWAYS scores the full pool (not just top_k=
+        # max_admitted_seeds). Three reasons:
+        #   1. step_3_reranked_full trace needs the rank of every candidate,
+        #      not just the top-K. The K-widening diagnostic
         #      (tools/diagnose_k_widening.py) reads this trace.
         #   2. The traceability bonus and negative filter (lines below) then
         #      operate on the full ranked pool; the final truncation at
-        #      candidates[:max_admitted_seeds] (line ~430) is mathematically
-        #      equivalent to the pre-Sprint-17 result at the final SIS — the
-        #      top-15 after sort is the same set whether you sort 15 or 200.
-        #   3. Symmetry with the graph-rerank path (Apex Proposal C, default-
-        #      disabled) which already required full-pool scoring.
+        #      candidates[:max_admitted_seeds] is mathematically equivalent
+        #      at the final SIS — the top-15 after sort is the same set
+        #      whether you sort 15 or 200.
+        #   3. Symmetry with the graph-rerank path (default-disabled) which
+        #      already required full-pool scoring.
         # Performance cost: ~1s additional cross-encoder wall time per CR
         # (200 vs 15 candidates on bge-reranker-v2-m3); negligible vs LLM cost.
         _graph_rerank_on = getattr(settings, "enable_graph_rerank", False)
@@ -467,14 +481,14 @@ def run_analysis(
         # any retrieved doc chunk in the offline traceability table.
         candidates = apply_traceability_bonus(candidates, ctx.conn)
 
-        # Negative filter (Apex V2 softened: penalty -1.0, name-only).
+        # Negative filter (penalty -1.0, name-only).
         candidates = apply_negative_filter(
             candidates, cr_interp.out_of_scope_operations
         )
 
         candidates.sort(key=lambda c: c.raw_reranker_score, reverse=True)
 
-        # ----- Apex Crucible Proposal C: graph-aware label-propagation rerank
+        # ----- Optional graph-aware label-propagation rerank (default off)
         # Default-disabled post-Sprint-15. The full-pool cross-encoder pass
         # above only fires when this flag is on, so the V4-canonical regime
         # has IDENTICAL behaviour to pre-Sprint-15 code.
@@ -519,7 +533,7 @@ def run_analysis(
             # reranker_score. Re-sort by blended score.
             candidates.sort(key=lambda c: c.raw_reranker_score, reverse=True)
 
-        # Sprint 17 (Apex K-widening diagnostic): snapshot the FULL post-rerank
+        # Step 3 trace: snapshot the FULL post-rerank
         # pool BEFORE the max_admitted_seeds truncation. Captures up to 200
         # candidates (or ~210 when graph-rerank mode B adds extras), letting
         # tools/diagnose_k_widening.py count GT entities at ranks 16-30 from
@@ -532,7 +546,7 @@ def run_analysis(
             for c in candidates
         ])
 
-        # Sprint 19 (Salvage Fix 1): named-entry-point hard pass-through.
+        # Named-entry-point hard pass-through.
         # Before the top-K truncation, force-include any candidate whose
         # node_id, file_path, or name matches a token in
         # cr_interp.named_entry_points. The cross-encoder may rank the
@@ -606,9 +620,9 @@ def run_analysis(
                 min_s, max_s,
             )
     else:
-        # V0–V2: no reranker — cap at max_admitted_seeds from the RRF pool.
-        # Sprint 19 Salvage Fix 1 also applies here for consistency: named
-        # entry points are pinned before the truncation.
+        # V0-V2: no reranker — cap at max_admitted_seeds from the RRF pool.
+        # Named entry points are pinned before
+        # truncation so they survive the cap.
         named_patterns_raw = list(cr_interp.named_entry_points or [])
         named_patterns = [p.lower() for p in named_patterns_raw if p]
 
@@ -646,6 +660,10 @@ def run_analysis(
     # ------------------------------------------------------------------
     # Steps 3.5, 3.6, 3.7 — Pre-validation gates (FR-C4)
     #
+    # Step 3.6 dedup and 3.7 plausibility run universally
+    # (V0-V7). 3.5 score floor stays gated on the cross-encoder because
+    # it consumes raw_reranker_score that V0-V2 do not produce.
+    #
     # Skipped on cache hit for the post-gate candidate list.
     # ------------------------------------------------------------------
     if not _rerank_gated_cache_hit:
@@ -675,7 +693,7 @@ def run_analysis(
             for c in candidates
         ])
 
-        # Cache the post-gate candidates for V3-V7 sharing (Amendment 2).
+        # Cache the post-gate candidates for V3-V7 sharing.
         if (
             variant_cache is not None
             and variant_flags.enable_cross_encoder
@@ -693,7 +711,7 @@ def run_analysis(
     # Step 4 — SIS Validation (LLM #2, FR-C5)
     # Batched max 5. Returns (ids, justifications, degraded).
     #
-    # Cache key (Amendment 2): the LLM #2 verdicts on the post-gate
+    # Cache key: the LLM #2 verdicts on the post-gate
     # candidate list are a pure function of (candidates, cr_interp).
     # V4-V7 all share the same post-gate candidates (via rerank_gated
     # cache) and the same cr_interp, so the LLM #2 verdicts are
@@ -782,7 +800,7 @@ def run_analysis(
     # ------------------------------------------------------------------
     # Step 5b — Trace validation (LLM #3, FR-C7)
     #
-    # Cache key (Amendment 2): LLM #3 verdicts on the resolutions are a
+    # Cache key: LLM #3 verdicts on the resolutions are a
     # pure function of (resolutions, cr_interp). V5-V7 share the same
     # resolutions (because they share SIS verdicts) and the same
     # cr_interp, so trace_verdicts is cacheable across V5-V7.
@@ -892,7 +910,7 @@ def run_analysis(
     # ------------------------------------------------------------------
     # Step 6 — BFS propagation (FR-D1)
     #
-    # Cache key (Amendment 2): the BFS output is a pure function of
+    # Cache key: the BFS output is a pure function of
     # (all_code_seeds, low_conf, graph, settings). V6 and V7 share all
     # of those, so the post-BFS-and-collapse CIS is cacheable across
     # the two variants under one `bfs_cis` key. The cache covers both
@@ -1045,7 +1063,7 @@ def run_analysis(
             pre_collapse_propagated - len(cis.propagated_nodes),
         )
 
-    # Cache the post-BFS post-collapse CIS for V6-V7 sharing (Amendment 2).
+    # Cache the post-BFS post-collapse CIS for V6-V7 sharing.
     if (
         not _bfs_cis_cache_hit
         and variant_cache is not None
@@ -1117,7 +1135,7 @@ def run_analysis(
         logger.info("[runner] Step 7: Propagation validation SKIPPED (no propagated nodes)")
 
     # ------------------------------------------------------------------
-    # Step 7.5 — Apex Crucible Proposal A: file-local sibling promotion
+    # Step 7.5 — File-local sibling promotion
     # For each validated qualified node, fetch its in-file siblings via
     # CONTAINS and ask LLM #4 (sibling-batch mode) to admit/reject each.
     # Recovers GT entities that share a file with a confirmed seed — the
@@ -1134,12 +1152,12 @@ def run_analysis(
 
         anchors_for_sibling: list[str] = []
         anchor_justifications: dict[str, str] = {}
-        # Apex Crucible Option 1 (Sprint 16): anchor pool restricted to LLM #2
-        # SIS-confirmed seeds with a NON-EMPTY mechanism_of_impact. Forensic
-        # on Apex V4 showed CR-04's 10-admit overshoot came from anchors that
-        # were SIS-confirmed but whose LLM #2 verdict had no concrete
-        # mechanism (e.g. CRUD funcs of an unrelated domain entity). When the
-        # anchor's mechanism is articulate, downstream sibling-batch admits
+        # Anchor pool restricted to LLM #2 SIS-confirmed seeds with a
+        # NON-EMPTY mechanism_of_impact. The worst per-file overshoot in
+        # prior calibrations came from anchors that were SIS-confirmed but
+        # whose LLM #2 verdict had no concrete mechanism (e.g. CRUD funcs
+        # of an unrelated domain entity). When the anchor's mechanism is
+        # articulate, downstream sibling-batch admits
         # share a real contract surface; when it's empty, sibling-batch
         # generalises by domain analogy and over-admits.
         for nid in list(cis.sis_nodes.keys()) + list(cis.propagated_nodes.keys()):
@@ -1187,7 +1205,7 @@ def run_analysis(
                         "source_code": row[4],
                     }
 
-            # Apex Crucible V2: build per-file anchor list (all CIS anchors in
+            # Build per-file anchor list (all CIS anchors in
             # the file, not just the first). This corrects the V1 bug where a
             # bad first-anchor caused LLM #4 to reject legitimate sibling GT
             # entities for off-target reasons.
@@ -1240,7 +1258,7 @@ def run_analysis(
                 if sibling_degraded:
                     degraded_run = True
                 primary_anchor = file_anchors[0][0] if file_anchors else sibs[0][2]
-                # Apex V3 cap: truncate per-file admissions to the configured
+                # Per-file cap: truncate per-file admissions to the configured
                 # ceiling, preserving LLM #4's emission order (which correlates
                 # with confidence — first-emitted siblings tend to be the
                 # tightest contract matches).
@@ -1258,7 +1276,7 @@ def run_analysis(
                     sibling_anchors[sib_id] = primary_anchor
                     sibling_files[sib_id] = file_path
 
-            # Apex V3 cap: enforce per-CR admission ceiling. Drops the lowest-
+            # Per-CR cap: enforce per-CR admission ceiling. Drops the lowest-
             # order admissions when the total exceeds the cap. The order is
             # insertion order from the per-file loop, which roughly tracks
             # anchor strength.
@@ -1492,7 +1510,7 @@ def run_analysis(
     bfs_ran = variant_flags.enable_bfs and len(cis.propagated_nodes) > 0
     analysis_mode = "retrieval_plus_propagation" if bfs_ran else "retrieval_only"
 
-    # Apex Crucible A.1: extra impacted_files come from File-type CIS nodes
+    # Step 9 augmentation: extra impacted_files come from File-type CIS nodes
     # (and bare path nodes) that we filtered out of impacted_entities. Their
     # paths still belong in the file-level report.
     extra_file_paths: list[str] = []

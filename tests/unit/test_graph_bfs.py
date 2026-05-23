@@ -233,12 +233,12 @@ def test_bfs_calls_depth_capped_for_low_conf() -> None:
 
 
 def test_bfs_calls_depth_2_for_high_conf() -> None:
-    """Crucible Fix 6 (AV-5): CALLS max_depth reduced 3 -> 2.
+    """CALLS max_depth is 2.
 
-    Even for a high-confidence seed, the third reverse-CALLS hop is now
+    Even for a high-confidence seed, the third reverse-CALLS hop is
     structurally rejected. Depth-3 fan-in regularly produces 200+ propagated
     nodes per seed in real TS codebases — depth-2 is the precision-recovery
-    sweet spot established by Crucible audit AV-5.
+    sweet spot.
     """
     import networkx as nx
     g = nx.MultiDiGraph()
@@ -255,7 +255,7 @@ def test_bfs_calls_depth_2_for_high_conf() -> None:
     )
     assert "A" in cis.propagated_nodes      # depth 1
     assert "B" in cis.propagated_nodes      # depth 2
-    assert "C" not in cis.propagated_nodes  # depth 3: dropped per Fix 6
+    assert "C" not in cis.propagated_nodes  # depth 3: dropped
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +344,7 @@ def test_bfs_duplicate_seeds_deduplicated() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Sprint 10.1 — collapse_contains_subtrees tests
+# collapse_contains_subtrees tests
 # ---------------------------------------------------------------------------
 
 

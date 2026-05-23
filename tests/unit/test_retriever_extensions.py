@@ -1,4 +1,4 @@
-"""Sprint 13-W2 acceptance: raw-CR multilingual bridge + traceability pool seeding.
+"""Retriever extension acceptance: raw-CR multilingual bridge + traceability pool seeding.
 
 These tests use small synthetic doubles for embedder / chroma collection /
 SQLite so they exercise the new branches without standing up the full index.
@@ -140,7 +140,7 @@ def _make_cr(*, change_type="MODIFICATION", layers=("requirement", "design", "co
 
 
 # ---------------------------------------------------------------------------
-# W2B — raw-CR multilingual bridge
+# Raw-CR multilingual bridge
 # ---------------------------------------------------------------------------
 
 def test_w2b_raw_cr_dense_pass_adds_code_candidates():
@@ -200,7 +200,7 @@ def test_w2b_no_crash_without_cr_text():
 
 
 # ---------------------------------------------------------------------------
-# W2C — traceability pool seeding
+# Traceability pool seeding
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -246,7 +246,7 @@ def test_w2c_traceability_seeding_injects_code_neighbours(_conn_with_doc_code_li
     code_col = _StubCol("code", {})  # No direct dense hits.
     ctx = _make_ctx(code_col=code_col, doc_col=doc_col, conn=_conn_with_doc_code_links)
     settings = _make_settings(
-        enable_raw_cr_dense_pass=False,  # isolate W2C
+        enable_raw_cr_dense_pass=False,  # isolate traceability seeding
         traceability_seed_top_k_per_doc=2,
         traceability_seed_min_score=0.40,
     )

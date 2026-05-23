@@ -1,4 +1,4 @@
-"""Sprint 1 acceptance tests: schema round-trips, truncation, constants, settings."""
+"""Schema acceptance tests: round-trips, truncation, constants, settings."""
 
 from __future__ import annotations
 
@@ -110,8 +110,8 @@ def test_candidate_verdict_round_trip() -> None:
 def test_candidate_verdict_truncation() -> None:
     """function_purpose > 200 chars is silently truncated.
 
-    Crucible Fix 3: max_length raised 150 -> 200 to allow richer
-    function purposes for distributed-justification rendering.
+    max_length 200 (not 150) allows richer function purposes for
+    distributed-justification rendering.
     """
     v = CandidateVerdict(
         node_id="x",
@@ -219,8 +219,8 @@ def test_impacted_node_round_trip() -> None:
 def test_impact_report_round_trip() -> None:
     """ImpactReport -> JSON -> ImpactReport is identity at the serialized level.
 
-    Crucible E2E Schema Alignment: ImpactedNode is a backward-compat
-    subclass of ImpactedEntity. After round-trip, Pydantic re-instantiates
+    ImpactedNode is a backward-compat subclass of ImpactedEntity.
+    After round-trip, Pydantic re-instantiates
     using the field-typed class (ImpactedEntity), so we compare on the
     serialized JSON form, which is the contract that matters for the API.
     """
@@ -305,7 +305,7 @@ def test_severity_for_chain_behavioral_beats_module() -> None:
 
 
 def test_layer_compat_representative_cells() -> None:
-    """Representative cells from LAYER_COMPAT (Sprint 6.5 recalibration)."""
+    """Representative cells from LAYER_COMPAT."""
     assert layer_compat("API_ROUTE",       "FR")     == 1.0
     assert layer_compat("TYPE_DEFINITION", "Design") == 1.0   # models ↔ DB design = perfect match
     assert layer_compat("UTILITY",         "NFR")    == 0.7
@@ -402,9 +402,9 @@ def test_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.min_traceability_similarity == 0.40
     assert s.degenerate_embed_min_length == 50
     assert s.bfs_high_conf_top_n == 5
-    # Crucible Fix 9: score floor demoted to a sanity-only gate (-2.0).
+    # Score floor is a sanity-only gate (-2.0).
     assert s.min_reranker_score_for_validation == -2.0
-    # Crucible Fix 9: density threshold raised from 0.35 -> 0.50.
+    # Density threshold (no per-file count cap).
     assert s.plausibility_gate_density_threshold == 0.50
-    # Crucible Fix 9: plausibility_gate_max_per_file removed entirely.
+    # plausibility_gate_max_per_file removed entirely.
     assert not hasattr(s, "plausibility_gate_max_per_file")

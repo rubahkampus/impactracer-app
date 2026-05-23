@@ -1,6 +1,6 @@
 """Tests for code_indexer.py Pass 1 — acceptance criteria.
 
-Sprint 4. Blueprint §3.2.
+Blueprint §3.2.
 """
 
 import sqlite3
@@ -548,7 +548,7 @@ def test_insert_idempotent(conn):
 
 
 # ---------------------------------------------------------------------------
-# Variable node extraction (Sprint 13-W1) — const FOO = <non-arrow RHS>
+# Variable node extraction — const FOO = <non-arrow RHS>
 # ---------------------------------------------------------------------------
 
 def test_variable_extracts_mongoose_schema_with_field_names_in_embed_text(conn):

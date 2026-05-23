@@ -116,12 +116,11 @@ PROPAGATION_VALIDATION_EXEMPT_EDGES: frozenset[str] = frozenset({
 })
 """Single-hop edges that skip LLM #4 validation (direct contracts).
 
-Apex Crucible Proposal A.1: TYPED_BY removed from the exempt set. Forensic
-audit showed that auto-admitting every TYPED_BY-linked file produced 10 of
-28 false positives on CR-01 (e.g. review.model.ts admitted because it
-references CommissionListing, even though it never changes). LLM #4 now
-adjudicates these single-hop type contracts on the same footing as deeper
-propagation chains.
+TYPED_BY is intentionally NOT in the exempt set. Auto-admitting every
+TYPED_BY-linked file produced too many false positives (e.g. a model file
+admitted because it references a typed payload, even though it never
+changes). LLM #4 adjudicates these single-hop type contracts on the same
+footing as deeper propagation chains.
 """
 
 

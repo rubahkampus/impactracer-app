@@ -1,4 +1,4 @@
-"""Targeted regression tests for the Crucible refactor (Sprint 11).
+"""Targeted regression tests for pipeline invariants.
 
 Each block locks in one of the architectural-horizon invariants so a future
 edit cannot silently regress them.
@@ -29,7 +29,7 @@ from impactracer.shared.models import Candidate
 
 
 # ---------------------------------------------------------------------------
-# Crucible Fix 4 — set-level metrics
+# Set-level metrics
 # ---------------------------------------------------------------------------
 
 
@@ -96,7 +96,7 @@ def test_r_precision():
 
 
 # ---------------------------------------------------------------------------
-# Crucible Fix 5 — BM25 stop-words with len>=2
+# BM25 stop-words with len>=2
 # ---------------------------------------------------------------------------
 
 
@@ -139,7 +139,7 @@ def test_bm25_stopwords_cover_indonesian_function_words():
 
 
 # ---------------------------------------------------------------------------
-# Crucible Fix 13 — additive negative filter
+# Additive negative filter
 # ---------------------------------------------------------------------------
 
 
@@ -171,7 +171,7 @@ def test_negative_filter_demotes_substring_match():
 
 
 def test_negative_filter_handles_negative_logits_correctly():
-    """Crucible mathematical-correctness check: a multiplicative penalty
+    """Mathematical-correctness check: a multiplicative penalty
     on a negative logit would PROMOTE; the additive penalty must DEMOTE
     across the entire real line.
     """
@@ -182,7 +182,7 @@ def test_negative_filter_handles_negative_logits_correctly():
 
 
 def test_negative_filter_default_penalty_is_softer():
-    """Apex Crucible V2: default penalty was hardened from -5.0 to -1.0
+    """Default penalty hardened from -5.0 to -1.0
     after CR-02 forensics showed -5.0 obliterated legitimate domain
     candidates whose names contain a generic OOS substring like 'grace
     period'.
@@ -193,7 +193,7 @@ def test_negative_filter_default_penalty_is_softer():
 
 
 def test_negative_filter_ignores_short_phrases():
-    """Apex Crucible V2: needles shorter than 6 chars are dropped to avoid
+    """Needles shorter than 6 chars are dropped to avoid
     matching tokens like 'log' or 'add' that appear in many legitimate
     identifiers.
     """
@@ -203,7 +203,7 @@ def test_negative_filter_ignores_short_phrases():
 
 
 def test_negative_filter_matches_name_only_not_snippet():
-    """Apex Crucible V2: substring matching on text_snippet caused too many
+    """Substring matching on text_snippet caused too many
     false positives. Only the candidate's name is considered.
     """
     c = _candidate("c", "loginUser", "user logout subsystem", 3.0)
@@ -218,18 +218,18 @@ def test_negative_filter_no_op_when_empty():
 
 
 # ---------------------------------------------------------------------------
-# Crucible Fix 6 — CALLS depth 2
+# CALLS depth 2
 # ---------------------------------------------------------------------------
 
 
 def test_calls_depth_locked_to_2():
-    """EDGE_CONFIG['CALLS'] must specify max_depth=2 (Crucible Fix 6)."""
+    """EDGE_CONFIG['CALLS'] must specify max_depth=2."""
     assert EDGE_CONFIG["CALLS"]["max_depth"] == 2
     assert EDGE_CONFIG["CALLS"]["direction"] == "reverse"
 
 
 # ---------------------------------------------------------------------------
-# Crucible Fix 11 — propagation limits
+# Propagation limits
 # ---------------------------------------------------------------------------
 
 

@@ -89,7 +89,7 @@ def _make_doc_candidate(
 def _make_settings(
     min_reranker_score=-2.0,
     density_threshold=0.50,
-    max_per_file=None,  # Crucible Fix 9: parameter retained for backwards-compat but unused.
+    max_per_file=None,  # Retained for backwards-compat but unused (no per-file count cap).
 ):
     class _Settings:
         min_reranker_score_for_validation = min_reranker_score
@@ -256,7 +256,7 @@ def test_3_7_affinity_resorts_descending():
 
 
 def test_3_7_density_gate_drops_flooded_file():
-    """Crucible Fix 9: flooded files now drop ALL code candidates (no max_per_file cap).
+    """Flooded files drop ALL code candidates (no max_per_file cap).
 
     Previous semantics: density > threshold AND admitted >= max_per_file -> drop.
     New semantics: density > threshold -> drop entire file's candidates unless
@@ -491,9 +491,9 @@ def test_3_7_doc_chunks_exempt_from_density_gate():
 def test_3_7_doc_chunks_and_code_independence():
     """B3: doc chunk exemption does not affect code-density calculation.
 
-    Crucible Fix 9 semantics: when a file is flooded (>density_threshold of
+    Density-gate semantics: when a file is flooded (>density_threshold of
     code candidates), ALL code candidates from that file are dropped, but
-    doc chunks remain exempt. The previous max_per_file cap is gone.
+    doc chunks remain exempt. There is no per-file count cap.
     """
     cr = _make_cr()
     settings = _make_settings(density_threshold=0.3)

@@ -190,7 +190,7 @@ def test_compute_scope_custom_thresholds():
 
 
 # ---------------------------------------------------------------------------
-# Sprint 10.1 — Strategy 2: _apply_hard_limit tests
+# Strategy 2: _apply_hard_limit tests
 # ---------------------------------------------------------------------------
 
 

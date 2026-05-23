@@ -204,9 +204,9 @@ def test_v7_exactly_5_llm_calls_mocked() -> None:
         ]
     )
 
-    # Crucible Fix 3 (Full Demotion): LLM #5 now returns LLMSynthesisOutput
-    # (executive_summary + documentation_conflicts only). The runner builds
-    # impacted_nodes deterministically from the validated CIS.
+    # LLM #5 returns LLMSynthesisOutput (executive_summary +
+    # documentation_conflicts only). The runner builds impacted_nodes
+    # deterministically from the validated CIS.
     from impactracer.shared.models import LLMSynthesisOutput
 
     summary = LLMSynthesisOutput(
@@ -314,10 +314,21 @@ def test_v7_exactly_5_llm_calls_mocked() -> None:
                         from impactracer.shared.config import Settings
 
                         settings = Settings(_env_file=None)
+                        # Two-stage interpretation splits LLM #1 into 2
+                        # calls when two_stage_interpret is True (default).
+                        # This test asserts the SINGLE-STAGE 5-call
+                        # invariant, so we explicitly disable two-stage.
+                        # A separate test covers the two-stage 6-call count.
+                        from impactracer.evaluation.variant_flags import (
+                            with_two_stage_interpret,
+                        )
+                        flags = with_two_stage_interpret(
+                            VariantFlags.v7_full(), False
+                        )
                         run_analysis(
                             cr_text="Tambahkan fitur duplikasi listing komisi",
                             settings=settings,
-                            variant_flags=VariantFlags.v7_full(),
+                            variant_flags=flags,
                             shared_llm_client=mock_client,
                         )
 

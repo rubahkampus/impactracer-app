@@ -1,4 +1,4 @@
-"""Sprint 5 acceptance tests: one test per edge type.
+"""Edge-extraction acceptance tests: one test per edge type.
 
 Each test crafts a minimal TypeScript/TSX fixture, runs Pass 1 then Pass 2
 in an in-memory SQLite DB, and asserts the expected edge is (or is not) emitted.
@@ -405,7 +405,7 @@ def test_client_api_calls_fetch():
     ]
     edges = _run_multi(conn, files)
     cac = _edges_of_type(edges, "CLIENT_API_CALLS")
-    # Sprint 7.75: CLIENT_API_CALLS now fans out to the specific HTTP-method Function
+    # CLIENT_API_CALLS fans out to the specific HTTP-method Function
     # node (::GET) rather than the File node, bridging the File↔Function membrane.
     assert ("src/components/UserList.tsx::loadUsers", "src/app/api/users/route.ts::GET") in cac
 
@@ -427,7 +427,7 @@ def test_client_api_calls_template_literal():
     ]
     edges = _run_multi(conn, files)
     cac = _edges_of_type(edges, "CLIENT_API_CALLS")
-    # Sprint 7.75: template-literal path also fans out to ::GET Function node.
+    # Template-literal path also fans out to ::GET Function node.
     assert ("src/components/Profile.tsx::loadProfile", "src/app/api/users/[id]/route.ts::GET") in cac
 
 

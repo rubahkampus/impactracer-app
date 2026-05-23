@@ -438,7 +438,7 @@ def collapse_contains_subtrees(
 
 
 # =========================================================================
-# Apex Crucible Proposal A.2 — Sibling promotion via CONTAINS
+# Sibling promotion via CONTAINS (Step 7.5 support)
 # =========================================================================
 
 #: Node types that can appear as anchors for sibling promotion.
@@ -479,9 +479,9 @@ def collect_file_local_siblings(
     capped at ``max_per_file``. The anchor_id is the *first* anchor we
     encountered in that file — used only as a justification reference.
 
-    Apex Crucible Proposal A.2: 7 of 8 missed GT entities on CR-01 live in
-    files we already named correctly; 4 of 6 on CR-03. CONTAINS-based
-    file-local sibling enumeration is the cheapest way to surface them.
+    Motivation: many missed GT entities live in files the pipeline has
+    already named correctly. CONTAINS-based file-local sibling enumeration
+    is the cheapest way to surface them.
     """
     if not anchor_ids:
         return {}

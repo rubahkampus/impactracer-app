@@ -1,4 +1,4 @@
-"""Per-CR variant-chain cache (Amendment 2).
+"""Per-CR variant-chain cache.
 
 The V0-V7 ablation is structurally additive. V_{n+1} extends V_n by
 exactly one operation (cross-encoder, gate, LLM call, or BFS step).
@@ -38,7 +38,7 @@ Pydantic ``model_validate_json``. Pipeline code can mutate the
 returned candidates in place (rerank score normalisation, pinning)
 without corrupting the cache for later variants.
 
-Reference: ``docs/evaluation_protocol.md`` Amendment 2.
+Reference: ``docs/evaluation_protocol.md``.
 """
 
 from __future__ import annotations

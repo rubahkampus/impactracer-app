@@ -1,4 +1,4 @@
-"""Apex Crucible Proposal C — graph-aware label-propagation rerank.
+"""Graph-aware label-propagation rerank (Step 3, optional).
 
 Inserted between Step 3 (cross-encoder rerank) and Step 3.5 (gates).
 
@@ -44,10 +44,10 @@ INHERITS (0.7), IMPLEMENTS (0.7), HOOK_DEPENDS_ON (0.6), DEFINES_METHOD
 (0.6), PASSES_CALLBACK (0.5), CLIENT_API_CALLS (0.7), DYNAMIC_IMPORT (0.4),
 FIELDS_ACCESSED (0.7), DEPENDS_ON_EXTERNAL (0.0 — externals never propagate).
 
-Reference: master_blueprint.md is silent on graph rerank; this is a
-post-W2 Apex Crucible extension justified in implementation_report.md
-Sprint 15. The Apex Crucible Report Section 2 Proposal C is the original
-design source.
+Reference: master_blueprint.md is silent on graph rerank; this is an
+optional extension whose design rationale is recorded in
+implementation_report.md. Default off; opt in via
+settings.enable_graph_rerank or the GRAPH_RERANK_ALPHA env override.
 """
 
 from __future__ import annotations

@@ -44,21 +44,18 @@ class Settings(BaseSettings):
     min_traceability_similarity: float = 0.40
     degenerate_embed_min_length: int = 50
 
-    # ---- Retrieval --------------------------------------------------
-    # top_k_per_query: per individual dense/BM25 query call (4 paths × N queries)
-    # Sprint 13-W2A: widened from 15 to 30. Diagnostics on the calibration set
-    # showed only 5 of 21 in-index GT entities entered the RRF pool at width 15.
+    # ---- Step 2: Retrieval (RRF) ------------------------------------
+    # top_k_per_query: candidates kept per individual dense/BM25 query call.
     top_k_per_query: int = 30
-    # top_k_rrf_pool: pool entering cross-encoder after RRF (was 50)
-    # Sprint 13-W2A: widened to 200. Cross-encoder rerank on 200 candidates
-    # adds < 1 s on the existing model and gives the rerank-top-15 funnel a
-    # meaningful selection problem to solve.
+    # top_k_rrf_pool: pool entering cross-encoder after RRF fusion. A wide
+    # pool (200) gives the rerank-top-15 funnel a meaningful selection
+    # problem and keeps the K-widening diagnostic well-resourced.
     top_k_rrf_pool: int = 200
-    # max_admitted_seeds: hard cap on seeds admitted to CIS after reranking
+    # max_admitted_seeds: hard cap on seeds admitted to SIS after reranking.
     max_admitted_seeds: int = 15
     rrf_k: int = 60
 
-    # ---- Sprint 13-W2B: raw CR multilingual bridge ----------------
+    # ---- Step 2: Raw-CR multilingual bridge -------------------------
     # When True, the retriever runs one additional dense query against the
     # code collection using the raw (pre-interpretation) CR text. BGE-M3 is
     # multilingual; an Indonesian CR can natively reach English-identifier
@@ -66,7 +63,7 @@ class Settings(BaseSettings):
     enable_raw_cr_dense_pass: bool = True
     raw_cr_dense_top_k: int = 60
 
-    # ---- Apex Crucible Proposal B: per-layer code retrieval --------
+    # ---- Step 2: Per-layer code retrieval ---------------------------
     # When CRInterpretation.layered_search_queries is populated, the retriever
     # runs an additional pass per architectural layer (api_route, page_component,
     # ui_component, utility, type_definition) against the code collection
@@ -76,21 +73,18 @@ class Settings(BaseSettings):
     # are biased toward one architectural plane.
     per_layer_top_k: int = 12
 
-    # ---- Apex Crucible Proposal C: graph-aware label-propagation rerank --
+    # ---- Step 3: Graph-aware label-propagation rerank (off by default)
     # After cross-encoder rerank scores the full RRF pool, a 2-iteration label
     # propagation over the structural graph blends a per-node "graph_score"
     # with the cross-encoder score before the top-K truncation. Personalization
     # is the top-N cross-encoder candidates (no extra LLM call).
     #
-    # **Disabled by default per Sprint 15 postmortem.** Calibration on 5 CRs
-    # showed Proposal C trades file-level F1 for entity-level F1 with no
-    # configuration that wins both metrics. Mode B added zero GT entities on
-    # citrakara; mode A's entity-level precision tightening came at the cost
-    # of dropping file TPs from the rerank pool. Keep the code path and tests
-    # for future codebases where the structural graph more densely connects
-    # CR-described seeds to GT files (e.g. monorepos where forms directly
-    # import schemas). Re-enable by setting enable_graph_rerank=True or via
-    # GRAPH_RERANK_ALPHA env var override.
+    # Disabled by default. Calibrations on the target repo showed this
+    # mechanism trades file-level F1 for entity-level F1 with no configuration
+    # that wins both metrics. The code path is kept for codebases where the
+    # structural graph more densely connects CR-described seeds to GT files
+    # (e.g. monorepos where forms directly import schemas). Re-enable by
+    # setting enable_graph_rerank=True or via GRAPH_RERANK_ALPHA env var.
     enable_graph_rerank: bool = False
     graph_rerank_alpha: float = 0.7              # weight on cross-encoder; (1-alpha) on graph
     graph_rerank_iterations: int = 2             # number of label-propagation rounds
@@ -98,33 +92,28 @@ class Settings(BaseSettings):
     graph_rerank_add_top_n: int = 10             # mode B: add this many graph-discovered candidates
     graph_rerank_add_min_score: float = 0.10     # mode B: minimum normalized graph_score to admit
 
-    # ---- Apex Crucible Proposal A: file-local sibling promotion -----
+    # ---- Step 7.5: File-local sibling promotion ---------------------
     # After LLM #4 validation, the runner enumerates every qualified sibling
     # of each validated node within the same file (via CONTAINS) and lets
     # LLM #4 admit/reject each sibling using the anchor's justification as
     # context. Recovers GT entities that share a file with a confirmed seed
-    # (the dominant failure mode at the V7 baseline: 7/8 missed entities on
-    # CR-01, 4/6 on CR-03 live in already-named files).
+    # (a frequent failure mode: many missed entities live in already-named
+    # files).
     #
-    # Apex V3: per-file/per-CR admission caps prevent sibling-promotion
-    # overshoot. Forensic on V2 calibration: CR-04 admitted 10 siblings in
-    # one file (escrow repo) because the anchors were SIS-confirmed CRUD
-    # functions of a single domain entity; LLM #4 correctly recognized all
-    # 10 as similarly-shaped, but the GT only named the one caller. Capping
-    # admissions truncates this overshoot while preserving the recall win
-    # on CRs where 1-2 siblings per file are the right answer.
+    # The per-file and per-CR admission caps prevent sibling-promotion
+    # overshoot. Without caps, a sibling batch can over-admit when the
+    # anchors are SIS-confirmed CRUD functions of a single domain entity
+    # and LLM #4 correctly recognises every same-shape function as
+    # similarly impacted, even when GT only names the one caller.
     enable_sibling_promotion: bool = True
     sibling_promotion_max_per_file: int = 12        # candidate ceiling per file
-    # Apex V4: per-file admission cap softened from 2 (V3) to 4. V3 forensics
-    # showed cap=2 dropped legitimate admissions on CR-03 and removed the TP
-    # camouflage on CR-04. Cap=4 prevents the worst overshoot (CR-04 V2 had
-    # 10 admits in one file) while preserving the 1-3 admits per file that
-    # drive recall gains on CR-01 / CR-03. Per-CR cap removed (set to 0 =
-    # disabled) — global throttling was too blunt on a 5-CR mix.
+    # Per-file admission cap: 4 strikes the balance between preventing
+    # worst-case overshoot (~10 admits per file) and preserving the 1-3
+    # admits per file that drive legitimate recall gains.
     sibling_admit_max_per_file: int = 4
     sibling_admit_max_per_cr: int = 0               # 0 = no global cap
 
-    # ---- Sprint 13-W2C: traceability-matrix pool seeding -----------
+    # ---- Step 2: Traceability-matrix pool seeding -------------------
     # After dense_doc retrieval, query doc_code_candidates for code-nodes
     # linked to those doc-chunks above this threshold and inject them into
     # the RRF pool with a synthetic rank. Promotes the offline traceability
@@ -134,22 +123,29 @@ class Settings(BaseSettings):
     traceability_seed_min_score: float = 0.40
     traceability_seed_synthetic_rank: int = 5
 
-    # ---- Pre-Validation Gates (FR-C4) ------------------------------
+    # ---- Steps 3.5 / 3.6 / 3.7: Pre-Validation Gates (FR-C4) --------
     # Score floor is a sanity-only gate (-2.0 admits all candidates above
     # the BGE-reranker-v2-m3 "irrelevant" floor). LLM #2 is the real precision gate.
     min_reranker_score_for_validation: float = -2.0
     # Density threshold: rejects candidates when a single file exceeds this
     # fraction of the total pool. Density-only; no per-file count cap.
     plausibility_gate_density_threshold: float = 0.50
-    # Amendment 1: additive boost applied to a candidate's raw_reranker_score
-    # at the score-floor admission step when its name substring-matches any
-    # of cr_interp.anchor_candidates. Soft semantics — a candidate whose
+    # Additive boost applied to a candidate's raw_reranker_score at the
+    # score-floor admission step when its name substring-matches any of
+    # cr_interp.anchor_candidates. Soft semantics — a candidate whose
     # boosted score is still below min_reranker_score_for_validation is
     # dropped. Default 0.10 sits roughly one cross-encoder logit step above
-    # the floor, enough to admit borderline anchors without overwhelming the
-    # validator chain. Set to 0.0 to disable the boost while keeping
+    # the floor, enough to admit borderline anchors without overwhelming
+    # the validator chain. Set to 0.0 to disable the boost while keeping
     # anchor_candidates extraction.
     anchor_priming_boost: float = 0.10
+
+    # Anchor-priming BM25 boost (Step 2 Path 4). Multiplier applied to a
+    # synthetic BM25 query built from each anchor_candidate identifier
+    # inside retriever.hybrid_search Path 4. Default 1.5 = anchor-matching
+    # candidates get a 0.5 weight bonus in the BM25 max-over-queries step.
+    # Set to 1.0 to disable.
+    anchor_priming_bm25_boost: float = 1.5
 
     # ---- BFS --------------------------------------------------------
     bfs_global_max_depth: int = 3
@@ -170,10 +166,23 @@ class Settings(BaseSettings):
     locked_parameters_path: str = "./data/locked_parameters.json"
     alpha: float = 0.05
 
-    # Amendment 3: cached project-skeleton text written at index time and
-    # consumed by the two-stage interpreter at run time. Missing file is
-    # treated as a graceful degrade signal (single-stage interpreter only).
+    # ---- Step 1: Project skeleton -----------------------------------
+    # Cached project-skeleton text written at index time and consumed by
+    # the two-stage interpreter at run time. Missing file is treated as
+    # a graceful degrade signal (single-stage interpreter only).
     project_skeleton_path: str = "./data/project_skeleton.txt"
+
+    # ---- Code-only evaluation mode (sensitivity-analysis toggle) ----
+    # When True:
+    #   - cr_interp.affected_layers is coerced to ["code"] post-LLM-1, which
+    #     disables doc retrieval (dense_doc / bm25_doc paths).
+    #   - enable_traceability_pool_seeding is treated as False (no doc->code
+    #     neighbour injection into the RRF pool).
+    #   - merged_doc_contexts attachment in step_3_6_semantic_dedup is
+    #     skipped, so LLM-2 receives no "Business Context" block.
+    # Together these three toggles isolate "what would ImpacTracer score if
+    # the SRS / SDD did not exist". Default False = production behaviour.
+    code_only_mode: bool = False
 
 
 def get_settings() -> Settings:

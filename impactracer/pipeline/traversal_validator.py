@@ -364,7 +364,7 @@ def validate_propagation(
 
 
 # =========================================================================
-# Apex Crucible Proposal A.3 — Sibling validation via LLM #4
+# Sibling validation via LLM #4 (Step 7.5)
 # =========================================================================
 
 _SIBLING_SYSTEM_PROMPT = """\
@@ -437,12 +437,11 @@ def validate_siblings_for_file(
 ) -> tuple[dict[str, str], bool]:
     """LLM #4 sibling-batch: admit/reject siblings given multi-anchor context.
 
-    Apex Crucible V2: previously this function took a single anchor + its
-    single justification. The forensic audit on CR-01 V7 showed bad anchors
-    (FPs in the file) caused the LLM to reject legitimate sibling GTs because
-    the anchor framing was wrong. We now pass ALL anchors in the file plus
-    each anchor's justification, so LLM #4 sees the multi-anchor contract
-    surface and can identify CRUD/type partners correctly.
+    Multi-anchor framing: this function takes ALL confirmed anchors in the
+    file plus each anchor's justification (not a single anchor). Previous
+    single-anchor designs failed when a bad anchor's framing made LLM #4
+    reject legitimate sibling GTs. With multi-anchor context, LLM #4 sees
+    the full contract surface and can identify CRUD/type partners correctly.
 
     Args:
         file_path: the shared file path of anchors + siblings.

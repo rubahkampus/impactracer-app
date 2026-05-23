@@ -6,6 +6,13 @@ CLAUDE.md
 .kilo/
 eval/
 ground_truth/
+scripts/
+ast_nodes.txt
+revised_cr_list.txt
+revised_cr_list_2.txt
+revised_cr_list_3.txt
+docs/
+
 
 # Data stores (generated)
 data/

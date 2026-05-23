@@ -101,8 +101,8 @@ NodeType = Literal[
 NOT an arrow function (those are already captured as ``Function`` nodes).
 Examples: Mongoose schemas (``const UserSchema = new Schema(...)``), constant
 arrays / objects (``const TEMPLATES = [...]``), object-literal exports, and
-``Object.freeze(...)`` constants. Added in Sprint 13-W1 to restore GT-existence
-coverage that was missing under the original 9-type vocabulary.
+``Object.freeze(...)`` constants. Restores GT-existence coverage that the
+original 9-type vocabulary missed.
 """
 
 Severity = Literal["Tinggi", "Menengah", "Rendah"]
@@ -172,7 +172,7 @@ class CRInterpretation(TruncatingModel):
     anchor_candidates: list[str] = Field(
         default_factory=list,
         description=(
-            "Amendment 1: 0 to 10 bare identifier names of likely host or "
+            "0 to 10 bare identifier names of likely host or "
             "sibling symbols in the codebase that the new code will live "
             "next to, call, or modify. Emitted only when variant_flags."
             "anchor_priming is True. Unlike named_entry_points, these are "
@@ -199,7 +199,7 @@ class CRInterpretation(TruncatingModel):
     layered_search_queries: dict[str, list[str]] | None = Field(
         default=None,
         description=(
-            "Apex Crucible Proposal B: per-architectural-layer query grid. "
+            "Per-architectural-layer query grid. "
             "Keys MUST be one of: 'api_route', 'page_component', "
             "'ui_component', 'utility', 'type_definition'. Each value is a "
             "list of 1-2 English technical phrases that target THAT layer's "
@@ -237,7 +237,7 @@ class CRInterpretation(TruncatingModel):
 
 
 # =========================================================================
-# LLM #1 (Amendment 3): two-stage interpretation schemas
+# LLM #1: two-stage interpretation schemas
 # =========================================================================
 
 
@@ -434,9 +434,9 @@ class PropagationVerdict(TruncatingModel):
         max_length=400,
         description=(
             "One sentence stating the contract breakage, behavioral anomaly, "
-            "or downstream type-mismatch the change introduces. Crucible "
-            "Fix 2 / Fix 3: must reference the chain factually but not be a "
-            "bare-topology statement; propagated verbatim into the final "
+            "or downstream type-mismatch the change introduces. Must "
+            "reference the chain factually but not be a bare-topology "
+            "statement; propagated verbatim into the final "
             "ImpactedNode.structural_justification."
         ),
     )
@@ -760,15 +760,14 @@ class Candidate:
     bm25_score: float = 0.0
     cosine_score: float = 0.0
     # pinned_by_named_entry: True if this candidate was matched to a token in
-    # cr_interp.named_entry_points during the cross-encoder admission step
-    # (Sprint 19 Salvage Fix 1). Pinned candidates bypass max_admitted_seeds
-    # truncation and all pre-validation gates (score floor, semantic dedup,
-    # plausibility). They still face LLM #2 validation as the source-of-truth
-    # gate.
+    # cr_interp.named_entry_points during the cross-encoder admission step.
+    # Pinned candidates bypass max_admitted_seeds truncation and all pre-
+    # validation gates (score floor, semantic dedup, plausibility). They
+    # still face LLM #2 validation as the source-of-truth gate.
     pinned_by_named_entry: bool = False
     # anchor_boost_applied: True if this candidate matched a substring of any
-    # cr_interp.anchor_candidates token during the score-floor admission step
-    # (Amendment 1). Unlike pinned_by_named_entry, this is a SOFT signal: the
+    # cr_interp.anchor_candidates token during the score-floor admission step.
+    # Unlike pinned_by_named_entry, this is a SOFT signal: the
     # candidate's effective score gets an additive boost
     # (settings.anchor_priming_boost) BEFORE the floor comparison; if the
     # boosted score still fails the floor the candidate is dropped. Trace-only

@@ -60,15 +60,15 @@ def verify_nfr_01(cr_text: str, settings: Settings) -> dict[str, Any]:
 def verify_nfr_02(settings: Settings) -> dict[str, Any]:
     """NFR-02: Offline / local execution.
 
-    Skipped per Sprint 11+12 brief — OS-level network disabling cannot be
-    safely scripted from inside the test process without risking pipeline
+    Skipped by design — OS-level network disabling cannot be safely
+    scripted from inside the test process without risking pipeline
     crashes. Manually verified by disabling network during smoke runs.
     """
     return {
         "name": "NFR-02 Local Execution",
         "passed": True,
         "note": (
-            "Skipped per Sprint 11+12 brief: OS-level network disabling is "
+            "Skipped by design: OS-level network disabling is "
             "not safely scriptable. Manual verification: indexer + non-LLM "
             "stages were confirmed to run with the network adapter disabled."
         ),
