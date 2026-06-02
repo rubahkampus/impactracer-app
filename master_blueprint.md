@@ -5,6 +5,7 @@
 **Companions:**
 - `index_implementation.md` — offline indexer operational reference (the "how the indexer actually runs" book, with citrakara-specific numbers and deltas).
 - `analysis_implementation.md` — online pipeline operational reference (the "how the runtime pipeline actually runs" book, with per-LLM prompt contracts, fail-closed semantics, attrition data, and frozen invariants).
+- `INDEX_REPORT.md` — knowledge-representation comparison of the indexed target repositories (citrakara vs NOVA): scale, node/edge composition, classification coverage, and index-health signals. Bab V evaluation-corpus characterization.
 - `implementation_report.md` — append-only sprint history (the audit trail; not authoritative for current behaviour).
 
 **Scaffold:** the modules below are mature. Any session that wants to modify them must STOP and report — these define the contract.
@@ -15,12 +16,16 @@
 - `impactracer/persistence/sqlite_client.py` (DDL)
 - `impactracer/persistence/chroma_client.py` (collection init)
 - `impactracer/pipeline/llm_client.py` (OpenRouter transport, audit log)
-- `impactracer/pipeline/interpreter.py` (LLM #1 wrapper)
+- `impactracer/pipeline/interpreter.py` (LLM #1 wrapper; single- AND two-stage paths)
+- `impactracer/indexer/project_skeleton.py` (cached codebase summary for stage-1b anchoring)
 - `impactracer/pipeline/synthesizer.py` (LLM #5 wrapper)
 - `impactracer/pipeline/graph_rerank.py` (graph-aware rerank, default-disabled)
 - `impactracer/evaluation/variant_flags.py` (canonical 8 variants V0..V7)
 
 **Canonical architecture additions** beyond the original blueprint:
+- **Two-stage LLM #1 (default-on).** `interpret_cr` splits into stage 1a (`CRIntent` — actionability + change_type + layers + domain_concepts, no project context) and stage 1b (`CRAnchors` — `search_queries`, `layered_search_queries`, `named_entry_points`, `anchor_candidates`, `out_of_scope_operations`), where 1b is grounded in a cached project skeleton. Controlled by `VariantFlags.two_stage_interpret` (default True); degrades to single-stage when the skeleton file is absent.
+- **Anchor priming (default-on).** `CRInterpretation` carries an extra `anchor_candidates` field (0–10 bare identifier guesses at likely host/sibling symbols). Controlled by `VariantFlags.anchor_priming` (default True). Retrieval treats anchors as a SOFT signal: an additive `Settings.anchor_priming_boost` at the score-floor gate and an `Settings.anchor_priming_bm25_boost` multiplier on a synthetic BM25 query (retriever Path 4). Never a hard pin — a hallucinated anchor still faces the validator chain.
+- **Project skeleton.** The indexer writes a deterministic, ~1500-token textual codebase summary to `data/project_skeleton.txt` (`indexer/project_skeleton.py`). It is the source of project vocabulary for stage 1b's anchor extraction. See §3.9.
 - LLM #1 emits an additional `layered_search_queries` field (5 layers × 1–2 phrases) consumed by the retriever as a first-class RRF path.
 - The synthesizer's `impacted_entities` list is HARD-FILTERED to qualified `file::symbol` entries only (File-type nodes never appear). File-type CIS nodes still drive `impacted_files`.
 - `TYPED_BY` is no longer in `PROPAGATION_VALIDATION_EXEMPT_EDGES`; depth-1 TYPED_BY now goes through LLM #4.
@@ -33,14 +38,23 @@ For the timeline of how these reached the current canonical state, see `implemen
 
 ## 0. Real Paths and Environment
 
+Stores are namespaced by **index profile** (`./data/<profile>/`), so multiple
+target repos can be indexed side by side without overwriting each other. The
+default profile is `citrakara`; select another with `--profile <name>` on any
+command or the `IMPACTRACER_PROFILE` env var (precedence: flag > env > default).
+Paths below show the `citrakara` profile.
+
 ```
 ImpacTracer repo:        C:\Users\Haidar\Documents\thesis\impactracer-app
 Target repo (citrakara): C:\Users\Haidar\Documents\thesis\citrakara
-Target docs (SRS+SDD):   C:\Users\Haidar\Documents\thesis\citrakara\docs
-SQLite DB:               C:\Users\Haidar\Documents\thesis\impactracer-app\data\impactracer.db
-ChromaDB store:          C:\Users\Haidar\Documents\thesis\impactracer-app\data\chroma_store
-LLM audit log:           C:\Users\Haidar\Documents\thesis\impactracer-app\data\llm_audit.jsonl
-Locked parameters:       C:\Users\Haidar\Documents\thesis\impactracer-app\data\locked_parameters.json
+Target repo (nova):      C:\Users\Haidar\Documents\thesis\NOVA
+Target docs (SRS+SDD):   <target_repo>\docs
+Data root (per profile): C:\Users\Haidar\Documents\thesis\impactracer-app\data\<profile>\
+SQLite DB:               ...\data\citrakara\impactracer.db
+ChromaDB store:          ...\data\citrakara\chroma_store
+Project skeleton:        ...\data\citrakara\project_skeleton.txt
+LLM audit log:           ...\data\citrakara\llm_audit.jsonl
+Locked parameters:       ...\data\citrakara\locked_parameters.json
 Persistent memory:       C:\Users\Haidar\Documents\thesis\impactracer-app\implementation_report.md
 HF cache:                ~/.cache/huggingface/hub  (OS-managed)
 ```
@@ -80,12 +94,12 @@ Forward slashes in all node IDs and file paths, even on Windows. `pathlib.Path.a
 ## 2. Architectural Invariants (Non-Negotiable)
 
 1. **Five primary LLM invocations in V7.** Names: `interpret`, `validate_sis`, `validate_trace`, `validate_propagation`, `synthesize`. Step 7 additionally runs an internal child-validation call (`validate_collapsed_children`, parameterised with the same LLM #4 prompt) for collapsed children. Step 7.5 runs `validate_siblings` micro-batches, one per file with a qualifying anchor — also parameterised from the LLM #4 module. Per-CR LLM call counts can therefore exceed 5 in practice (typically 5–25 distinct calls including child + sibling batches), but the **five canonical stage names** remain the architectural contract.
-2. **Deterministic structural pipeline.** AST extraction, embedding, RRF fusion, BFS propagation, and all three gates produce bit-identical output on identical input. Determinism in LLM steps is enforced by `temperature=0`, `seed=42`, Pydantic `response_schema`.
+2. **Deterministic structural pipeline.** AST extraction, embedding, RRF fusion, BFS propagation, and both pre-validation gates (3.6 dedup, 3.7 plausibility) produce bit-identical output on identical input. Determinism in LLM steps is enforced by `temperature=0`, `seed=42`, Pydantic `response_schema`.
 3. **All LLM outputs are Pydantic-schema-constrained** via `LLMClient.call(response_schema=...)`. Never free-form text. Every schema inherits from `TruncatingModel` (in `shared/models.py`).
 4. **3 `change_type` values only:** `ADDITION`, `MODIFICATION`, `DELETION`. Uppercase, no others.
 5. **14 structural edge types** (canonical and frozen): `CALLS, INHERITS, IMPLEMENTS, TYPED_BY, FIELDS_ACCESSED, DEFINES_METHOD, HOOK_DEPENDS_ON, PASSES_CALLBACK, IMPORTS, RENDERS, DEPENDS_ON_EXTERNAL, CLIENT_API_CALLS, DYNAMIC_IMPORT, CONTAINS`. Adding a new type requires the SQLite CHECK migration.
 6. **10 node types** (canonical and frozen): `File, Class, Function, Method, Interface, TypeAlias, Enum, ExternalPackage, InterfaceField, Variable`. `Variable` covers `const NAME = <new_expression|object|array|call_expression>` (Mongoose schemas, factory results, large frozen objects, template arrays); arrow-function `const` declarations remain `Function`.
-7. **8 canonical ablation variants V0..V7.** No V3.5, no V6.5. `VariantFlags.ALL_VARIANTS = ["V0","V1","V2","V3","V4","V5","V6","V7"]`. V3 represents the deterministic-filtering peak (cross-encoder + all three gates, no LLM gating). V7 is the full pipeline (BFS + LLM #4 + LLM #5 aggregator).
+7. **8 canonical ablation variants V0..V7.** No V3.5, no V6.5. `VariantFlags.ALL_VARIANTS = ["V0","V1","V2","V3","V4","V5","V6","V7"]`. V3 represents the deterministic-filtering peak (cross-encoder + both gates, no LLM gating; the score floor is retired/inert so V3's only differentiator from V2 is the cross-encoder). V7 is the full pipeline (BFS + LLM #4 + LLM #5 aggregator).
 8. **Forward slashes everywhere.** `pathlib.Path.as_posix()` for any path written to SQLite, ChromaDB metadata, or `node_id`.
 9. **Single pre-registered statistical test.** V7 vs V5, one-sided paired Wilcoxon signed-rank, on the **entity-level `f1_set`** metric. `MIN_PAIRED_N = 15`. `ALPHA = 0.05`. **No Bonferroni** (only one test exists).
 10. **Set-level metrics only.** `f1_set`, `precision_set`, `recall_set`, computed against the full unpruned validated CIS. There is no `F1@K` in the codebase. Bounded top-K metrics cannot distinguish a graph-flood result (recall via flood) from a focused one and are therefore forbidden.
@@ -233,12 +247,34 @@ Ten ordered steps; see `index_implementation.md` §1 for the runtime detail.
    Embed pending doc_chunks. Insert into ChromaDB code_units / doc_chunks.
 8. Recompute traceability table (full recompute — layer-weighted scores
    depend on the population).
+8.5 Write the project skeleton to `data/project_skeleton.txt` (consumed by
+    LLM #1 stage 1b at analysis time — see §3.9).
 9. Update file_hashes for every successfully processed file.
 10. Update index_metadata: edge_schema_version, indexing_timestamp,
     embedding_model_name, traceability_k_parameter, total_*.
 ```
 
 The indexer is incremental by default; `--force` discards `file_hashes` and re-indexes everything.
+
+### 3.9 Project Skeleton (`indexer/project_skeleton.py`)
+
+A by-product of indexing, written once per `index` run to
+`Settings.project_skeleton_path` (default `data/project_skeleton.txt`). It is a
+deterministic, ~1500-token textual summary of the indexed codebase that LLM #1
+stage 1b reads to ground its `anchor_candidates` and `search_queries` in real
+project vocabulary instead of generic Next.js intuitions. Four sections:
+
+1. Top-level directories with file counts.
+2. Common path patterns by `file_classification`, with concrete examples.
+3. Naming conventions inferred from the index (disambiguates camelCase
+   functions from PascalCase classes).
+4. Top-N most-incoming-referenced exported symbols — the "domain vocabulary"
+   any new feature is likely to call or modify (the most valuable section for
+   anchor extraction).
+
+`build_project_skeleton(conn)` is deterministic given the index state: an
+unchanged repo yields a bit-identical skeleton. A missing file is tolerated at
+analysis time — the interpreter degrades to single-stage (§4 Step 1).
 
 ---
 
@@ -269,7 +305,7 @@ class PipelineContext:
 
 ### Step 1 — Interpret CR (LLM #1, FR-B1, FR-B2)
 
-`pipeline/interpreter.py::interpret_cr`. Returns `CRInterpretation` with eleven fields:
+`pipeline/interpreter.py::interpret_cr`. Returns `CRInterpretation` with twelve fields:
 
 ```
 is_actionable: bool
@@ -281,9 +317,34 @@ domain_concepts: list[str]
 search_queries: list[str]                              # English even when CR is Indonesian
 layered_search_queries: dict[str, list[str]] | None    # per-layer query grid
 named_entry_points: list[str]
+anchor_candidates: list[str]                           # 0–10 bare identifier guesses (anchor priming)
 out_of_scope_operations: list[str]
 is_nfr: bool
 ```
+
+**Single- vs two-stage interpretation.** `interpret_cr` dispatches on
+`variant_flags.two_stage_interpret` (default True) AND the presence of a
+project-skeleton file:
+
+- **Two-stage (default):** `interpret_cr_two_stage` makes two calls. Stage 1a
+  (`call_name="interpret_intent"`, schema `CRIntent`) extracts actionability,
+  change_type, affected_layers, domain_concepts, is_nfr from the CR text alone.
+  Stage 1b (`call_name="interpret_anchors"`, schema `CRAnchors`) receives the
+  stage-1a output PLUS the cached project skeleton (§3.9) and emits the
+  retrieval-side fields: search_queries, layered_search_queries,
+  named_entry_points, anchor_candidates, out_of_scope_operations. The runner
+  glues both into one `CRInterpretation`. Non-actionable CRs skip 1b.
+- **Single-stage (fallback):** `interpret_cr_single_stage` makes one
+  `call_name="interpret"` call emitting the full schema. Used when
+  `two_stage_interpret=False` (the Amendment-3 before/after ablation, via
+  `with_two_stage_interpret`) or when no skeleton exists on disk.
+
+**Anchor priming.** When `variant_flags.anchor_priming` is True (default),
+the interpreter populates `anchor_candidates` with 1–3 likely host/sibling
+symbols even when the CR does not name them. These are HYPOTHESES, applied
+downstream as SOFT signals only (score-floor additive boost + BM25 boost,
+§2 / §4); a hallucinated anchor still faces the full validator chain. The
+`with_anchor_priming(flags, False)` helper reproduces the no-anchor baseline.
 
 `layered_search_queries` is a per-architectural-layer query grid emitted by LLM #1, keyed on the 5 canonical layers `api_route, page_component, ui_component, utility, type_definition` (matches `FileClassification` exactly). Each key holds 1–2 English phrases targeting that layer's naming conventions. The retriever's `layered_code` path consumes this dict to guarantee per-layer pool quotas; flat `search_queries` is retained for backward-compat with V0–V2 and as the cross-encoder rerank query set.
 
@@ -340,11 +401,15 @@ A `step_3_reranked_full` trace key captures the full ranked pool before the `max
 
 **Graph-aware rerank (default-disabled):** when `settings.enable_graph_rerank = True`, a 2-iteration label-propagation rerank inserts between the cross-encoder and the top-K truncation. Graph propagation blends a structural signal via `α * cross_encoder_norm + (1-α) * graph_norm`; Mode B optionally adds graph-discovered candidates not in the original RRF pool. Disabled by default because no α value won both entity-F1 and file-F1 on the target codebase's calibration set — its structural graph lacks form↔schema edges (form components fetch via API + Zod parse, severing the path graph rerank would exploit). Code preserved for codebases with denser structural coupling.
 
-### Step 3.5 / 3.6 / 3.7 — Pre-Validation Gates (FR-C4)
+### Step 3.6 / 3.7 — Pre-Validation Gates (FR-C4)
 
 `pipeline/prevalidation_filter.py`. Each gate is independently toggleable.
 
-- **3.5 Score floor** (`enable_score_floor`): drop candidates with `raw_reranker_score < settings.min_reranker_score_for_validation` (=-2.0). Sanity-only gate; the real precision gate is LLM #2.
+(Step 3.5, a reranker score floor, was retired: a 42-CR two-repo ablation found
+it strictly inert — it changed no candidate on any CR, because the calibrated
+threshold admits all normalized cross-encoder scores. The function is retained
+in source for archival only and is never invoked.)
+
 - **3.6 Semantic dedup** (`enable_dedup_gate`): for each `doc_chunks` candidate, look up its top-1 code resolution via `doc_code_candidates`. If that code_id is already in the candidate list, collapse the doc into the code candidate (attach `(section_title, text)` as Business Context for the LLM #2 prompt) and drop the doc.
 - **3.7 Plausibility — density only** (`enable_plausibility_gate`): if a single file accounts for more than `settings.plausibility_gate_density_threshold` (=0.50) of code candidates, drop those candidates UNLESS their name matches a `named_entry_point`. No per-file count cap.
 
@@ -366,11 +431,13 @@ Lost-in-the-middle reorder: position 0 = highest reranker_score, position N−1 
 
 ### Step 5b — Validate trace resolution (LLM #3, FR-C7)
 
-`pipeline/traceability_validator.py`. Batched ≤5 pairs per call. Returns `(validated_code_seeds, low_confidence_map, justifications, degraded)`.
+`pipeline/traceability_validator.py`. Batched ≤5 pairs per call. Returns `(validated_code_seeds, low_confidence_map, justifications, mechanisms, degraded)`.
 
 Skip if `enable_trace_validation=False` → take top-1 of each resolution as a blind seed (marked low_confidence_seed=True).
 
-Three-way per-pair decision: CONFIRMED → seed admitted; PARTIAL → seed admitted with `low_confidence_seed=True`; REJECTED → dropped. Each surviving code_id keeps the BEST decision's justification (CONFIRMED > PARTIAL > REJECTED) → propagated to `NodeTrace.justification` with `justification_source="llm3_trace"`.
+**Two-standard test (parity with LLM #2 / LLM #4).** A resolved code node is admitted only if BOTH hold: (1) it has a structural implementation relationship to the doc section, AND (2) the CR structurally modifies it. The CR satisfying standard 1 alone (a correct-but-unchanged implementation of an in-scope requirement) is NOT sufficient. Three-way per-pair decision: CONFIRMED → both standards hold, a concrete `mechanism_of_impact` is emitted, seed admitted as full-standing; PARTIAL → standard 1 holds but the change is unclear, seed admitted with `low_confidence_seed=True` and empty mechanism; REJECTED → no structural change relationship, dropped EVEN IF the doc link is valid. Each surviving code_id keeps the BEST decision (CONFIRMED > PARTIAL > REJECTED); its justification → `NodeTrace.justification` with `justification_source="llm3_trace"`, and a CONFIRMED seed's `mechanism_of_impact` is carried forward.
+
+**Anchor-eligibility consequence (Step 7.5).** Because LLM #3 now emits a mechanism for CONFIRMED seeds, a CONFIRMED doc-resolved seed is anchor-eligible for sibling promotion on par with a direct LLM-#2-confirmed code seed; PARTIAL/REJECTED seeds (no mechanism) are not. This closes a prior soundness asymmetry where doc-resolved seeds entered the CIS on a weaker warrant than directly-retrieved seeds and could never anchor. Invariant `|SIS(V5)| ≤ |SIS(V4)|` is preserved: the stricter LLM #3 still only rejects, never adds.
 
 **Fail-CLOSED:** per-pair missing verdict → REJECTED; per-batch exception → entire batch REJECTED, continue.
 
@@ -489,7 +556,7 @@ ImpactReport
 │        (deterministic; every validated CIS node; justification verbatim from
 │         LLM #2/#3/#4 or synthetic auto_exempt)
 ├── documentation_conflicts: list[str]  (LLM #5)
-├── estimated_scope: "local" | "menengah" | "luas"   (deterministic from CIS size)
+├── estimated_scope: "terlokalisasi" | "menengah" | "ekstensif"  (deterministic from CIS size)
 ├── analysis_mode: "retrieval_only" | "retrieval_plus_propagation"
 └── degraded_run: bool                  (True if any LLM batch was dropped)
 ```
@@ -516,11 +583,16 @@ A backward-compatibility property `ImpactReport.impacted_nodes` returns `impacte
 
 The runner also writes a per-step trace dict to `impact_report_full.json` when `trace_sink` is provided (the CLI always provides it). Trace keys:
 ```
-step_1_interpretation, step_2_rrf_pool, step_3_reranked,
-step_3_gates_survivors, step_4_llm2_verdicts, step_5_resolutions,
-step_5b_llm3_verdicts, step_6_bfs_raw_cis, step_7_llm4_verdicts,
-final_report
+step_1_interpretation, step_2_rrf_pool, step_3_reranked_full,
+step_3_reranked, step_3_gates_survivors, step_4_llm2_verdicts,
+step_5_resolutions, step_5b_llm3_verdicts, step_6_bfs_raw_cis,
+step_7_llm4_verdicts, step_7p5_sibling_promotion, final_report
 ```
+
+(`step_3_reranked_full` is the full pre-truncation rerank pool consumed by
+`tools/diagnose_k_widening.py`; `step_7p5_sibling_promotion` is present only
+for V7 with a qualifying anchor. Stage-disabled or zero-seed variants omit
+the keys for the steps they skip.)
 
 ---
 
@@ -528,20 +600,25 @@ final_report
 
 `evaluation/variant_flags.py`. `VariantFlags.ALL_VARIANTS = ["V0", "V1", "V2", "V3", "V4", "V5", "V6", "V7"]`.
 
-| Variant | BM25 | Dense | RRF | XEnc | ScoreFlr | Dedup | Plaus | LLM #2 | LLM #3 | BFS | LLM #4 |
-|---------|------|-------|-----|------|----------|-------|-------|--------|--------|-----|--------|
-| V0 | ✓ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ |
-| V1 | ☐ | ✓ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ |
-| V2 | ✓ | ✓ | ✓ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ |
-| V3 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ☐ | ☐ | ☐ |
-| V4 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ☐ | ☐ |
-| V5 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ☐ |
-| V6 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ |
-| V7 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+Dedup (3.6) and Plaus (3.7) are universal — they run on every variant V0–V7.
+The score floor (3.5) is retired (inert; archival-only) and is no longer a
+column. The chain is therefore distinguished purely by retrieval method, the
+cross-encoder, and the LLM/BFS stages.
+
+| Variant | BM25 | Dense | RRF | XEnc | Dedup | Plaus | LLM #2 | LLM #3 | BFS | LLM #4 |
+|---------|------|-------|-----|------|-------|-------|--------|--------|-----|--------|
+| V0 | ✓ | ☐ | ☐ | ☐ | ✓ | ✓ | ☐ | ☐ | ☐ | ☐ |
+| V1 | ☐ | ✓ | ☐ | ☐ | ✓ | ✓ | ☐ | ☐ | ☐ | ☐ |
+| V2 | ✓ | ✓ | ✓ | ☐ | ✓ | ✓ | ☐ | ☐ | ☐ | ☐ |
+| V3 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ☐ | ☐ | ☐ |
+| V4 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ☐ | ☐ |
+| V5 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ☐ |
+| V6 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ |
+| V7 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 LLM #1 (`interpret`) and LLM #5 (`synthesize`) run for every variant.
 
-V3 absorbs the former diagnostic V3.5: it represents the deterministic-filtering peak (cross-encoder + score floor + semantic dedup + density gate, no LLM gating). V7 absorbs the former V6.5: with LLM #5 demoted to aggregator-only, V6.5 and V7 are behaviourally identical.
+V3 absorbs the former diagnostic V3.5: it represents the deterministic-filtering peak (cross-encoder + semantic dedup + density gate, no LLM gating). Since dedup and density are universal and the score floor is retired (inert), V3's only differentiator from V2 is the cross-encoder. V7 absorbs the former V6.5: with LLM #5 demoted to aggregator-only, V6.5 and V7 are behaviourally identical.
 
 **Cross-variant additive assertions** (the harness verifies these per CR):
 - `|CIS(V7)| ≤ |CIS(V6)|` — LLM #4 only rejects.
@@ -629,7 +706,9 @@ No Bonferroni — only one test is run.
 Defaults that drive the entire pipeline:
 
 ```
-# ChromaDB / SQLite
+# ChromaDB / SQLite (these five are rewritten to ./data/<profile>/... by
+# get_settings(profile); the bare defaults below apply only if get_settings is
+# bypassed by constructing Settings() directly, e.g. in unit tests)
 db_path                          = "./data/impactracer.db"
 chroma_path                      = "./data/chroma_store"
 llm_audit_log_path               = "./data/llm_audit.jsonl"
@@ -680,8 +759,25 @@ sibling_admit_max_per_file           = 4        # admission ceiling per file
 sibling_admit_max_per_cr             = 0        # 0 = no global cap
 
 # Pre-validation gates (FR-C4)
-min_reranker_score_for_validation     = -2.0    # sanity-only floor
+# (min_reranker_score_for_validation still exists in config but is DEAD — the
+#  score floor that consumed it is retired/inert; archival-only.)
 plausibility_gate_density_threshold   = 0.50    # density-only; no max_per_file cap
+anchor_priming_boost                  = 0.10    # additive score-floor boost for anchor-matched names
+anchor_priming_bm25_boost             = 1.5     # multiplier on the synthetic anchor BM25 query (Path 4)
+
+# Step 1 — interpreter / project skeleton
+project_skeleton_path            = "./data/<profile>/project_skeleton.txt"  # stage-1b grounding; missing ⇒ single-stage
+# (VariantFlags.two_stage_interpret and .anchor_priming are both True by default;
+#  toggled per-ablation via with_two_stage_interpret / with_anchor_priming.)
+
+# Index profile (selects the ./data/<profile>/ store root) — NOT a Settings
+# field. Resolved by get_settings(profile): --profile flag > IMPACTRACER_PROFILE
+# env > "citrakara". get_settings rewrites db_path / chroma_path /
+# project_skeleton_path / llm_audit_log_path / locked_parameters_path under that
+# root AFTER .env is read, so it is authoritative over any of those paths in .env.
+
+# Sensitivity-analysis toggle
+code_only_mode                   = False        # True ⇒ coerce affected_layers=["code"], disable doc paths
 
 # BFS
 bfs_global_max_depth             = 3
@@ -729,28 +825,30 @@ No other module in the codebase may import the HTTP layer directly.
 
 ## 10. CLI Surface (`cli.py`)
 
-Three commands.
+Four commands. All accept `--profile / -p <name>` to select the index profile
+(`./data/<profile>/`); it defaults to `IMPACTRACER_PROFILE` then `citrakara`.
+Each command echoes the resolved profile + store paths to stderr before running.
 
-### `impactracer index <repo_path> [--force]`
+### `impactracer index <repo_path> [--force] [--profile NAME]`
 
-Build or update the knowledge representation. Orchestrates the offline indexer (FR-A1 .. FR-A7). Prints stats: `files_scanned, files_reindexed, code_nodes, doc_chunks, edges, elapsed`.
+Build or update the knowledge representation for the chosen profile. Orchestrates the offline indexer (FR-A1 .. FR-A7). Prints stats: `files_scanned, files_reindexed, code_nodes, doc_chunks, edges, elapsed`. Index a second repo into its own profile (e.g. `--profile nova`) without disturbing the first.
 
-### `impactracer analyze "<cr_text>" [--output PATH] [--variant V0..V7]`
+### `impactracer analyze "<cr_text>" [--output PATH] [--variant V0..V7] [--profile NAME]`
 
-Run the nine-step online pipeline on a single CR. Writes both `impact_report.json` (user-visible) and `impact_report_full.json` (step-by-step trace) to `--output` (and its `_full.json` sibling). Default `--variant V7`.
+Run the nine-step online pipeline on a single CR against the chosen profile's index. Writes both `impact_report.json` (user-visible) and `impact_report_full.json` (step-by-step trace) to `--output` (and its `_full.json` sibling). Default `--variant V7`. Fails fast if the profile's index is empty/uninitialized.
 
-### `impactracer evaluate --dataset DIR --output DIR [--run-full-ablation] [--verify-nfr]`
+### `impactracer evaluate --dataset DIR [--output DIR] [--profile NAME] [--run-full-ablation] [--verify-nfr]`
 
-Run the canonical 8-variant ablation matrix over every `*.json` GT entry in the `--dataset` directory. Each GT file is one `GTEntry` object (NOT an array) with `cr_id, cr_description, impacted_files, impacted_entities`.
+Run the canonical 8-variant ablation matrix over every `*.json` GT entry in the `--dataset` directory, against the chosen profile's index. Each GT file is one `GTEntry` object (NOT an array) with `cr_id, cr_description, impacted_files, impacted_entities`. `--output` defaults to `./eval/results/<profile>/` so citrakara and nova runs never collide; an explicit `--output` overrides.
 
 Output side: every artefact listed in §7.3, plus the `<cr_id>/<variant_id>/` per-cell directories.
 
 On startup the CLI captures `run_start_iso = datetime.now(timezone.utc).isoformat()` so NFR-05 can scope its audit-log filter to this run. The CLI orchestrator pivots the long-form metrics CSV to wide form before invoking `run_primary_test`; on `InsufficientPairsError` it writes `statistical_tests.json` with `status="insufficient_pairs"` plus descriptive Cliff's δ and median Δ (the same artefact path always exists, regardless of n). Standard-output prints of the summary table, statistical result, and calibration analysis are wrapped in a UTF-8 `TextIOWrapper` so Windows cp1252 consoles can render the `Δ` glyph without crashing.
 
-### `impactracer report [--output PATH]`
+### `impactracer report [--output PATH] [--profile NAME]`
 
-Diagnostic. Generates a Markdown indexing-quality report (node/edge counts, type breakdowns, FK integrity, doc-chunk traceability, semantic benchmark top-1, BFS reachability sanity).
+Diagnostic. Generates a Markdown indexing-quality report (node/edge counts, type breakdowns, FK integrity, doc-chunk traceability, semantic benchmark top-1, BFS reachability sanity) for the chosen profile's index.
 
 ---
 
-*End of master_blueprint.md. Operational detail in `index_implementation.md` (offline) and `analysis_implementation.md` (online). Sprint history in `implementation_report.md`.*
+*End of master_blueprint.md. Operational detail in `index_implementation.md` (offline) and `analysis_implementation.md` (online). Evaluation-corpus comparison in `INDEX_REPORT.md`. Sprint history in `implementation_report.md`.*

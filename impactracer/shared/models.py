@@ -123,9 +123,11 @@ TraceDecision = Literal["CONFIRMED", "PARTIAL", "REJECTED"]
 class CRInterpretation(TruncatingModel):
     """Output of LLM Call #1 (FR-B1 + FR-B2).
 
-    Nine attributes exactly. The ``is_actionable`` flag gates the entire
-    downstream pipeline: a False value halts analysis immediately with a
-    minimal rejection report.
+    The ``is_actionable`` flag gates the entire downstream pipeline: a False
+    value halts analysis immediately with a minimal rejection report. In the
+    default two-stage interpreter this schema is the glued result of stage 1a
+    (:class:`CRIntent`) and stage 1b (:class:`CRAnchors`); the single-stage
+    interpreter emits it directly.
     """
 
     is_actionable: bool = Field(
@@ -191,8 +193,8 @@ class CRInterpretation(TruncatingModel):
             "Business operations that share vocabulary with the CR but are "
             "NOT being changed. Injected into the SIS validator prompt as a "
             "hard exclusion list and used by the retriever to apply an "
-            "additive demotion penalty (-5.0) on candidates whose names or "
-            "snippets contain these substrings."
+            "additive demotion penalty (-1.0) on candidates whose NAME "
+            "contains one of these substrings (name-only; needle >= 6 chars)."
         ),
         max_length=30,
     )
@@ -388,15 +390,51 @@ class SISValidationResult(TruncatingModel):
 
 
 class TraceVerdict(TruncatingModel):
-    """Per-pair decision from LLM Call #3 (FR-C7)."""
+    """Per-pair decision from LLM Call #3 (FR-C7).
+
+    LLM #3 now applies the SAME two-standard test as LLM #2 (Step 4): a
+    resolved code node is admitted only if (1) it has a structural
+    implementation relationship to the doc section AND (2) the CR
+    structurally modifies it. The ``decision`` encodes the joint outcome and
+    ``mechanism_of_impact`` carries the concrete modification (mirroring
+    ``CandidateVerdict.mechanism_of_impact``):
+
+    - CONFIRMED: implements the doc section AND the CR modifies it; a concrete
+      mechanism is given. Full-standing seed (eligible to anchor sibling
+      promotion, same as a direct LLM #2-confirmed code seed).
+    - PARTIAL: implements the doc section, but the CR does not clearly force a
+      change to it (mechanism empty / speculative). Admitted as a
+      low-confidence seed; NOT anchor-eligible.
+    - REJECTED: no structural change relationship. Dropped entirely EVEN IF
+      the doc link is valid — a node that merely relates to an in-scope
+      requirement but is not itself changed is a false positive (LLM #2-style
+      topical-but-unchanged rejection).
+    """
 
     doc_chunk_id: str
     code_node_id: str
     decision: TraceDecision = Field(
         description=(
-            "CONFIRMED: code node implements the document intent. "
-            "PARTIAL: partial overlap, include with low-confidence marker. "
-            "REJECTED: no implementation relationship."
+            "CONFIRMED: code implements the doc section AND the CR modifies it "
+            "(mechanism_of_impact non-empty). "
+            "PARTIAL: implements the doc section but the CR does not clearly "
+            "change it; include with a low-confidence marker (mechanism empty). "
+            "REJECTED: no structural change relationship — drop even if the "
+            "doc link itself is valid. Vocabulary overlap or a correct-but-"
+            "unchanged implementation is NOT sufficient to confirm."
+        ),
+    )
+    mechanism_of_impact: str = Field(
+        default="",
+        max_length=400,
+        description=(
+            "Concrete structural modification the CR forces on this code node "
+            "(e.g. 'add `discount: number` to the Listing schema and propagate "
+            "to the serializer'). MUST be non-empty for a CONFIRMED decision "
+            "and empty for PARTIAL/REJECTED. Vague text such as 'this function "
+            "is related' is forbidden. Mirrors CandidateVerdict."
+            "mechanism_of_impact so resolved seeds carry the same warrant as "
+            "direct LLM #2-confirmed seeds."
         ),
     )
     justification: str = Field(

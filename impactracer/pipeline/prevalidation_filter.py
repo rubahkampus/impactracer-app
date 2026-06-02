@@ -1,15 +1,16 @@
 """Pre-validation deterministic gates (FR-C4).
 
-Three sub-steps executed in order:
+Two sub-steps executed in order:
 
-- Step 3.5 - Reranker score floor (configurable via settings.min_reranker_score_for_admission).
 - Step 3.6 - Cross-collection semantic deduplication.
 - Step 3.7 - Layer-aware affinity rescoring + file-density plausibility
              gate with named_entry_points exemption.
 
-No LLM calls. Purely deterministic.
+(Step 3.5, the reranker score floor, is RETIRED — found strictly inert by a
+42-CR two-repo ablation. ``step_3_5_score_filter`` remains for archival only
+and is never invoked.)
 
-Blueprint: master_blueprint.md §4 Steps 3.5–3.7.
+No LLM calls. Purely deterministic.
 """
 
 from __future__ import annotations
@@ -32,25 +33,16 @@ def apply_prevalidation_gates(
     enable_dedup: bool = True,
     enable_plausibility: bool = True,
 ) -> list[Candidate]:
-    """Apply Steps 3.5, 3.6, 3.7 in order.
+    """Apply Steps 3.6, 3.7 in order (semantic dedup, plausibility+affinity).
 
-    Blueprint §4 Steps 3.5–3.7. Step 3.5 is skipped when enable_score_floor
-    is False (V0–V3 maximum inclusivity mandate). Steps 3.6 and 3.7 are
-    independently gated by their flags.
+    NOTE: the Step 3.5 score floor is RETIRED. A 42-CR two-repo ablation
+    (floor on vs off, all else fixed) found it strictly inert — it changed no
+    candidate on any CR because the calibrated threshold admits all normalized
+    cross-encoder scores. ``step_3_5_score_filter`` is retained below for
+    archival only and is never invoked; ``enable_score_floor`` is accepted for
+    signature/back-compat but has no effect. See the retirement note on
+    ``step_3_5_score_filter``.
     """
-    if enable_score_floor:
-        threshold = settings.min_reranker_score_for_validation  # type: ignore[attr-defined]
-        anchor_boost = float(getattr(settings, "anchor_priming_boost", 0.10))
-        candidates = step_3_5_score_filter(
-            candidates,
-            threshold,
-            cr_interp=cr_interp,
-            anchor_boost=anchor_boost,
-        )
-        logger.info("[gates] Post-3.5 (score floor ≥{}): {} candidates", threshold, len(candidates))
-    else:
-        logger.debug("[gates] Step 3.5 DISABLED (enable_score_floor=False)")
-
     if enable_dedup:
         attach_doc_contexts = not bool(getattr(settings, "code_only_mode", False))
         candidates = step_3_6_semantic_dedup(
@@ -75,7 +67,12 @@ def step_3_5_score_filter(
     cr_interp: CRInterpretation | None = None,
     anchor_boost: float = 0.10,
 ) -> list[Candidate]:
-    """Drop candidates whose absolute cross-encoder score is below threshold.
+    """RETIRED / ARCHIVAL — not called by the pipeline. A 42-CR two-repo
+    ablation found the score floor strictly inert (no candidate changed on any
+    CR at the calibrated threshold). Kept for reference; do not re-wire without
+    re-evaluating. ``apply_prevalidation_gates`` no longer invokes this.
+
+    Drop candidates whose absolute cross-encoder score is below threshold.
 
     Uses raw_reranker_score (absolute logit) not the min-max normalized
     reranker_score — normalization maps the worst candidate to 0.0 regardless

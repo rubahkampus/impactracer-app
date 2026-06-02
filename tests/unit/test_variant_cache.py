@@ -202,16 +202,40 @@ def test_trace_verdicts_roundtrip(tmp_path: Path) -> None:
     seeds = ["code_a", "code_b"]
     low = {"code_a": True, "code_b": False}
     just = {"code_a": "low conf seed", "code_b": "validated"}
+    # code_b is CONFIRMED with a mechanism (anchor-eligible); code_a is
+    # PARTIAL/low-confidence with no mechanism.
+    mech = {"code_a": "", "code_b": "add discount field to schema"}
 
-    cache.put_trace_verdicts(seeds, low, just, degraded=True)
+    cache.put_trace_verdicts(seeds, low, just, mech, degraded=True)
     loaded = cache.get_trace_verdicts()
 
     assert loaded is not None
-    s, lc, j, deg = loaded
+    s, lc, j, m, deg = loaded
     assert s == seeds
     assert lc == low
     assert j == just
+    assert m == mech
     assert deg is True
+
+
+def test_trace_verdicts_roundtrip_legacy_cache_without_mechanisms(tmp_path: Path) -> None:
+    """A pre-fix cache file lacking the 'mechanisms' key must load as {}."""
+    cache = VariantCache(tmp_path, "run1", "C1", anchor_priming=True)
+    # Simulate a stale cache written before the mechanisms field existed.
+    cache._write_json(  # type: ignore[attr-defined]
+        "trace_verdicts",
+        {
+            "validated_code_seeds": ["code_a"],
+            "low_confidence": {"code_a": True},
+            "justifications": {"code_a": "legacy"},
+            "degraded": False,
+        },
+    )
+    loaded = cache.get_trace_verdicts()
+    assert loaded is not None
+    s, lc, j, m, deg = loaded
+    assert s == ["code_a"]
+    assert m == {}  # graceful default, no crash
 
 
 def test_bfs_cis_roundtrip(tmp_path: Path) -> None:

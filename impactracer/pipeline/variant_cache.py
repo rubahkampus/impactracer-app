@@ -183,7 +183,9 @@ class VariantCache:
     # Step 5b — LLM #3 trace validation + code seeds (V5-V7 share)
     # ----------------------------------------------------------------
 
-    def get_trace_verdicts(self) -> tuple[list[str], dict[str, bool], dict[str, str], bool] | None:
+    def get_trace_verdicts(
+        self,
+    ) -> tuple[list[str], dict[str, bool], dict[str, str], dict[str, str], bool] | None:
         raw = self._read_json("trace_verdicts")
         if raw is None:
             return None
@@ -191,6 +193,11 @@ class VariantCache:
             list(raw.get("validated_code_seeds", [])),
             {k: bool(v) for k, v in raw.get("low_confidence", {}).items()},
             dict(raw.get("justifications", {})),
+            # mechanisms added when LLM #3 adopted the LLM #2-style two-standard
+            # test. Older cache files (pre-fix) lack the key; default to {} so a
+            # stale cache degrades gracefully to "no anchor-eligible resolved
+            # seeds" rather than crashing the 5-tuple unpack.
+            dict(raw.get("mechanisms", {})),
             bool(raw.get("degraded", False)),
         )
 
@@ -199,6 +206,7 @@ class VariantCache:
         validated_code_seeds: list[str],
         low_confidence: dict[str, bool],
         justifications: dict[str, str],
+        mechanisms: dict[str, str],
         degraded: bool,
     ) -> None:
         self._write_json(
@@ -207,6 +215,7 @@ class VariantCache:
                 "validated_code_seeds": list(validated_code_seeds),
                 "low_confidence": {k: bool(v) for k, v in low_confidence.items()},
                 "justifications": dict(justifications),
+                "mechanisms": dict(mechanisms),
                 "degraded": bool(degraded),
             },
         )
@@ -250,6 +259,47 @@ class VariantCache:
                 "cis": _cisresult_to_dict(cis),
                 "justifications": dict(justifications),
                 "degraded": bool(degraded),
+            },
+        )
+
+    # ----------------------------------------------------------------
+    # Step 7.5 — LLM #4 sibling promotion (V6-V7 shared after the
+    # 2026-05-26 ablation-boundary fix; sibling promotion moved from
+    # V7-only gating to V6+ gating to isolate the LLM #4 propagation
+    # validation contribution at the V6->V7 boundary).
+    #
+    # Cached as the set of admitted sibling node_ids plus their LLM #4
+    # justifications. The cache key is shared across V6 and V7 because
+    # both variants read the same bfs_cis and run sibling promotion
+    # against the same SIS-confirmed anchor set, so the LLM #4 sibling
+    # call inputs are identical. Pairing this across V6 and V7 preserves
+    # the Amendment-2 paired-clean comparison invariant.
+    # ----------------------------------------------------------------
+
+    def get_sibling_admissions(
+        self,
+    ) -> tuple[list[str], dict[str, str], int] | None:
+        raw = self._read_json("sibling_admissions")
+        if raw is None:
+            return None
+        return (
+            list(raw.get("admitted_ids", [])),
+            dict(raw.get("justifications", {})),
+            int(raw.get("admitted_count", 0)),
+        )
+
+    def put_sibling_admissions(
+        self,
+        admitted_ids: list[str],
+        justifications: dict[str, str],
+        admitted_count: int,
+    ) -> None:
+        self._write_json(
+            "sibling_admissions",
+            {
+                "admitted_ids": list(admitted_ids),
+                "justifications": dict(justifications),
+                "admitted_count": int(admitted_count),
             },
         )
 

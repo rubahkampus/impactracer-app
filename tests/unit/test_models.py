@@ -134,10 +134,18 @@ def test_sis_validation_result_round_trip() -> None:
 
 
 def _make_trace_verdict(decision: str = "CONFIRMED") -> TraceVerdict:
+    # CONFIRMED carries a concrete mechanism (two-standard test); PARTIAL/
+    # REJECTED leave it empty.
+    mechanism = (
+        "add `mfa: boolean` to the login payload and gate the handler on it"
+        if decision == "CONFIRMED"
+        else ""
+    )
     return TraceVerdict(
         doc_chunk_id="srs__functional_requirements",
         code_node_id="src/lib/auth.ts::loginHandler",
         decision=decision,  # type: ignore[arg-type]
+        mechanism_of_impact=mechanism,
         justification="Code implements the login requirement.",
     )
 

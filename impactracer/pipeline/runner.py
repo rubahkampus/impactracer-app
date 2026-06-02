@@ -675,11 +675,12 @@ def run_analysis(
         logger.info("[runner] Step 3: Cross-encoder DISABLED ({})", variant_flags.variant_id)
 
     # ------------------------------------------------------------------
-    # Steps 3.5, 3.6, 3.7 — Pre-validation gates (FR-C4)
+    # Steps 3.6, 3.7 — Pre-validation gates (FR-C4)
     #
-    # Step 3.6 dedup and 3.7 plausibility run universally
-    # (V0-V7). 3.5 score floor stays gated on the cross-encoder because
-    # it consumes raw_reranker_score that V0-V2 do not produce.
+    # Step 3.6 dedup and 3.7 plausibility run universally (V0-V7).
+    # Step 3.5 (score floor) is RETIRED — strictly inert in a 42-CR two-repo
+    # ablation; apply_prevalidation_gates ignores enable_score_floor. The flag
+    # is still passed for signature/cache-key stability but has no effect.
     #
     # Skipped on cache hit for the post-gate candidate list.
     # ------------------------------------------------------------------
@@ -824,6 +825,10 @@ def run_analysis(
     # ------------------------------------------------------------------
     low_conf: dict[str, bool] = {}
     trace_justifications: dict[str, str] = {}
+    # LLM #3 now emits a mechanism map (non-empty only for CONFIRMED seeds),
+    # mirroring LLM #2. This is what makes a doc-resolved seed anchor-eligible
+    # for sibling promotion on par with a direct code seed.
+    trace_mechanisms: dict[str, str] = {}
 
     if variant_flags.enable_trace_validation and resolutions:
         logger.info("[runner] Step 5b: Trace validation (LLM #3, batched max 5)")
@@ -832,10 +837,18 @@ def run_analysis(
             variant_cache.get_trace_verdicts() if variant_cache is not None else None
         )
         if _cached_trace is not None:
-            validated_code_seeds, low_conf, trace_justifications, llm3_degraded = _cached_trace
+            (
+                validated_code_seeds,
+                low_conf,
+                trace_justifications,
+                trace_mechanisms,
+                llm3_degraded,
+            ) = _cached_trace
             logger.info(
-                "[runner] [cache HIT] trace_verdicts ({} seeds, LLM #3 skipped)",
+                "[runner] [cache HIT] trace_verdicts ({} seeds, {} with mechanism, "
+                "LLM #3 skipped)",
                 len(validated_code_seeds),
+                sum(1 for m in trace_mechanisms.values() if m),
             )
         else:
             # Hydrate doc texts from ChromaDB doc_meta_cache (pre-cached in ctx).
@@ -875,20 +888,25 @@ def run_analysis(
                         "source_code": row[4],
                     }
 
-            validated_code_seeds, low_conf, trace_justifications, llm3_degraded = (
-                validate_trace_resolutions(
-                    resolutions=resolutions,
-                    doc_text_by_id=doc_text_by_id,
-                    code_meta_by_id=code_meta_by_id,
-                    client=ctx.llm_client,
-                    cr_interp=cr_interp,
-                )
+            (
+                validated_code_seeds,
+                low_conf,
+                trace_justifications,
+                trace_mechanisms,
+                llm3_degraded,
+            ) = validate_trace_resolutions(
+                resolutions=resolutions,
+                doc_text_by_id=doc_text_by_id,
+                code_meta_by_id=code_meta_by_id,
+                client=ctx.llm_client,
+                cr_interp=cr_interp,
             )
             if variant_cache is not None:
                 variant_cache.put_trace_verdicts(
                     validated_code_seeds,
                     low_conf,
                     trace_justifications,
+                    trace_mechanisms,
                     llm3_degraded,
                 )
 
@@ -903,6 +921,7 @@ def run_analysis(
             "validated_code_seeds": list(validated_code_seeds),
             "low_confidence": dict(low_conf),
             "justifications": dict(trace_justifications),
+            "mechanisms": dict(trace_mechanisms),
             "degraded": llm3_degraded,
         })
     elif resolutions:
@@ -1178,36 +1197,128 @@ def run_analysis(
     # Recovers GT entities that share a file with a confirmed seed — the
     # dominant V7-baseline failure mode (forensic audit: 7/8 missed entities
     # on CR-01, 4/6 on CR-03 lived in already-named files).
+    #
+    # Ablation-boundary fix (2026-05-26): sibling promotion is gated on
+    # ``enable_bfs`` (V6+), NOT ``enable_propagation_validation`` (V7-only).
+    # The previous V7-only gating conflated two distinct LLM #4 uses:
+    # (1) propagation validation = prune BFS-propagated nodes
+    # (2) sibling promotion       = expand SIS-confirmed seeds with in-file
+    #                               siblings via CONTAINS
+    # Bundling both into V7's flag violated the additive-chain invariant
+    # (V6->V7 should isolate ONE mechanism). Sibling promotion is an
+    # expansion step (like BFS), so it belongs at V6. V7 now isolates the
+    # propagation-validation pruner cleanly.
     # ------------------------------------------------------------------
     sibling_admitted_count = 0
+    _sibling_cache_hit = False
     if (
-        variant_flags.enable_propagation_validation
+        variant_flags.enable_bfs
         and getattr(settings, "enable_sibling_promotion", True)
+    ):
+        # Variant-cache pairing: V6 and V7 share the sibling-admissions cache
+        # because both read the same bfs_cis and run sibling promotion against
+        # the same SIS-confirmed anchor set, so the LLM #4 sibling call inputs
+        # are identical. Whichever variant runs first populates the cache; the
+        # second hits it. This preserves the Amendment-2 paired-clean
+        # comparison invariant across V6 and V7 on sibling promotion.
+        if variant_cache is not None:
+            _cached_siblings = variant_cache.get_sibling_admissions()
+            if _cached_siblings is not None:
+                admitted_ids, cached_justifications, cached_count = _cached_siblings
+                logger.info(
+                    "[runner] Step 7.5: sibling-admissions cache HIT "
+                    "(admitted={}, total_count={})",
+                    len(admitted_ids), cached_count,
+                )
+                # Rehydrate admitted siblings into the in-memory CIS.
+                # Fetch metadata for the cached admitted_ids in one batched
+                # SELECT and inject them as propagated nodes (mirrors the
+                # original injection block below at line ~1330).
+                if admitted_ids:
+                    placeholders_c = ",".join("?" * len(admitted_ids))
+                    rows_c = ctx.conn.execute(
+                        f"SELECT node_id, file_path FROM code_nodes "
+                        f"WHERE node_id IN ({placeholders_c})",
+                        admitted_ids,
+                    ).fetchall()
+                    fp_by_id = {r[0]: r[1] for r in rows_c}
+                    # Synthesize anchor as the first SIS node sharing the
+                    # file_path with each admitted sibling (deterministic
+                    # rehydration; the original anchor is not cached because
+                    # only the admission decision needs to be reproduced).
+                    sis_by_file: dict[str, str] = {}
+                    for sid, trace in cis.sis_nodes.items():
+                        sis_fp = fp_by_id.get(sid) or (
+                            sid.split("::", 1)[0] if "::" in sid else ""
+                        )
+                        sis_by_file.setdefault(sis_fp, sid)
+                    for sib_id in admitted_ids:
+                        if (
+                            sib_id in cis.sis_nodes
+                            or sib_id in cis.propagated_nodes
+                        ):
+                            continue
+                        fp = fp_by_id.get(sib_id, "")
+                        anchor = sis_by_file.get(fp) or next(
+                            iter(cis.sis_nodes.keys()), sib_id
+                        )
+                        cis.propagated_nodes[sib_id] = NodeTrace(
+                            depth=1,
+                            causal_chain=["CONTAINS"],
+                            path=[anchor, sib_id],
+                            source_seed=anchor,
+                            low_confidence_seed=False,
+                            justification=cached_justifications.get(sib_id, ""),
+                            justification_source="llm4_sibling",
+                        )
+                        llm4_justifications[sib_id] = cached_justifications.get(
+                            sib_id, ""
+                        )
+                        sibling_admitted_count += 1
+                _sibling_cache_hit = True
+
+    if (
+        variant_flags.enable_bfs
+        and getattr(settings, "enable_sibling_promotion", True)
+        and not _sibling_cache_hit
     ):
         from impactracer.pipeline.graph_bfs import collect_file_local_siblings
         from impactracer.pipeline.traversal_validator import validate_siblings_for_file
 
         anchors_for_sibling: list[str] = []
         anchor_justifications: dict[str, str] = {}
-        # Anchor pool restricted to LLM #2 SIS-confirmed seeds with a
-        # NON-EMPTY mechanism_of_impact. The worst per-file overshoot in
-        # prior calibrations came from anchors that were SIS-confirmed but
-        # whose LLM #2 verdict had no concrete mechanism (e.g. CRUD funcs
-        # of an unrelated domain entity). When the anchor's mechanism is
-        # articulate, downstream sibling-batch admits
-        # share a real contract surface; when it's empty, sibling-batch
-        # generalises by domain analogy and over-admits.
+        # Anchor pool = any confirmed seed carrying a NON-EMPTY mechanism,
+        # from EITHER validator:
+        #   - LLM #2 (sis_justifications): direct code seeds.
+        #   - LLM #3 (trace_mechanisms): doc-resolved code seeds CONFIRMED
+        #     under the two-standard test (implements the section AND the CR
+        #     modifies it). Previously these were silently excluded because
+        #     LLM #3 emitted no mechanism — the soundness gap this fix closes.
+        # The worst per-file overshoot in prior calibrations came from anchors
+        # confirmed without a concrete mechanism (e.g. CRUD funcs of an
+        # unrelated domain entity); requiring an articulate mechanism — now
+        # from either validator — keeps the sibling-batch admits sharing a
+        # real contract surface. A seed with only a PARTIAL/low-confidence
+        # LLM #3 verdict has no mechanism and is therefore NOT anchor-eligible,
+        # exactly as a weak LLM #2 verdict is excluded.
         for nid in list(cis.sis_nodes.keys()) + list(cis.propagated_nodes.keys()):
             if "::" not in nid:
                 continue
             v2 = sis_justifications.get(nid) or {}
             mechanism = (v2.get("mechanism_of_impact") or "").strip()
+            justification_fallback = v2.get("justification") or ""
             if not mechanism:
-                # Anchor failed the "articulate LLM #2 mechanism" gate. Skip.
+                # No LLM #2 mechanism — fall back to an LLM #3 mechanism if
+                # this seed was CONFIRMED via the doc-resolution path.
+                mechanism = (trace_mechanisms.get(nid) or "").strip()
+                if mechanism and not justification_fallback:
+                    justification_fallback = trace_justifications.get(nid) or ""
+            if not mechanism:
+                # Neither validator produced a mechanism. Skip — not an anchor.
                 continue
             anchors_for_sibling.append(nid)
             j = mechanism or (
-                v2.get("justification") or ""
+                justification_fallback
             )
             anchor_justifications[nid] = j
 
@@ -1425,10 +1536,17 @@ def run_analysis(
             continue
         v3 = trace_justifications.get(sid)
         if v3:
+            # LLM #3 now carries a mechanism for CONFIRMED resolved seeds
+            # (two-standard test). Prefer it as the justification, exactly as
+            # the LLM #2 branch prefers its mechanism, and populate the
+            # mechanism_of_impact field so downstream consumers treat a
+            # CONFIRMED resolved seed identically to a direct LLM #2 seed.
+            v3_mech = (trace_mechanisms.get(sid) or "").strip()
             cis.sis_nodes[sid] = _dc_replace(
                 trace,
-                justification=v3,
+                justification=v3_mech or v3,
                 justification_source="llm3_trace",
+                mechanism_of_impact=v3_mech,
             )
             continue
         # No LLM verdict associated (e.g. direct seed under V0-V3).
