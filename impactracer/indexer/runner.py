@@ -7,10 +7,11 @@ pipeline:
 2. Diff against file_hashes to determine work set (unless ``force``).
 3. Chunk Markdown -> :mod:`doc_indexer`.
 4. AST Pass 1 -> :mod:`code_indexer` -> skeletonize each node body.
-5. AST Pass 2 -> :mod:`code_indexer` -> 13 edge types.
+5. AST Pass 2 -> :mod:`code_indexer` -> 14 edge types.
 6. Embed all pending texts -> :mod:`embedder`.
 7. Traceability precompute -> :mod:`traceability`.
-8. Write index_metadata, print summary statistics.
+8. Write project skeleton -> :mod:`project_skeleton` (consumed by LLM #1).
+9. Write index_metadata, print summary statistics.
 
 Reference: master_blueprint.md §3.8
 """

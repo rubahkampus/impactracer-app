@@ -2372,7 +2372,7 @@ def extract_edges(
     known_node_ids: set[str],
     conn: sqlite3.Connection,
 ) -> int:
-    """Pass 2: extract all 13 edge types.
+    """Pass 2: extract all 14 edge types.
 
     Returns the number of edges emitted. Also populates
     ``file_dependencies`` for incremental reindex support.

@@ -110,7 +110,69 @@ def build_summary_artifacts(
     md_path = output_dir / "summary_table.md"
     md_path.write_text(_render_markdown(summary_df), encoding="utf-8")
 
+    # ------------------------------------------------------------------
+    # Sprint 25: per-change-type stratified summary.
+    # Macro F1 hides that the eval set mixes MODIFICATION (easy), ADDITION
+    # (hard — anchor inference required), and DELETION (graph-flood prone).
+    # Stratification gives the committee a per-change-type read on where
+    # the pipeline actually works vs where it struggles.
+    # ------------------------------------------------------------------
+    if "change_type" in df.columns:
+        per_ct_rows: list[dict] = []
+        for ct_value in ("ADDITION", "MODIFICATION", "DELETION"):
+            ct_sub = df[df["change_type"].astype(str).str.upper() == ct_value]
+            if ct_sub.empty:
+                continue
+            for variant in VariantFlags.ALL_VARIANTS:
+                vsub = ct_sub[ct_sub["variant"] == variant]
+                if vsub.empty:
+                    continue
+                row: dict = {"change_type": ct_value, "variant": variant}
+                for col in _METRIC_COLS:
+                    row[col] = _macro_average(vsub, col)
+                ok = vsub[vsub["status"] == "ok"]
+                row["n_ok"] = int(len(ok))
+                row["n_error"] = int(len(vsub) - len(ok))
+                per_ct_rows.append(row)
+
+        if per_ct_rows:
+            ct_df = pd.DataFrame(
+                per_ct_rows,
+                columns=["change_type", "variant", *_METRIC_COLS, "n_ok", "n_error"],
+            )
+            ct_csv = output_dir / "summary_table_by_change_type.csv"
+            ct_df.to_csv(ct_csv, index=False, float_format="%.4f")
+            ct_md = output_dir / "summary_table_by_change_type.md"
+            ct_md.write_text(_render_change_type_markdown(ct_df), encoding="utf-8")
+
     return csv_path
+
+
+def _render_change_type_markdown(ct_df: pd.DataFrame) -> str:
+    """Render the per-change-type summary as Markdown grouped by change_type."""
+    if ct_df.empty:
+        return "# Summary by Change Type\n\n_(no rows)_\n"
+    lines = ["# Summary Table — Per-Change-Type × Per-Variant Set-Level Metrics", ""]
+    for ct in ("ADDITION", "MODIFICATION", "DELETION"):
+        sub = ct_df[ct_df["change_type"] == ct]
+        if sub.empty:
+            continue
+        cols = [c for c in sub.columns if c != "change_type"]
+        lines.append(f"## change_type = {ct}")
+        lines.append("")
+        lines.append("| " + " | ".join(cols) + " |")
+        lines.append("|" + "|".join(["---"] * len(cols)) + "|")
+        for _, r in sub.iterrows():
+            cells = []
+            for c in cols:
+                v = r[c]
+                if isinstance(v, float):
+                    cells.append("nan" if np.isnan(v) else f"{v:.4f}")
+                else:
+                    cells.append(str(v))
+            lines.append("| " + " | ".join(cells) + " |")
+        lines.append("")
+    return "\n".join(lines) + "\n"
 
 
 def _render_markdown(summary_df: pd.DataFrame) -> str:

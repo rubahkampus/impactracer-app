@@ -542,3 +542,92 @@ def collect_file_local_siblings(
             total, len(capped), len(anchor_ids), max_per_file,
         )
     return capped
+
+
+# =========================================================================
+# DELETION-only backward-compat filter (post-BFS, pre-LLM #4)
+# =========================================================================
+
+#: Edge types that, when they are the SOLE reason a node is in the CIS for
+#: a DELETION CR, are likely "import-only" / "dead-reference" patterns that
+#: a linter would clean up rather than evidence of true semantic impact.
+#: When BFS reaches a node via ONLY these edges (no CALLS / TYPED_BY /
+#: FIELDS_ACCESSED / IMPLEMENTS / INHERITS), the node is demoted out of
+#: the CIS for the DELETION case.
+_DELETION_IMPORT_ONLY_EDGES: frozenset[str] = frozenset({
+    "IMPORTS",
+    "DYNAMIC_IMPORT",
+})
+
+#: Edge types that ALWAYS represent a real consumption surface for a
+#: deletion target. If ANY of these appears in the chain, the candidate
+#: stays in the CIS.
+_DELETION_SUBSTANTIVE_EDGES: frozenset[str] = frozenset({
+    "CALLS",
+    "TYPED_BY",
+    "FIELDS_ACCESSED",
+    "IMPLEMENTS",
+    "INHERITS",
+    "DEFINES_METHOD",
+    "RENDERS",
+    "PASSES_CALLBACK",
+    "HOOK_DEPENDS_ON",
+    "CLIENT_API_CALLS",
+    "DEPENDS_ON_EXTERNAL",
+    "CONTAINS",
+})
+
+
+def apply_deletion_import_only_filter(cis: CISResult) -> tuple[CISResult, int]:
+    """Demote propagated nodes whose ONLY path to a SIS seed is via IMPORTS.
+
+    Rationale (sprint 25):
+      For DELETION CRs the BFS reaches many modules that merely import the
+      deletion target without using it in any behaviour-affecting position.
+      These are "dead references" that a linter (tsc / eslint
+      no-unused-imports) would clean up after the deletion. They are not
+      part of the cognitive impact set the GT annotator considered. Demoting
+      them at this stage tightens precision on DELETION without changing
+      ADDITION / MODIFICATION behaviour at all.
+
+    Filter rule (applied per propagated node):
+      Keep iff the node's ``causal_chain`` contains at least one edge in
+      ``_DELETION_SUBSTANTIVE_EDGES``. Drop iff every edge in the chain is
+      in ``_DELETION_IMPORT_ONLY_EDGES``.
+      SIS seeds are never demoted (the deleted symbol itself + its directly
+      retrieved + LLM-2-validated co-changes stay).
+
+    Returns:
+        (filtered_cis, n_demoted) where n_demoted is the count of nodes
+        removed from propagated_nodes.
+
+    NOTE: This is a deterministic post-BFS filter. It does NOT call any LLM.
+    It is gated on change_type==DELETION by the caller.
+    """
+    if not cis.propagated_nodes:
+        return cis, 0
+
+    kept: dict[str, NodeTrace] = {}
+    demoted: list[str] = []
+
+    for nid, trace in cis.propagated_nodes.items():
+        chain = trace.causal_chain or []
+        if not chain:
+            # Empty chain == this is effectively a direct seed; keep.
+            kept[nid] = trace
+            continue
+        has_substantive = any(e in _DELETION_SUBSTANTIVE_EDGES for e in chain)
+        if has_substantive:
+            kept[nid] = trace
+        else:
+            demoted.append(nid)
+
+    if demoted:
+        logger.info(
+            "[graph_bfs] deletion-import-only filter: demoted {} of {} propagated "
+            "nodes (kept {})",
+            len(demoted), len(cis.propagated_nodes), len(kept),
+        )
+
+    filtered = CISResult(sis_nodes=cis.sis_nodes, propagated_nodes=kept)
+    return filtered, len(demoted)

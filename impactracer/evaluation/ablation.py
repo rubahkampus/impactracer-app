@@ -163,6 +163,21 @@ def run_single_cr_all_variants(
             encoding="utf-8",
         )
 
+        # Pull change_type from the LLM-1 interpretation in the trace sink
+        # so per-CR stratified analysis (ADDITION / MODIFICATION / DELETION)
+        # is downstream-computable from the CSV. Defaults to empty string
+        # when the trace is malformed.
+        _ci = trace_sink.get("step_1_interpretation") or {}
+        if isinstance(_ci, str):
+            try:
+                import json as _json_local
+                _ci = _json_local.loads(_ci) if _ci else {}
+            except Exception:
+                _ci = {}
+        _change_type = ""
+        if isinstance(_ci, dict):
+            _change_type = str(_ci.get("change_type") or "").upper()
+
         results[variant_id] = {
             "status": "ok",
             "elapsed_s": elapsed,
@@ -174,6 +189,7 @@ def run_single_cr_all_variants(
             "estimated_scope": report.estimated_scope,
             "anchor_priming": flags.anchor_priming,
             "code_only_mode": bool(getattr(settings, "code_only_mode", False)),
+            "change_type": _change_type,
             **metrics,
             # Promote the primary metrics to top-level for stat-test ease.
             "f1_set": metrics["entity_f1_set"],
@@ -258,6 +274,8 @@ def run_full_evaluation(
         "anchor_priming",
         # Code-only sensitivity-analysis flag per cell.
         "code_only_mode",
+        # Sprint 25: per-CR change_type from LLM-1, for stratified reporting.
+        "change_type",
         # Entity-level
         "entity_precision_set", "entity_recall_set", "entity_f1_set",
         "entity_n_predicted", "entity_n_gt", "entity_n_intersect",

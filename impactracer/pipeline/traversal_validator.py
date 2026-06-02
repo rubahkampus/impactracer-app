@@ -61,7 +61,7 @@ connects the SIS seed to this node). The chain is provided as FACTUAL CONTEXT \
 ONLY — it tells you HOW the BFS reached the node, not WHETHER the node is \
 impacted.
 
-CRITICAL ANTI-TAUTOLOGY RULE:
+CRITICAL ANTI-TAUTOLOGY RULE (default — for MODIFICATION and ADDITION CRs):
 - Edge types are NOT impact evidence. A chain containing IMPLEMENTS, CALLS, \
 or any other edge does NOT by itself confirm impact. Many chains terminate \
 at nodes whose behaviour is unaffected by the CR despite a structurally \
@@ -69,6 +69,27 @@ present relationship.
 - Reject any node where the chain merely describes a generic dependency that \
 the CR does not actually disturb (e.g. a function CALLS a utility that the CR \
 does not modify; a class IMPLEMENTS an interface whose contract is unchanged).
+
+DELETION EXCEPTION (applies ONLY when Change Type == DELETION):
+- When the CR REMOVES a symbol, the structural relationships ARE evidence. \
+A direct CALLS/TYPED_BY/IMPLEMENTS/FIELDS_ACCESSED edge from the candidate \
+to the deletion target means the candidate's code will lose a referenced \
+contract and either fail to compile, raise at runtime, or carry dead \
+references that must be cleaned up.
+- ADMIT a depth-1 caller/consumer of the deletion target on the structural \
+edge alone IF the candidate's code surface (signature, abstraction) shows \
+the deleted symbol's identifier appearing in a position that affects \
+behaviour (call site, type annotation, field access, schema field). The \
+acceptable justification format here IS: "directly references the deleted \
+symbol via <CALLS|TYPED_BY|...> at <location>; will break/dangle after \
+removal." This is NOT a tautology — for DELETION the structural reference \
+IS the breakage mechanism.
+- REJECT a deletion-edge candidate ONLY if the reference is purely lexical \
+(comment, dead import never used in body, generic type parameter that has \
+its own default, string literal matching the symbol name).
+- For depth >= 2 chains from a DELETION target, the anti-tautology rule \
+applies as normal: behavioural cascade through intermediate symbols is NOT \
+automatic and must be justified concretely.
 
 GOOD JUSTIFICATIONS (state the contract breakage or behavioral anomaly):
 - "Adding the `pin` attribute to CommissionListingPayload requires this form \
@@ -115,16 +136,30 @@ def _build_propagation_prompt(
     safety is enforced by the system prompt (forbidden bare-topology
     justifications), not by hiding the chain.
     """
+    is_deletion = (cr_interp.change_type or "").upper() == "DELETION"
     lines: list[str] = [
         f"Change Request Intent: {cr_interp.primary_intent}",
         f"Change Type: {cr_interp.change_type}",
         f"Domain Concepts: {', '.join(cr_interp.domain_concepts)}",
         "",
-        "For each node below, determine whether it is semantically impacted "
-        "by the Change Request. The causal chain is shown as factual context; "
-        "do NOT use edge types as impact evidence.",
-        "",
     ]
+    if is_deletion:
+        lines.append(
+            "NOTE — DELETION CR: the DELETION EXCEPTION clause in the system "
+            "prompt applies. For depth-1 candidates that directly CALL, are "
+            "TYPED_BY, IMPLEMENT, or access FIELDS_ACCESSED of the deletion "
+            "target, the structural edge IS impact evidence (the reference "
+            "will dangle/break after removal). Use the candidate's signature "
+            "or abstraction to confirm the deleted symbol identifier appears "
+            "in a behaviour-affecting position before admitting."
+        )
+    else:
+        lines.append(
+            "For each node below, determine whether it is semantically impacted "
+            "by the Change Request. The causal chain is shown as factual context; "
+            "do NOT use edge types as impact evidence."
+        )
+    lines.append("")
 
     for i, (node_id, trace) in enumerate(batch, start=1):
         meta = node_meta_by_id.get(node_id, {})

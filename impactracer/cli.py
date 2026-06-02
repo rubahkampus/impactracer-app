@@ -1,11 +1,13 @@
-"""Typer CLI: the three user-facing commands.
+"""Typer CLI: the four user-facing commands.
 
-Commands:
+Commands (all accept ``--profile/-p NAME`` to select the ``./data/<profile>/``
+index; default ``citrakara``, overridable by ``IMPACTRACER_PROFILE``):
     index     - Build the knowledge representation for a target repository.
     analyze   - Analyze a Change Request and emit an ImpactReport.
     evaluate  - Run the ablation harness over a Ground Truth dataset.
+    report    - Generate a Markdown indexing-quality diagnostic report.
 
-See 11_configuration_and_cli.md for the full command contract.
+See master_blueprint.md §10 for the full command contract.
 """
 
 from __future__ import annotations
@@ -40,10 +42,31 @@ def _root(
     _configure_logging(verbose=verbose)
 
 
+def _echo_profile(settings: object, profile: str | None) -> None:
+    """Echo the active index profile + resolved store paths to stderr.
+
+    Written to stderr so it never pollutes pipeable stdout. Makes a
+    wrong-profile (or stale-.env) mistake obvious before any heavy work runs.
+    """
+    from impactracer.shared.config import resolve_profile
+
+    typer.echo(
+        f"[profile] {resolve_profile(profile)}  "
+        f"db={settings.db_path}  chroma={settings.chroma_path}",  # type: ignore[attr-defined]
+        err=True,
+    )
+
+
 @app.command()
 def index(
     repo_path: Path = typer.Argument(..., help="Path to repository root."),
     force: bool = typer.Option(False, "--force", help="Reindex all files regardless of hash."),
+    profile: str = typer.Option(
+        None,
+        "--profile",
+        "-p",
+        help="Index profile (citrakara|nova). Overrides IMPACTRACER_PROFILE; default citrakara.",
+    ),
 ) -> None:
     """Build or update the knowledge representation for a repository.
 
@@ -62,7 +85,8 @@ def index(
     from impactracer.indexer.runner import run_indexing
     from impactracer.shared.config import get_settings
 
-    settings = get_settings()
+    settings = get_settings(profile)
+    _echo_profile(settings, profile)
     stats = run_indexing(repo_path=repo_path, settings=settings, force=force)
 
     typer.echo(
@@ -87,6 +111,12 @@ def report(
         "-o",
         help="Write Markdown report to this file (optional, default: stdout).",
     ),
+    profile: str = typer.Option(
+        None,
+        "--profile",
+        "-p",
+        help="Index profile (citrakara|nova). Overrides IMPACTRACER_PROFILE; default citrakara.",
+    ),
 ) -> None:
     """Generate a comprehensive indexing quality report.
 
@@ -107,7 +137,8 @@ def report(
     from impactracer.indexer.auditor import generate_report
     from impactracer.shared.config import get_settings
 
-    settings = get_settings()
+    settings = get_settings(profile)
+    _echo_profile(settings, profile)
     md = generate_report(settings)
 
     if output is not None:
@@ -127,6 +158,12 @@ def analyze(
     cr_text: str = typer.Argument(..., help="Change Request text (Indonesian or English)."),
     output: Path = typer.Option(Path("./impact_report.json"), "--output", "-o"),
     variant: str = typer.Option("V7", "--variant", help="Ablation variant V0-V7 (default V7)."),
+    profile: str = typer.Option(
+        None,
+        "--profile",
+        "-p",
+        help="Index profile (citrakara|nova). Overrides IMPACTRACER_PROFILE; default citrakara.",
+    ),
 ) -> None:
     """Analyze a CR against the indexed repository and emit an ImpactReport.
 
@@ -147,7 +184,8 @@ def analyze(
         typer.echo(f"Unknown variant '{variant}'. Choose from {VariantFlags.ALL_VARIANTS}.", err=True)
         raise typer.Exit(1)
 
-    settings = get_settings()
+    settings = get_settings(profile)
+    _echo_profile(settings, profile)
     flags = VariantFlags.for_id(variant_upper)
 
     typer.echo(f"Analyzing CR with variant {variant_upper}...", err=True)
@@ -192,7 +230,17 @@ def analyze(
 @app.command()
 def evaluate(
     dataset: Path = typer.Option(..., "--dataset", help="Directory containing one GT JSON file per CR."),
-    output_dir: Path = typer.Option(Path("./eval/results/"), "--output"),
+    output_dir: Path = typer.Option(
+        None,
+        "--output",
+        help="Output dir for eval artefacts (default: ./eval/results/<profile>/).",
+    ),
+    profile: str = typer.Option(
+        None,
+        "--profile",
+        "-p",
+        help="Index profile (citrakara|nova). Overrides IMPACTRACER_PROFILE; default citrakara.",
+    ),
     run_full_ablation: bool = typer.Option(True, "--run-full-ablation"),
     verify_nfr: bool = typer.Option(False, "--verify-nfr"),
     anchor_priming: bool = typer.Option(
@@ -260,9 +308,10 @@ def evaluate(
         run_primary_test,
     )
     from impactracer.evaluation.variant_flags import VariantFlags as _VF
-    from impactracer.shared.config import get_settings
+    from impactracer.shared.config import get_settings, resolve_profile
 
-    settings = get_settings()
+    settings = get_settings(profile)
+    _echo_profile(settings, profile)
     if code_only:
         settings.code_only_mode = True
         # Compose with the existing traceability toggle so the retriever sees
@@ -270,6 +319,11 @@ def evaluate(
         settings.enable_traceability_pool_seeding = False
     if graph_rerank:
         settings.enable_graph_rerank = True
+
+    # Profile-namespace the output dir so citrakara/nova eval artefacts never
+    # collide. An explicit --output still wins.
+    if output_dir is None:
+        output_dir = Path("./eval/results") / resolve_profile(profile)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------

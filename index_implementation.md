@@ -1,8 +1,10 @@
 # ImpacTracer v4.0 — Offline Indexer: Implementation Reference
 
 > Source of truth for the offline indexing phase (FR-A1 through FR-A7 + runner).
-> All numbers reflect the live `citrakara` index. Companion to `master_blueprint.md`
-> (the design specification) and `analysis_implementation.md` (the online pipeline).
+> Unless noted, numbers reflect the live `citrakara` index. Companion to
+> `master_blueprint.md` (the design specification) and `analysis_implementation.md`
+> (the online pipeline). For a side-by-side comparison of the `citrakara` and
+> `nova` indexes, see `INDEX_REPORT.md`.
 
 ---
 
@@ -12,10 +14,14 @@ The offline indexer builds a hybrid knowledge base from a target TypeScript repo
 
 | Store | Technology | Contents |
 |---|---|---|
-| SQLite (`data/impactracer.db`) | `sqlite_client.py` | `code_nodes`, `structural_edges`, `doc_code_candidates`, `file_hashes`, `file_dependencies`, `index_metadata` |
-| ChromaDB (`data/chroma_store`) | `chroma_client.py` | Dense embedding vectors for non-degenerate code nodes (`code_units`) and doc chunks (`doc_chunks`) |
+| SQLite (`data/<profile>/impactracer.db`) | `sqlite_client.py` | `code_nodes`, `structural_edges`, `doc_code_candidates`, `file_hashes`, `file_dependencies`, `index_metadata` |
+| ChromaDB (`data/<profile>/chroma_store`) | `chroma_client.py` | Dense embedding vectors for non-degenerate code nodes (`code_units`) and doc chunks (`doc_chunks`) |
 
-The runner (`indexer/runner.py`) orchestrates 10 ordered steps: scan → diff → purge → Markdown chunk → AST Pass 1 → AST Pass 2 → embed → traceability → update hashes → metadata.
+Stores are namespaced per **index profile** (`./data/<profile>/`) so multiple target repos coexist. The profile is chosen with `--profile NAME` on any command (default `citrakara`, `IMPACTRACER_PROFILE`-overridable); `index <repo> --profile nova` builds `./data/nova/` without touching `./data/citrakara/`. See `master_blueprint.md` §0 and the CLI sections of the companion docs.
+
+The runner (`indexer/runner.py`) orchestrates the ordered steps: scan → diff → purge → Markdown chunk → AST Pass 1 → AST Pass 2 → embed → traceability → **project-skeleton write** → update hashes → metadata.
+
+The project-skeleton step (`indexer/project_skeleton.py::write_project_skeleton`) is a by-product of indexing, not an embedding/graph artefact: it emits a deterministic ~1500-token textual codebase summary to `Settings.project_skeleton_path` (default `data/project_skeleton.txt`) that the **online** pipeline's two-stage LLM #1 (`interpret_anchors` stage) reads to ground its anchor-candidate guesses in real project vocabulary. See §3.5.
 
 ---
 
@@ -139,6 +145,19 @@ A position-tracking cursor preserves inter-token whitespace so the output stays 
 | Class | 2 |
 
 The Variable count (148) is dominated by Mongoose sub-schemas and frozen lookup tables. The Class/Method counts are low because citrakara is a functional/React codebase; the few classes are Mongoose-derived helpers.
+
+### 3.5 Project skeleton (`indexer/project_skeleton.py`)
+
+After traceability, the runner writes a cached textual codebase summary to `Settings.project_skeleton_path` (default `data/project_skeleton.txt`). It is consumed at **analysis** time by the two-stage LLM #1 (`interpret_anchors` stage) — see `analysis_implementation.md` §2 — to ground anchor-candidate and search-query extraction in the actual project's vocabulary and naming conventions rather than generic Next.js intuitions.
+
+`build_project_skeleton(conn)` is deterministic given the index state (bit-identical on an unchanged repo). Four sections, in order:
+
+1. **Top-level directories** with file counts (`_MAX_TOP_DIRS = 12`).
+2. **Path patterns by `file_classification`** with concrete examples (`_MAX_EXAMPLES_PER_PATTERN = 6`).
+3. **Naming conventions** inferred from the index — the section that lets stage 1b tell camelCase functions from PascalCase classes.
+4. **Top-N most-incoming-referenced exported symbols** (`_MAX_DOMAIN_VOCABULARY = 40`) — the "domain vocabulary" any new feature is likely to call or modify; the most valuable section for anchor extraction.
+
+Target envelope ~1500 tokens (~6000 chars). A missing skeleton file is tolerated at analysis time: the interpreter degrades to single-stage. Because the file is index-time-cached and the online variant cache memoises LLM #1 outputs, it is read at most once per CR.
 
 ---
 
@@ -331,10 +350,18 @@ The blueprint specifies the design contract; the indexer needed targeted operati
 | D12 | **InterfaceField CONTAINS edges** | `code_indexer.py::_emit_contains_edges` | InterfaceField nodes had 0 incoming edges, making them BFS dead-ends. `File → InterfaceField` plus `Interface → InterfaceField` CONTAINS edges added. |
 | D13 | **Middleware synthetic CALLS edges** | `code_indexer.py::_emit_middleware_edges` | `middleware.ts` has no static imports to route handlers. Without synthetic edges, BFS from middleware reached only 2 nodes. |
 | D14 | **Mongoose TYPED_BY edges** | `code_indexer.py::_emit_mongoose_edges` | `model<IFoo>()` calls and `ref: 'ModelName'` literals establish schema-to-interface relationships invisible in normal TYPED_BY extraction. |
+| D15 | **Project skeleton write step + two-stage anchor-primed LLM #1** | `indexer/project_skeleton.py`, `indexer/runner.py` (write step), `pipeline/interpreter.py` (`CRIntent`/`CRAnchors`), `models.py::CRInterpretation.anchor_candidates`, `config.py` (`project_skeleton_path`, `anchor_priming_boost`, `anchor_priming_bm25_boost`) | The original blueprint specified a single-call LLM #1 with no project grounding. Default behaviour is now two-stage: a context-free intent call, then an anchor call grounded in the cached skeleton, which lets the model propose real host/sibling symbols (`anchor_candidates`) used as soft retrieval boosts. The indexer must emit the skeleton for this to work. Toggled off via `with_two_stage_interpret` / `with_anchor_priming` for the methodology ablation. |
 
 ---
 
 ## 9. Final Index State (citrakara, live)
+
+For the `nova` index's corresponding figures and a side-by-side comparison
+(scale, node/edge composition, classification coverage, traceability health),
+see `INDEX_REPORT.md`. Note that NOVA places equivalent backend/model code in
+top-level `model/` and `shared/` directories outside `src/`, so the
+`classify_file()` globs in D5–D7 do not reach them — NOVA shows
+UTILITY ≈ 1 / TYPE_DEFINITION = 0 and a larger unclassified set as a result.
 
 | Metric | Value |
 |---|---:|
@@ -343,6 +370,7 @@ The blueprint specifies the design contract; the indexer needed targeted operati
 | `structural_edges` (total) | 8,179 |
 | `doc_chunks` (embedded) | 94 |
 | `doc_code_candidates` (pairs) | 5,890 |
+| `project_skeleton.txt` | ~1,500 tokens (4 sections) |
 | FK violations | 0 |
 | Edge-schema version | 4.0 |
 
@@ -399,4 +427,4 @@ Each annotated Change Request carries two independent GT sets:
 
 ---
 
-*End of index_implementation.md. Online pipeline detail in `analysis_implementation.md`. Sprint history in `implementation_report.md`.*
+*End of index_implementation.md. Online pipeline detail in `analysis_implementation.md`. Evaluation-corpus comparison in `INDEX_REPORT.md`. Sprint history in `implementation_report.md`.*

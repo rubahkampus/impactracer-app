@@ -9,6 +9,7 @@ Reference: master_blueprint.md §4.
 
 from __future__ import annotations
 
+import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -118,6 +119,22 @@ def load_pipeline_context(
     logger.info("[runner] Loading pipeline context (variant={})", variant_flags.variant_id)
 
     conn = connect(settings.db_path)
+
+    # Fail fast on an empty / uninitialized profile index. connect() auto-creates
+    # the DB file, so an existence check is meaningless; a never-indexed DB has no
+    # code_nodes table (COUNT(*) raises OperationalError), and a created-but-empty
+    # one has 0 rows. Either case means "analyze/evaluate ran against the wrong or
+    # un-indexed profile" — surface it now instead of returning a hollow report.
+    try:
+        _n_nodes = conn.execute("SELECT COUNT(*) FROM code_nodes").fetchone()[0]
+    except sqlite3.OperationalError:
+        _n_nodes = 0
+    if _n_nodes == 0:
+        raise RuntimeError(
+            f"Profile index at {settings.db_path} is empty or uninitialized. "
+            f"Run `impactracer index <repo> --profile <name>` first."
+        )
+
     chroma_client = get_client(settings.chroma_path)
     doc_col, code_col = init_collections(chroma_client)
 
@@ -1063,6 +1080,26 @@ def run_analysis(
             pre_collapse_propagated - len(cis.propagated_nodes),
         )
 
+    # ------------------------------------------------------------------
+    # Step 6.6 — DELETION-only import-only filter (Sprint 25).
+    # For DELETION CRs, demote propagated nodes whose causal chain is
+    # purely IMPORTS/DYNAMIC_IMPORT — these are dead references a linter
+    # would clean up after the deletion, not part of the cognitive impact
+    # set. ADDITION / MODIFICATION CRs skip this filter unchanged.
+    # Runs deterministically; no LLM call.
+    # ------------------------------------------------------------------
+    if (
+        variant_flags.enable_bfs
+        and (cr_interp.change_type or "").upper() == "DELETION"
+        and cis.propagated_nodes
+    ):
+        from impactracer.pipeline.graph_bfs import apply_deletion_import_only_filter
+        cis, _n_demoted_import_only = apply_deletion_import_only_filter(cis)
+        _trace("step_6p6_deletion_import_only_filter", {
+            "n_demoted": _n_demoted_import_only,
+            "kept_propagated_count": len(cis.propagated_nodes),
+        })
+
     # Cache the post-BFS post-collapse CIS for V6-V7 sharing.
     if (
         not _bfs_cis_cache_hit
@@ -1291,6 +1328,18 @@ def run_analysis(
                 sibling_justifications = {k: sibling_justifications[k] for k in kept_ids}
                 sibling_anchors = {k: sibling_anchors[k] for k in kept_ids}
                 sibling_files = {k: sibling_files[k] for k in kept_ids}
+
+            # Cache the final admitted-sibling set BEFORE injection so a
+            # subsequent variant (V6 or V7, whichever runs second) can skip
+            # all LLM #4 sibling calls. The cache stores the post-cap
+            # admission set, the per-sibling justification, and the
+            # admitted_count for diagnostic logging.
+            if variant_cache is not None:
+                variant_cache.put_sibling_admissions(
+                    admitted_ids=list(sibling_justifications.keys()),
+                    justifications=sibling_justifications,
+                    admitted_count=len(sibling_justifications),
+                )
 
             # Inject admitted siblings into the CIS as propagated nodes with
             # a CONTAINS causal chain (severity_for_chain maps CONTAINS -> Rendah,

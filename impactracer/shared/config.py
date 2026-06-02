@@ -8,6 +8,9 @@ Reference: 11_configuration_and_cli.md §1.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -185,6 +188,67 @@ class Settings(BaseSettings):
     code_only_mode: bool = False
 
 
-def get_settings() -> Settings:
-    """Construct a :class:`Settings` instance from the current env."""
-    return Settings()  # type: ignore[call-arg]
+# =========================================================================
+# Index profiles
+# =========================================================================
+#
+# A "profile" names an independent on-disk index (one per target repo) so
+# multiple repos (e.g. citrakara, nova) can be indexed and analyzed without
+# overwriting each other. Each profile's stores live under ./data/<profile>/.
+#
+# Profile selection precedence (highest first):
+#   1. explicit `profile` argument to get_settings (the CLI --profile flag)
+#   2. the IMPACTRACER_PROFILE environment variable
+#   3. DEFAULT_PROFILE
+#
+# Profile is deliberately NOT a Settings field: a field would itself be
+# env/.env-driven and muddy the precedence story. It stays a function-level
+# concern, applied AFTER Settings() resolves all other sources so the profile
+# is authoritative over any DB_PATH/CHROMA_PATH/etc. left in .env.
+
+DEFAULT_PROFILE = "citrakara"
+KNOWN_PROFILES = ("citrakara", "nova")  # advisory only; arbitrary names are allowed
+_PROFILE_ENV_VAR = "IMPACTRACER_PROFILE"
+
+# Settings field -> basename under ./data/<profile>/. Basenames match the
+# pre-profile defaults so moving the legacy ./data files into ./data/citrakara/
+# is a 1:1 migration with no rebuild. llm_audit_log_path is scoped per profile
+# so NFR-03/NFR-05 token/latency stats never mix two repos' runs;
+# locked_parameters_path is declared-only but included for layout consistency.
+_PROFILE_PATH_FIELDS: dict[str, str] = {
+    "db_path": "impactracer.db",
+    "chroma_path": "chroma_store",
+    "project_skeleton_path": "project_skeleton.txt",
+    "locked_parameters_path": "locked_parameters.json",
+    "llm_audit_log_path": "llm_audit.jsonl",
+}
+
+
+def resolve_profile(profile: str | None = None) -> str:
+    """Resolve the active profile name.
+
+    Precedence: explicit ``profile`` arg > ``IMPACTRACER_PROFILE`` env >
+    :data:`DEFAULT_PROFILE`.
+    """
+    if profile:
+        return profile
+    return os.environ.get(_PROFILE_ENV_VAR, "").strip() or DEFAULT_PROFILE
+
+
+def get_settings(profile: str | None = None) -> Settings:
+    """Construct a :class:`Settings` instance scoped to an index profile.
+
+    Builds ``Settings()`` (full .env + OS-env resolution), then rewrites the
+    storage path fields to live under ``./data/<profile>/`` via
+    :meth:`model_copy`. The post-construction override is authoritative over
+    any ``DB_PATH``/``CHROMA_PATH``/``LLM_AUDIT_LOG_PATH``/
+    ``LOCKED_PARAMETERS_PATH`` set in ``.env``; every other env-driven setting
+    is left untouched.
+    """
+    settings = Settings()  # type: ignore[call-arg]
+    data_root = Path("./data") / resolve_profile(profile)
+    overrides = {
+        field: (data_root / basename).as_posix()
+        for field, basename in _PROFILE_PATH_FIELDS.items()
+    }
+    return settings.model_copy(update=overrides)
