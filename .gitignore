@@ -11,8 +11,18 @@ ast_nodes.txt
 revised_cr_list.txt
 revised_cr_list_2.txt
 revised_cr_list_3.txt
+revised_cr_list*.txt
+FINAL_CR_*.txt
 docs/
 
+
+# Working artifacts / generated reports (not source)
+reports/
+data_archive_*/
+INDEX_REPORT.md
+_tmp_*
+*.tmp.diff
+*.tmp.patch
 
 # Data stores (generated)
 data/
