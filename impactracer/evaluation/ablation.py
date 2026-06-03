@@ -68,8 +68,15 @@ def run_single_cr_all_variants(
     anchor_priming: bool = True,
     cache_root: Path | None = None,
     run_tag: str | None = None,
+    variant_ids: list[str] | None = None,
 ) -> dict[str, dict]:
-    """Execute every variant in VariantFlags.ALL_VARIANTS on one CR.
+    """Execute the requested variants (default VariantFlags.ALL_VARIANTS) on one CR.
+
+    ``variant_ids`` selects the subset to run (e.g. V0-V5 for retrieval-only,
+    V6-V7 for propagate-only). When a subset resumes from a prior run's cache
+    (propagate-only + ``--cache-from``), the cumulative pipeline boundaries for
+    the V0-V5 prefix are read from ``cache_root`` instead of recomputed, so no
+    new LLM #1/#2/#3 calls are made for those stages.
 
     Writes ``<output_dir>/<cr_id>/<variant_id>/impact_report.json`` and
     ``impact_report_full.json`` (step-by-step trace) per variant. Returns
@@ -101,7 +108,10 @@ def run_single_cr_all_variants(
 
     results: dict[str, dict] = {}
 
-    for variant_id in VariantFlags.ALL_VARIANTS:
+    if variant_ids is None:
+        variant_ids = list(VariantFlags.ALL_VARIANTS)
+
+    for variant_id in variant_ids:
         flags = with_anchor_priming(VariantFlags.for_id(variant_id), anchor_priming)
         variant_dir = cr_root / variant_id
         variant_dir.mkdir(parents=True, exist_ok=True)
@@ -219,6 +229,7 @@ def run_full_evaluation(
     anchor_priming: bool = True,
     cache_root: Path | None = None,
     run_tag: str | None = None,
+    variant_ids: list[str] | None = None,
 ) -> Path:
     """Execute the full ablation × CR matrix.
 
@@ -240,15 +251,35 @@ def run_full_evaluation(
     # Variant-chain cache root + run_tag. Defaults to the same
     # output directory under a `cache` subfolder, with a fresh UTC timestamp
     # tag so cache trees never collide across runs.
+    #
+    # IMPORTANT for propagate-only: to resume a prior retrieval-only run's
+    # cache, the CALLER must pass BOTH that run's cache_root (via --cache-from)
+    # AND its run_tag. The cache is scoped (cache_root/run_tag/cr_id/...), so a
+    # mismatched run_tag would silently miss every cache entry and recompute.
     if cache_root is None:
         cache_root = output_dir / "cache"
     if run_tag is None:
         run_tag = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     cache_root = Path(cache_root)
+    if variant_ids is None:
+        variant_ids = list(VariantFlags.ALL_VARIANTS)
     logger.info(
-        "[ablation] Variant cache: root={} run_tag={} anchor_priming={}",
-        cache_root, run_tag, anchor_priming,
+        "[ablation] Variant cache: root={} run_tag={} variants={} anchor_priming={}",
+        cache_root, run_tag, variant_ids, anchor_priming,
     )
+
+    # Persist a cache manifest so a later propagate-only run can discover the
+    # run_tag + which variants were already cached, via `--cache-from <dir>`.
+    cache_root.mkdir(parents=True, exist_ok=True)
+    _manifest_path = cache_root / "cache_manifest.json"
+    _manifest = {"run_tag": run_tag, "variants_run": list(variant_ids),
+                 "anchor_priming": anchor_priming}
+    try:
+        _manifest_path.write_text(
+            json.dumps(_manifest, indent=2), encoding="utf-8"
+        )
+    except Exception as exc:  # non-fatal
+        logger.warning("[ablation] could not write cache manifest: {}", exc)
 
     # Load shared infrastructure ONCE.
     from impactracer.pipeline.runner import load_pipeline_context
@@ -307,6 +338,7 @@ def run_full_evaluation(
                 anchor_priming=anchor_priming,
                 cache_root=cache_root,
                 run_tag=run_tag,
+                variant_ids=variant_ids,
             )
 
             for variant_id, payload in results.items():

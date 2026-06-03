@@ -242,6 +242,26 @@ def evaluate(
         help="Index profile (citrakara|nova). Overrides IMPACTRACER_PROFILE; default citrakara.",
     ),
     run_full_ablation: bool = typer.Option(True, "--run-full-ablation"),
+    mode: str = typer.Option(
+        "full",
+        "--mode",
+        help=(
+            "Run mode: 'full' (V0-V7, default); 'retrieval-only' (V0-V5, "
+            "populates the variant cache so propagation can resume); "
+            "'propagate-only' (V6-V7 only — requires --cache-from pointing at a "
+            "prior retrieval-only run's cache dir; spends no LLM on V0-V5)."
+        ),
+    ),
+    cache_from: Path = typer.Option(
+        None,
+        "--cache-from",
+        help=(
+            "Path to a prior retrieval-only run's cache dir (the 'cache' folder "
+            "it wrote). REQUIRED for --mode propagate-only; the run_tag + cached "
+            "V0-V5 boundaries are read from its cache_manifest.json so V6/V7 "
+            "resume without recomputing V0-V5."
+        ),
+    ),
     verify_nfr: bool = typer.Option(False, "--verify-nfr"),
     anchor_priming: bool = typer.Option(
         True,
@@ -370,47 +390,146 @@ def evaluate(
     if not run_full_ablation:
         typer.echo("--run-full-ablation=False is currently a no-op (no partial mode wired).", err=True)
 
-    csv_path = run_full_evaluation(cr_dataset, settings, output_dir, anchor_priming=anchor_priming)
+    mode = (mode or "full").lower()
+    if mode not in ("full", "retrieval-only", "propagate-only"):
+        typer.echo(f"--mode must be full|retrieval-only|propagate-only; got {mode!r}", err=True)
+        raise typer.Exit(2)
+    variant_ids = _VF.variants_for_mode(mode)
+
+    # Resolve cache_root + run_tag per mode.
+    #   full / retrieval-only: fresh cache under <output>/cache, fresh run_tag.
+    #   propagate-only: resume the retrieval-only cache via --cache-from, reusing
+    #                   its run_tag (read from cache_manifest.json) so V0-V5
+    #                   boundaries hit the cache instead of recomputing.
+    cache_root = None
+    run_tag = None
+    if mode == "propagate-only":
+        if cache_from is None:
+            typer.echo("--mode propagate-only requires --cache-from <prior retrieval-only cache dir>.", err=True)
+            raise typer.Exit(2)
+        cache_from = Path(cache_from)
+        manifest_path = cache_from / "cache_manifest.json"
+        if not manifest_path.exists():
+            typer.echo(
+                f"--cache-from has no cache_manifest.json ({manifest_path}). "
+                f"Point it at the 'cache' dir of a completed retrieval-only run.",
+                err=True,
+            )
+            raise typer.Exit(2)
+        manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+        run_tag = manifest.get("run_tag")
+        prior_variants = set(manifest.get("variants_run") or [])
+        missing = set(_VF.RETRIEVAL_ONLY) - prior_variants
+        if missing:
+            typer.echo(
+                f"--cache-from cache is incomplete: missing V0-V5 stages {sorted(missing)}. "
+                f"Re-run --mode retrieval-only first.",
+                err=True,
+            )
+            raise typer.Exit(2)
+        if bool(manifest.get("anchor_priming", True)) != bool(anchor_priming):
+            typer.echo(
+                f"anchor_priming mismatch: cache was built with "
+                f"{manifest.get('anchor_priming')}, this run uses {anchor_priming}. "
+                f"They must match for the cache to be valid.",
+                err=True,
+            )
+            raise typer.Exit(2)
+        cache_root = cache_from
+
+    typer.echo(f"Run mode: {mode}  variants={variant_ids}"
+               + (f"  cache-from={cache_from} run_tag={run_tag}" if mode == "propagate-only" else ""),
+               err=True)
+
+    csv_path = run_full_evaluation(
+        cr_dataset, settings, output_dir,
+        anchor_priming=anchor_priming,
+        cache_root=cache_root,
+        run_tag=run_tag,
+        variant_ids=variant_ids,
+    )
+
+    # Stitch: in propagate-only mode, prepend the prior retrieval-only V0-V5 CSV
+    # rows so the report/stat-test see a full V0-V7 matrix. The retrieval-only
+    # CSV lives one level up from its cache dir (<retrieval output>/per_cr_..csv).
+    if mode == "propagate-only":
+        prior_csv = cache_from.parent / "per_cr_per_variant_metrics.csv"
+        if prior_csv.exists():
+            prior_df = pd.read_csv(prior_csv)
+            prior_v05 = prior_df[prior_df["variant"].isin(_VF.RETRIEVAL_ONLY)]
+            this_df = pd.read_csv(csv_path)
+            stitched = pd.concat([prior_v05, this_df], ignore_index=True)
+            stitched = stitched.sort_values(["cr_id", "variant"]).reset_index(drop=True)
+            stitched.to_csv(csv_path, index=False)
+            typer.echo(
+                f"Stitched {len(prior_v05)} V0-V5 rows from {prior_csv.name} "
+                f"into {csv_path.name} (full V0-V7 matrix).",
+                err=True,
+            )
+        else:
+            typer.echo(
+                f"WARNING: prior retrieval-only CSV not found at {prior_csv}; "
+                f"report will contain only V6/V7 rows.",
+                err=True,
+            )
+
     long_df = pd.read_csv(csv_path)
 
     # ------------------------------------------------------------------
     # Wilcoxon test: pivot long -> wide on f1_set, run V7 vs V5.
     # ------------------------------------------------------------------
     stat_path = output_dir / "statistical_tests.json"
-    try:
-        wide = long_df.pivot(index="cr_id", columns="variant", values="f1_set")
-        wide.columns = [f"{c}_{PRIMARY_METRIC}" for c in wide.columns]
-        stat_result = run_primary_test(wide)
-        stat_result["status"] = "ok"
-    except InsufficientPairsError as exc:
-        var_a, var_b = PRIMARY_COMPARISON
-        col_a, col_b = f"{var_a}_{PRIMARY_METRIC}", f"{var_b}_{PRIMARY_METRIC}"
+    # The pre-registered test compares V7 vs V5; it is only meaningful when both
+    # variants are present (a full matrix). In retrieval-only mode (no V7) or
+    # propagate-only without a successful V0-V5 stitch (no V5), skip it cleanly
+    # rather than raising a KeyError on the missing pivot columns.
+    _present = set(long_df["variant"].unique())
+    _comp = set(PRIMARY_COMPARISON)
+    if not _comp.issubset(_present):
+        stat_result = {
+            "status": "skipped",
+            "reason": (
+                f"primary comparison {sorted(_comp)} requires both variants; "
+                f"run mode '{mode}' produced {sorted(_present)}. "
+                f"Run --mode full, or pair a retrieval-only + propagate-only run."
+            ),
+        }
+        typer.echo(f"Statistical test SKIPPED: {stat_result['reason']}", err=True)
+    else:
         try:
             wide = long_df.pivot(index="cr_id", columns="variant", values="f1_set")
             wide.columns = [f"{c}_{PRIMARY_METRIC}" for c in wide.columns]
-            pairs = wide[[col_a, col_b]].dropna() if (col_a in wide.columns and col_b in wide.columns) else None
-        except Exception:
-            pairs = None
-        stat_result = {
-            "status": "insufficient_pairs",
-            "hypothesis": f"{var_a}.{PRIMARY_METRIC} > {var_b}.{PRIMARY_METRIC} (one-sided paired Wilcoxon)",
-            "variant_a": var_a,
-            "variant_b": var_b,
-            "metric": PRIMARY_METRIC,
-            "n": (int(len(pairs)) if pairs is not None else 0),
-            "min_required": MIN_PAIRED_N,
-            "note": str(exc),
-        }
-        if pairs is not None and not pairs.empty:
-            import numpy as _np
+            stat_result = run_primary_test(wide)
+            stat_result["status"] = "ok"
+        except InsufficientPairsError as exc:
+            var_a, var_b = PRIMARY_COMPARISON
+            col_a, col_b = f"{var_a}_{PRIMARY_METRIC}", f"{var_b}_{PRIMARY_METRIC}"
+            try:
+                wide = long_df.pivot(index="cr_id", columns="variant", values="f1_set")
+                wide.columns = [f"{c}_{PRIMARY_METRIC}" for c in wide.columns]
+                pairs = wide[[col_a, col_b]].dropna() if (col_a in wide.columns and col_b in wide.columns) else None
+            except Exception:
+                pairs = None
+            stat_result = {
+                "status": "insufficient_pairs",
+                "hypothesis": f"{var_a}.{PRIMARY_METRIC} > {var_b}.{PRIMARY_METRIC} (one-sided paired Wilcoxon)",
+                "variant_a": var_a,
+                "variant_b": var_b,
+                "metric": PRIMARY_METRIC,
+                "n": (int(len(pairs)) if pairs is not None else 0),
+                "min_required": MIN_PAIRED_N,
+                "note": str(exc),
+            }
+            if pairs is not None and not pairs.empty:
+                import numpy as _np
 
-            a = pairs[col_a].to_numpy(dtype=float)
-            b = pairs[col_b].to_numpy(dtype=float)
-            stat_result["median_diff_descriptive"] = float(_np.median(a - b))
-            from impactracer.evaluation.statistical import cliffs_delta
-            stat_result["cliffs_delta_descriptive"] = float(cliffs_delta(a, b))
-    except Exception as exc:
-        stat_result = {"status": "error", "error": repr(exc)}
+                a = pairs[col_a].to_numpy(dtype=float)
+                b = pairs[col_b].to_numpy(dtype=float)
+                stat_result["median_diff_descriptive"] = float(_np.median(a - b))
+                from impactracer.evaluation.statistical import cliffs_delta
+                stat_result["cliffs_delta_descriptive"] = float(cliffs_delta(a, b))
+        except Exception as exc:
+            stat_result = {"status": "error", "error": repr(exc)}
 
     stat_path.write_text(
         _json.dumps(stat_result, indent=2, ensure_ascii=False, default=str),
