@@ -25,6 +25,18 @@ from impactracer.indexer.code_indexer import (
 # Fixtures
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _emit_retired_edges(monkeypatch):
+    """Force-enable retired-edge/ExternalPackage emission for Pass-1 acceptance
+    tests. Production gates these off by default (retired 2026-06), but the
+    extraction LOGIC is intentionally preserved and reversible — these tests
+    validate that logic. Tests asserting ABSENCE (e.g. relative imports never
+    create an ExternalPackage) remain correct under emission-on.
+    """
+    from impactracer.indexer import code_indexer as _ci
+    monkeypatch.setattr(_ci, "_EMIT_RETIRED_EDGES", True)
+
+
 @pytest.fixture()
 def conn():
     c = sqlite3.connect(":memory:")

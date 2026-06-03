@@ -40,9 +40,10 @@ Two operating modes:
 
 Edge weights come from a curated subset of EDGE_CONFIG semantics:
 TYPED_BY (0.8), CALLS (0.9), RENDERS (0.8), CONTAINS (0.6), IMPORTS (0.5),
-INHERITS (0.7), IMPLEMENTS (0.7), HOOK_DEPENDS_ON (0.6), DEFINES_METHOD
-(0.6), PASSES_CALLBACK (0.5), CLIENT_API_CALLS (0.7), DYNAMIC_IMPORT (0.4),
-FIELDS_ACCESSED (0.7), DEPENDS_ON_EXTERNAL (0.0 — externals never propagate).
+INHERITS (0.7), IMPLEMENTS (0.7), DEFINES_METHOD (0.6), DYNAMIC_IMPORT (0.4),
+FIELDS_ACCESSED (0.7). The four edges retired from propagation 2026-06
+(PASSES_CALLBACK, HOOK_DEPENDS_ON, CLIENT_API_CALLS, DEPENDS_ON_EXTERNAL) are
+omitted here too.
 
 Reference: master_blueprint.md is silent on graph rerank; this is an
 optional extension whose design rationale is recorded in
@@ -62,9 +63,11 @@ from impactracer.shared.models import Candidate
 # Chosen to match EDGE_CONFIG semantics:
 #   - Contract edges (TYPED_BY, IMPLEMENTS, INHERITS) are high — they directly
 #     bind callers to the changed contract.
-#   - Behavioural edges (CALLS, HOOK_DEPENDS_ON) are high.
+#   - Behavioural edges (CALLS) are high.
 #   - Composition edges (IMPORTS, CONTAINS) are medium — co-location only.
-#   - DEPENDS_ON_EXTERNAL is 0 — third-party deps never propagate.
+#   - The four edges retired from propagation 2026-06 (PASSES_CALLBACK,
+#     HOOK_DEPENDS_ON, CLIENT_API_CALLS, DEPENDS_ON_EXTERNAL) are omitted —
+#     propagation-inert, so they carry no label-propagation weight either.
 _EDGE_WEIGHTS: dict[str, float] = {
     "TYPED_BY": 0.8,
     "CALLS": 0.9,
@@ -73,13 +76,9 @@ _EDGE_WEIGHTS: dict[str, float] = {
     "IMPORTS": 0.5,
     "INHERITS": 0.7,
     "IMPLEMENTS": 0.7,
-    "HOOK_DEPENDS_ON": 0.6,
     "DEFINES_METHOD": 0.6,
-    "PASSES_CALLBACK": 0.5,
-    "CLIENT_API_CALLS": 0.7,
     "DYNAMIC_IMPORT": 0.4,
     "FIELDS_ACCESSED": 0.7,
-    "DEPENDS_ON_EXTERNAL": 0.0,
 }
 
 _HOP2_DECAY = 0.5  # weight of 2-hop signal relative to 1-hop

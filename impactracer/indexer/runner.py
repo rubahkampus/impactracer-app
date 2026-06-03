@@ -74,21 +74,31 @@ def _scan_repo(repo_path: Path) -> tuple[list[Path], list[Path]]:
 
     Excludes files inside hidden directories (any path component starting
     with '.'). This filters .next/, .git/, etc.
+
+    The hidden-dir check is evaluated on the path *relative to repo_path*, not
+    the absolute/raw path. Otherwise a repo passed as ``../citrakara`` yields
+    rglob paths whose first part is ``".."`` — and ``"..".startswith(".")`` is
+    True — which silently excludes EVERY file. ``repo_path`` is resolved first
+    so the relative computation is well-defined regardless of how it was passed.
     """
+    repo_path = repo_path.resolve()
+
+    def _hidden(p: Path) -> bool:
+        try:
+            rel = p.relative_to(repo_path)
+        except ValueError:
+            rel = p
+        return any(part.startswith(".") for part in rel.parts)
+
     docs_path = repo_path / "docs"
     md_files: list[Path] = []
     ts_files: list[Path] = []
     if docs_path.exists():
-        md_files = sorted(
-            p for p in docs_path.rglob("*.md")
-            if not any(part.startswith(".") for part in p.parts)
-        )
+        md_files = sorted(p for p in docs_path.rglob("*.md") if not _hidden(p))
     ts_files = sorted(
-        p for p in repo_path.rglob("*.ts")
-        if not any(part.startswith(".") for part in p.parts)
+        p for p in repo_path.rglob("*.ts") if not _hidden(p)
     ) + sorted(
-        p for p in repo_path.rglob("*.tsx")
-        if not any(part.startswith(".") for part in p.parts)
+        p for p in repo_path.rglob("*.tsx") if not _hidden(p)
     )
     return md_files, ts_files
 
@@ -331,9 +341,23 @@ def run_indexing(
 
     # ── Step 2: hash diff ───────────────────────────────────────────────────
     if force:
+        # Clear file_hashes so every file re-enters the work set, AND wipe the
+        # derived SQLite tables. Pass 1 uses INSERT OR REPLACE and Pass 2 uses
+        # INSERT OR IGNORE — both keyed on identity — so a node/edge TYPE that
+        # was REMOVED from the extractor (e.g. the 2026-06 edge/ExternalPackage
+        # retirements) is never re-written and its stale rows would SURVIVE a
+        # --force reindex. Wiping code_nodes + structural_edges +
+        # doc_code_candidates + file_dependencies guarantees a clean rebuild.
+        conn.execute("DELETE FROM structural_edges")
+        conn.execute("DELETE FROM doc_code_candidates")
+        conn.execute("DELETE FROM code_nodes")
+        conn.execute("DELETE FROM file_dependencies")
         conn.execute("DELETE FROM file_hashes")
         conn.commit()
-        logger.info("--force: cleared file_hashes, full reindex")
+        logger.info(
+            "--force: cleared code_nodes + structural_edges + doc_code_candidates "
+            "+ file_dependencies + file_hashes, full reindex"
+        )
 
     # file_hashes stores absolute posix paths as keys.
     known_hashes = _load_file_hashes(conn)

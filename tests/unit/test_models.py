@@ -258,10 +258,15 @@ def test_severity_for_chain_empty_is_tinggi() -> None:
 
 
 def test_severity_for_chain_contract_edges_are_tinggi() -> None:
-    """Contract edges IMPLEMENTS, TYPED_BY, FIELDS_ACCESSED → Tinggi (last-hop rule)."""
+    """Contract edges IMPLEMENTS, TYPED_BY → Tinggi (last-hop rule).
+
+    FIELDS_ACCESSED was retired 2026-06 (InterfaceField target retired) and
+    removed from the severity map; severity_for_chain now falls back to "Rendah"
+    for it. It can no longer appear in a real chain.
+    """
     assert severity_for_chain(["IMPLEMENTS"]) == "Tinggi"
     assert severity_for_chain(["TYPED_BY"]) == "Tinggi"
-    assert severity_for_chain(["FIELDS_ACCESSED"]) == "Tinggi"
+    assert severity_for_chain(["FIELDS_ACCESSED"]) == "Rendah"  # retired -> fallback
     # Phase 1 (F-NEW-4): last-hop rule — CALLS → IMPLEMENTS: last hop is
     # IMPLEMENTS → Tinggi (previously this was also Tinggi under min(), but
     # now the semantics are explicit: the *final* dependency type determines

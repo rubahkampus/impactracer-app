@@ -52,7 +52,7 @@ CHUNK_TYPE_RULES = {
 
 **File:** `indexer/code_indexer.py::extract_nodes`
 
-Two-pass TypeScript/TSX parser via `tree-sitter-languages`. Pass 1 extracts **10 node types**:
+Two-pass TypeScript/TSX parser via `tree-sitter-languages`. Pass 1 defines **10 node types** (`ExternalPackage` + `InterfaceField` retired from the index 2026-06 — see notes below — so **8 are emitted by default**):
 
 | Node Type | Key details |
 |---|---|
@@ -61,10 +61,10 @@ Two-pass TypeScript/TSX parser via `tree-sitter-languages`. Pass 1 extracts **10
 | `Function` | `function_declaration` OR `lexical_declaration → variable_declarator → arrow_function` |
 | `Method` | `method_definition` inside a class body; qualified id `ClassName.methodName` |
 | `Interface` | `interface_declaration` with optional extends clause |
-| `InterfaceField` | One synthetic child per `property_signature` of an `Interface` or object-shape `TypeAlias`; always degenerate (`embed_text=""`) |
+| `InterfaceField` | One synthetic child per `property_signature` of an `Interface` or object-shape `TypeAlias`; always degenerate (`embed_text=""`). **Retired 2026-06** — field-level granularity (46% of citrakara nodes, 0% of GT, 0% propagated); not emitted by default. Extraction logic intact; re-enable with `settings.enable_retired_edges`. |
 | `TypeAlias` | `type_alias_declaration`; object-shape aliases also produce InterfaceField children |
 | `Enum` | `enum_declaration`; name only |
-| `ExternalPackage` | Synthetic node per unique non-relative, non-`@/` import specifier (Pass 1 emits per-file; runner deduplicates globally) |
+| `ExternalPackage` | Synthetic node per unique non-relative, non-`@/` import specifier. **Retired 2026-06** — orphaned once `DEPENDS_ON_EXTERNAL` (its only inbound edge) was retired; no longer emitted by default. Extraction logic intact; re-enable with `settings.enable_retired_edges`. |
 | `Variable` | `lexical_declaration → variable_declarator` whose value is `new_expression`, `object`, `array`, or `call_expression` AND whose name passes the canonical-name heuristic |
 
 ### 3.1 The `Variable` node type
@@ -106,7 +106,7 @@ These tokens directly match the vocabulary that appears in CR descriptions ("exp
 | `src/types/**` | `TYPE_DEFINITION` |
 | else | `None` |
 
-**Degenerate-node rule:** nodes with `len(embed_text) < 50` go to SQLite but NOT ChromaDB. `InterfaceField` and `ExternalPackage` are always degenerate. They remain BFS-reachable via `CONTAINS` edges.
+**Degenerate-node rule:** nodes with `len(embed_text) < 50` go to SQLite but NOT ChromaDB. (`InterfaceField` and `ExternalPackage` were both always-degenerate but are retired 2026-06 — no longer indexed by default; non-degenerate short Functions remain the live degenerate case.)
 
 ### 3.3 Skeletonizer (FR-A6)
 
@@ -165,7 +165,9 @@ Target envelope ~1500 tokens (~6000 chars). A missing skeleton file is tolerated
 
 **File:** `indexer/code_indexer.py::extract_edges`
 
-Emits **14 edge types**. Pass 2 runs after Pass 1 has populated `code_nodes` for ALL files in the work set, so cross-file resolution works.
+Emits **14 edge types** (all stored for provenance). Pass 2 runs after Pass 1 has populated `code_nodes` for ALL files in the work set, so cross-file resolution works.
+
+> **Propagation status:** four of these — `PASSES_CALLBACK`, `HOOK_DEPENDS_ON`, `DEPENDS_ON_EXTERNAL`, `CLIENT_API_CALLS` — were **retired from BFS propagation in 2026-06** (found inert across citrakara+nova; see `analysis_implementation.md` §3.1). They are still extracted and stored as shown below, but the online traversal no longer walks them. The indexer is unchanged.
 
 | Edge type | Source → Target | Mechanism |
 |---|---|---|
@@ -232,7 +234,7 @@ null, undefined, never, object, symbol, bigint
 | DYNAMIC_IMPORT | 7 |
 | DEFINES_METHOD | 2 |
 
-`INHERITS`, `IMPLEMENTS`, `FIELDS_ACCESSED`, `PASSES_CALLBACK`, `HOOK_DEPENDS_ON` count 0 on the current citrakara corpus (consistent with a functional/React codebase without class hierarchies and with most callbacks defined inline).
+`INHERITS`, `IMPLEMENTS`, `FIELDS_ACCESSED`, `PASSES_CALLBACK`, `HOOK_DEPENDS_ON` count 0 on the current citrakara corpus (consistent with a functional/React codebase without class hierarchies and with most callbacks defined inline). Retirement status (2026-06): `PASSES_CALLBACK`/`HOOK_DEPENDS_ON` retired (empty + framework-specific); `FIELDS_ACCESSED` retired because its only target — the `InterfaceField` node type — is retired (so it can never fire); `INHERITS`/`IMPLEMENTS` are **retained** as TypeScript-general class/interface-granularity contract edges that simply have no instances in this corpus.
 
 ---
 

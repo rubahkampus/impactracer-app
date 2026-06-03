@@ -108,6 +108,13 @@ class Settings(BaseSettings):
     # anchors are SIS-confirmed CRUD functions of a single domain entity
     # and LLM #4 correctly recognises every same-shape function as
     # similarly impacted, even when GT only names the one caller.
+    # Re-admit the four retired propagation edges (PASSES_CALLBACK,
+    # HOOK_DEPENDS_ON, CLIENT_API_CALLS, DEPENDS_ON_EXTERNAL) into the BFS
+    # traversal config. Default False: they were retired 2026-06 as
+    # propagation-inert (zero TP on citrakara+nova). True is diagnostic-only —
+    # see constants.active_edge_config / RETIRED_PROPAGATION_EDGES.
+    enable_retired_edges: bool = False
+
     enable_sibling_promotion: bool = True
     sibling_promotion_max_per_file: int = 12        # candidate ceiling per file
     # Per-file admission cap: 4 strikes the balance between preventing
