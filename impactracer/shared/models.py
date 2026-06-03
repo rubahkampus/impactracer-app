@@ -41,6 +41,31 @@ class TruncatingModel(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def _coerce_null_required_strings(cls, data: Any) -> Any:
+        """Coerce null / missing values for required ``str`` fields to ``""``.
+
+        flash-lite (and other small models) intermittently emit ``null`` for a
+        required string field — most often an "empty-when-rejected" field like
+        ``mechanism_of_impact`` / ``function_purpose`` — especially on large
+        batched prompts. Strict Pydantic then raises ``string_type`` and the
+        whole LLM batch is dropped fail-closed, silently zeroing that CR. This
+        is a robustness coercion (it parses a response that is otherwise
+        discarded), NOT a change to any validator's decision logic: a field that
+        SHOULD be empty (e.g. mechanism for a non-confirmed verdict) is simply
+        normalised to "" instead of null. Required non-string fields are left
+        untouched so genuinely malformed responses still fail-closed.
+        """
+        if not isinstance(data, dict):
+            return data
+        for field_name, field_info in cls.model_fields.items():
+            # Only plain required `str` fields (annotation exactly ``str``;
+            # leaves Optional[str], list, bool, int untouched).
+            if field_info.annotation is str and data.get(field_name, None) is None:
+                data[field_name] = ""
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def _truncate_overlong_strings(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
