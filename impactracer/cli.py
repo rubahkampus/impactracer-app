@@ -252,6 +252,18 @@ def evaluate(
             "prior retrieval-only run's cache dir; spends no LLM on V0-V5)."
         ),
     ),
+    force_change_type_from_gt: bool = typer.Option(
+        False,
+        "--force-change-type-from-gt",
+        help=(
+            "Eval-only: override LLM #1's change_type with the GT label "
+            "(cr_id prefix ADD/MOD/DEL) per CR, so the change_type-dependent "
+            "treatments (RRF path weights, LLM #2/#3 ADDITION framing) match "
+            "the designed strata. Use to isolate the treatment effect of "
+            "(mis)classification. Produces a cache/run distinct from the "
+            "LLM-classified one — use a separate --output."
+        ),
+    ),
     cache_from: Path = typer.Option(
         None,
         "--cache-from",
@@ -447,6 +459,7 @@ def evaluate(
         cache_root=cache_root,
         run_tag=run_tag,
         variant_ids=variant_ids,
+        force_change_type_from_gt=force_change_type_from_gt,
     )
 
     # Stitch: in propagate-only mode, prepend the prior retrieval-only V0-V5 CSV

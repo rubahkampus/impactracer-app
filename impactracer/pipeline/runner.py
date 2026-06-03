@@ -322,6 +322,24 @@ def run_analysis(
         if variant_cache is not None:
             variant_cache.put_interp(cr_interp)
 
+    # Eval-only change_type override. When settings.force_change_type is set
+    # (e.g. from the GT label), overwrite LLM #1's classification BEFORE it
+    # drives the change_type-dependent treatments (RRF path weights at Step 2,
+    # LLM #2/#3 ADDITION framing). Applied after both the cache-miss and
+    # cache-HIT paths so it takes effect regardless of cache state; the value
+    # is also written back to the cache so resumed variants see the same type.
+    # NOT used in production analyze; an evaluation harness affordance for
+    # measuring against the designed GT change-type strata.
+    _forced = getattr(settings, "force_change_type", None)
+    if _forced and cr_interp.change_type != _forced:
+        logger.info(
+            "[runner] change_type OVERRIDE: {} -> {} (force_change_type)",
+            cr_interp.change_type, _forced,
+        )
+        cr_interp = cr_interp.model_copy(update={"change_type": _forced})
+        if variant_cache is not None:
+            variant_cache.put_interp(cr_interp)
+
     logger.info(
         "[runner] === INTERPRETER OUTPUT ===\n"
         "  is_actionable : {}\n"

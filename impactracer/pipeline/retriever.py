@@ -228,6 +228,7 @@ def reciprocal_rank_fusion_adaptive(
     ranked_lists: list[tuple[str, list[str]]],
     change_type: str,
     k: int = 60,
+    uniform_weights: bool = False,
 ) -> dict[str, float]:
     """Weighted RRF fusion.
 
@@ -236,8 +237,15 @@ def reciprocal_rank_fusion_adaptive(
 
     Blueprint §4 Step 2:
         ARRF(d) = Σ_{p ∈ paths_present} W[change_type][p] / (rrf_k + rank_p(d) + 1)
+
+    When ``uniform_weights`` is True, every path weight is forced to 1.0
+    (plain unweighted RRF), neutralising the change-type-adaptive table.
+    Ablation hook for measuring the contribution of the path weighting.
     """
-    weights = RRF_PATH_WEIGHTS.get(change_type, RRF_PATH_WEIGHTS["MODIFICATION"])
+    if uniform_weights:
+        weights: dict[str, float] = {}
+    else:
+        weights = RRF_PATH_WEIGHTS.get(change_type, RRF_PATH_WEIGHTS["MODIFICATION"])
     scores: dict[str, float] = {}
     for path_label, ranked_ids in ranked_lists:
         w = weights.get(path_label, 1.0)
@@ -789,7 +797,8 @@ def hybrid_search(
     # -------------------------------------------------------------------
     if flags.enable_rrf and len(ranked_lists) > 1:
         scores = reciprocal_rank_fusion_adaptive(
-            ranked_lists, cr_interp.change_type, k=rrf_k
+            ranked_lists, cr_interp.change_type, k=rrf_k,
+            uniform_weights=getattr(settings, "uniform_rrf_weights", False),
         )
     else:
         scores = {}

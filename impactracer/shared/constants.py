@@ -11,8 +11,15 @@ from impactracer.shared.models import ChangeType, Severity
 
 
 # =========================================================================
-# Adaptive RRF weights (indexed by change_type)
+# RRF path weights (indexed by change_type) — RETIRED 2026-06, ARCHIVAL.
 # =========================================================================
+# Ablated over all 24 citrakara CRs (variance-free, V0-V3) and found inert:
+# moves only V2 on 8/24 CRs, pooled delta -0.0019 (inside noise), washed out
+# by V3's cross-encoder + every LLM stage. Production now fuses with uniform
+# weight 1.0 (Settings.uniform_rrf_weights defaults True). This table is no
+# longer consulted unless that flag is set False; kept for reversibility.
+# Evidence: eval/rrf_weight_ablation/. NOTE change_type stays load-bearing
+# elsewhere (LLM #2 ADDITION framing) — only retrieval fusion drops it.
 
 RRF_PATH_WEIGHTS: dict[ChangeType, dict[str, float]] = {
     "ADDITION": {

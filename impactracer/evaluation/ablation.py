@@ -69,6 +69,7 @@ def run_single_cr_all_variants(
     cache_root: Path | None = None,
     run_tag: str | None = None,
     variant_ids: list[str] | None = None,
+    force_change_type_from_gt: bool = False,
 ) -> dict[str, dict]:
     """Execute the requested variants (default VariantFlags.ALL_VARIANTS) on one CR.
 
@@ -93,6 +94,17 @@ def run_single_cr_all_variants(
 
     gt_nodes = gt_entry.entity_node_ids()
     gt_files = gt_entry.file_paths()
+
+    # Optional: force the change_type from the GT label (cr_id prefix), so the
+    # change_type-dependent treatments (RRF weights, LLM #2/#3 framing) match the
+    # designed strata instead of LLM #1's classification. settings is shared
+    # across CRs, so set it for this CR and restore the prior value afterwards.
+    _prev_force = getattr(settings, "force_change_type", None)
+    if force_change_type_from_gt:
+        _label = {"ADD": "ADDITION", "MOD": "MODIFICATION", "DEL": "DELETION"}.get(
+            cr_id.split("-")[0].upper()
+        )
+        settings.force_change_type = _label  # may be None for unrecognised prefixes
 
     # Per-CR cache scoped by (run_tag, cr_id, anchor_priming).
     # All eight variants on this CR share one VariantCache; intermediate
@@ -219,6 +231,11 @@ def run_single_cr_all_variants(
             report.degraded_run,
         )
 
+    # Restore the shared-settings change_type override to its prior value so it
+    # does not leak into the next CR.
+    if force_change_type_from_gt:
+        settings.force_change_type = _prev_force
+
     return results
 
 
@@ -230,6 +247,7 @@ def run_full_evaluation(
     cache_root: Path | None = None,
     run_tag: str | None = None,
     variant_ids: list[str] | None = None,
+    force_change_type_from_gt: bool = False,
 ) -> Path:
     """Execute the full ablation × CR matrix.
 
@@ -339,6 +357,7 @@ def run_full_evaluation(
                 cache_root=cache_root,
                 run_tag=run_tag,
                 variant_ids=variant_ids,
+                force_change_type_from_gt=force_change_type_from_gt,
             )
 
             for variant_id, payload in results.items():

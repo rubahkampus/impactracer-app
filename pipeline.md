@@ -140,8 +140,10 @@ has a single responsibility.
 [shared/constants.py](impactracer/shared/constants.py) — system-wide constants. The
 canonical numbers live here:
 
-- `RRF_PATH_WEIGHTS` — per `ChangeType` (ADDITION/MODIFICATION/DELETION),
-  the relative weight of the four retrieval paths in RRF fusion.
+- `RRF_PATH_WEIGHTS` — **RETIRED 2026-06, archival.** Formerly per `ChangeType`
+  (ADDITION/MODIFICATION/DELETION) relative weights of the four retrieval paths;
+  ablation found it inert (moves only V2, pooled Δ−0.0019, inside noise). RRF now
+  fuses unweighted; table kept for reversibility (`settings.uniform_rrf_weights`).
 - `LAYER_COMPAT` — a `FileClassification × ChunkType` matrix used by the
   traceability matrix to weight doc↔code similarity (e.g. an `API_ROUTE` file
   weighted highly against an `FR` doc chunk, less against a `Design` chunk).
@@ -490,7 +492,7 @@ rejection `ImpactReport` immediately (no retrieval, no LLM #2-5).
 strongest on English identifiers. (`out_of_scope_operations` was formerly
 applied as a negative filter at step 2, but that filter is now retired/inert.)
 
-### 3.2 Step 2 — Adaptive RRF Hybrid Search
+### 3.2 Step 2 — RRF Hybrid Search
 
 [pipeline/retriever.py](impactracer/pipeline/retriever.py)::`hybrid_search(cr_interp, ctx, settings, cr_text)`.
 
@@ -517,10 +519,11 @@ Each list has `top_k_per_query = 30` entries. Plus:
   them into the RRF pool with a synthetic rank of 5. Promotes the offline
   similarity precomputation from a rerank +0.1 bonus to a true seeding signal.
 
-All ranked lists fuse via **Reciprocal Rank Fusion** with weights from
-`RRF_PATH_WEIGHTS[change_type]`. RRF score per candidate per path:
-`1 / (rrf_k + rank)` (default `rrf_k=60`), then summed across paths and
-weighted by path.
+All ranked lists fuse via **Reciprocal Rank Fusion**, unweighted. RRF score
+per candidate per path: `1 / (rrf_k + rank)` (default `rrf_k=60`), summed across
+paths with equal weight. (The change-type-adaptive `RRF_PATH_WEIGHTS[change_type]`
+table was retired 2026-06 — ablation found it inert; kept archival, restore via
+`settings.uniform_rrf_weights=False`.)
 
 Post-fusion bonuses / penalties — **RETIRED** (traceability bonus 3·b and
 negative filter 3·c found inert in the Stage-3 contribution study; functions

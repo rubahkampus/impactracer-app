@@ -39,8 +39,9 @@ The online pipeline transforms an Indonesian / English Change Request (CR) into 
                        │     DELETION ⇒ ensure 'code' in affected_layers
                        │     ADDITION ⇒ ensure not code-only
                        ▼
-   Step 2   ─── Adaptive RRF Hybrid Search ─────────────────────────────
-   (V0+)               Four ranked lists fused per change_type:
+   Step 2   ─── RRF Hybrid Search (unweighted) ───────────────────────────
+   (V0+)               Four ranked lists fused (equal weight; change-type
+                       path weighting retired 2026-06 as inert):
                          • dense_doc   (BGE-M3 embedding × ChromaDB)
                          • bm25_doc    (rank_bm25 over chunked SRS/SDD)
                          • dense_code  (BGE-M3 embedding × ChromaDB)

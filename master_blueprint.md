@@ -11,7 +11,7 @@
 **Scaffold:** the modules below are mature. Any session that wants to modify them must STOP and report — these define the contract.
 
 - `impactracer/shared/models.py` (all Pydantic schemas)
-- `impactracer/shared/constants.py` (EDGE_CONFIG, LAYER_COMPAT, RRF_PATH_WEIGHTS, fan-in caps, blacklists)
+- `impactracer/shared/constants.py` (EDGE_CONFIG, LAYER_COMPAT, fan-in caps, blacklists; RRF_PATH_WEIGHTS archival/retired)
 - `impactracer/shared/config.py` (Settings)
 - `impactracer/persistence/sqlite_client.py` (DDL)
 - `impactracer/persistence/chroma_client.py` (collection init)
@@ -77,7 +77,7 @@ Forward slashes in all node IDs and file paths, even on Windows. `pathlib.Path.a
 | FR-B1 | Validasi Kelayakan CR | `pipeline/interpreter.py` | #1 |
 | FR-B2 | Pembangkitan Objek CRInterpretation | `pipeline/interpreter.py` | #1 |
 | FR-C1 | Pencarian Hibrida Dua-Jalur | `pipeline/retriever.py` | — |
-| FR-C2 | Pemeringkatan Kandidat (Adaptive RRF) | `pipeline/retriever.py` | — |
+| FR-C2 | Pemeringkatan Kandidat (RRF, unweighted) | `pipeline/retriever.py` | — |
 | FR-C3 | Pemeringkatan Ulang Cross-Encoder | `indexer/reranker.py` (used online) | — |
 | FR-C4 | Penyaringan Pra-Validasi (3 gates) | `pipeline/prevalidation_filter.py` | — |
 | FR-C5 | Validasi Hasil Pencarian Awal | `pipeline/validator.py` | #2 |
@@ -350,7 +350,7 @@ downstream as SOFT signals only (score-floor additive boost + BM25 boost,
 
 If `is_actionable=False`, the runner short-circuits to a minimal rejection ImpactReport and exits. A coherence soft-fix is then applied: DELETION CRs must include `"code"` in `affected_layers`; ADDITION CRs must not be code-only.
 
-### Step 2 — Adaptive RRF Hybrid Search (FR-C1, FR-C2)
+### Step 2 — RRF Hybrid Search (FR-C1, FR-C2)
 
 `pipeline/retriever.py::hybrid_search(cr_interp, ctx, settings, cr_text)`.
 
@@ -367,13 +367,18 @@ The `dense_code` path additionally:
 - **Raw-CR multilingual dense pass** — when `settings.enable_raw_cr_dense_pass = True` and `cr_text` is provided, the retriever embeds the raw (Indonesian / English / mixed) CR text once and merges its nearest-neighbour code candidates into `dense_code` via score-max. BGE-M3's multilingual capability bridges the Indonesian-CR ↔ English-identifier gap without going through LLM #1.
 - **Traceability pool seeding** — when `settings.enable_traceability_pool_seeding = True`, code nodes that the offline `doc_code_candidates` table links to any retrieved doc-chunk (above `settings.traceability_seed_min_score = 0.40`, capped at `settings.traceability_seed_top_k_per_doc = 5` per doc) are injected into `dense_code` with a synthetic rank. Promotes the offline traceability precomputation from a rerank +0.1 bonus into a pool-membership signal.
 
-**Adaptive RRF formula:**
+**RRF formula (unweighted):**
 ```
-ARRF(d) = Σ_{p ∈ paths_present} W[change_type][p] / (rrf_k + rank_p(d) + 1)
+RRF(d) = Σ_{p ∈ paths_present} 1 / (rrf_k + rank_p(d) + 1)
 ```
-where `W = RRF_PATH_WEIGHTS[change_type]` from `shared/constants.py`. `rrf_k = 60`.
+`rrf_k = 60`. All paths fuse with equal weight. (The change-type-adaptive
+`RRF_PATH_WEIGHTS[change_type]` table was retired 2026-06 — ablation found it
+inert: moved only V2 on 8/24 CRs, pooled Δ−0.0019, inside the noise floor and
+washed out by the cross-encoder + LLM stages. Table kept archival; restore via
+`settings.uniform_rrf_weights=False`. `change_type` remains load-bearing in
+LLM #2 ADDITION framing — only retrieval fusion drops it.)
 
-After fusion: sort all unique node ids by ARRF score descending; take the top `settings.top_k_rrf_pool` (=200) candidates. Build `Candidate` DTOs by hydrating ChromaDB metadata + SQLite columns.
+After fusion: sort all unique node ids by RRF score descending; take the top `settings.top_k_rrf_pool` (=200) candidates. Build `Candidate` DTOs by hydrating ChromaDB metadata + SQLite columns.
 
 **Variant degenerations** of Step 2:
 - V0: only `bm25_doc` + `bm25_code`.
