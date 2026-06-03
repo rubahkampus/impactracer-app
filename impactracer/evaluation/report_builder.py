@@ -31,6 +31,36 @@ _METRIC_COLS = [
     "file_f1_set",
 ]
 
+# ---------------------------------------------------------------------------
+# Per-stratum change-type basis (the `summary_table_by_change_type.*` column).
+# True  (default): stratify by the CR-CODE prefix (ADD/MOD/DEL of cr_id) — the
+#                  designed GT strata, independent of how LLM #1 classified the
+#                  CR. Stable buckets (e.g. always 8/8/8 on citrakara), so the
+#                  table reads as "system performance per designed stratum".
+# False: stratify by the LLM-ASSIGNED change_type column (what the pipeline
+#        actually used). MOD CRs the LLM reclassified as ADDITION then count
+#        under ADDITION. Hardcoded toggle — flip here, not via CLI.
+# The emitted column is named `cr_change_type` in both modes to avoid implying
+# the bucket equals the LLM-assigned label.
+STRATIFY_BY_CR_CODE = True
+
+_CR_CODE_TO_CHANGE_TYPE = {
+    "ADD": "ADDITION",
+    "MOD": "MODIFICATION",
+    "DEL": "DELETION",
+}
+
+
+def _cr_code_change_type(cr_id: str, assigned_type: str) -> str:
+    """Map a ``cr_id`` prefix (ADD-/MOD-/DEL-) to its change_type.
+
+    Falls back to the LLM-``assigned_type`` when the prefix is unrecognised
+    (the "if applicable" rule), so datasets whose ids don't encode a stratum
+    still bucket by whatever the pipeline assigned.
+    """
+    prefix = str(cr_id).split("-")[0].strip().upper()
+    return _CR_CODE_TO_CHANGE_TYPE.get(prefix, str(assigned_type).upper())
+
 
 def _macro_average(group: pd.DataFrame, col: str) -> float:
     """Macro-average ``col`` across rows where ``status == 'ok'`` only.
@@ -117,17 +147,30 @@ def build_summary_artifacts(
     # Stratification gives the committee a per-change-type read on where
     # the pipeline actually works vs where it struggles.
     # ------------------------------------------------------------------
-    if "change_type" in df.columns:
+    # Derive the stratification key `cr_change_type` (see STRATIFY_BY_CR_CODE).
+    # Default basis = CR-code prefix; toggle to LLM-assigned `change_type`.
+    df = df.copy()
+    if STRATIFY_BY_CR_CODE and "cr_id" in df.columns:
+        df["cr_change_type"] = [
+            _cr_code_change_type(cid, atype)
+            for cid, atype in zip(
+                df["cr_id"], df.get("change_type", pd.Series([""] * len(df)))
+            )
+        ]
+    elif "change_type" in df.columns:
+        df["cr_change_type"] = df["change_type"].astype(str).str.upper()
+
+    if "cr_change_type" in df.columns:
         per_ct_rows: list[dict] = []
         for ct_value in ("ADDITION", "MODIFICATION", "DELETION"):
-            ct_sub = df[df["change_type"].astype(str).str.upper() == ct_value]
+            ct_sub = df[df["cr_change_type"] == ct_value]
             if ct_sub.empty:
                 continue
             for variant in VariantFlags.ALL_VARIANTS:
                 vsub = ct_sub[ct_sub["variant"] == variant]
                 if vsub.empty:
                     continue
-                row: dict = {"change_type": ct_value, "variant": variant}
+                row: dict = {"cr_change_type": ct_value, "variant": variant}
                 for col in _METRIC_COLS:
                     row[col] = _macro_average(vsub, col)
                 ok = vsub[vsub["status"] == "ok"]
@@ -138,7 +181,7 @@ def build_summary_artifacts(
         if per_ct_rows:
             ct_df = pd.DataFrame(
                 per_ct_rows,
-                columns=["change_type", "variant", *_METRIC_COLS, "n_ok", "n_error"],
+                columns=["cr_change_type", "variant", *_METRIC_COLS, "n_ok", "n_error"],
             )
             ct_csv = output_dir / "summary_table_by_change_type.csv"
             ct_df.to_csv(ct_csv, index=False, float_format="%.4f")
@@ -149,16 +192,16 @@ def build_summary_artifacts(
 
 
 def _render_change_type_markdown(ct_df: pd.DataFrame) -> str:
-    """Render the per-change-type summary as Markdown grouped by change_type."""
+    """Render the per-stratum summary as Markdown grouped by cr_change_type."""
     if ct_df.empty:
         return "# Summary by Change Type\n\n_(no rows)_\n"
     lines = ["# Summary Table — Per-Change-Type × Per-Variant Set-Level Metrics", ""]
     for ct in ("ADDITION", "MODIFICATION", "DELETION"):
-        sub = ct_df[ct_df["change_type"] == ct]
+        sub = ct_df[ct_df["cr_change_type"] == ct]
         if sub.empty:
             continue
-        cols = [c for c in sub.columns if c != "change_type"]
-        lines.append(f"## change_type = {ct}")
+        cols = [c for c in sub.columns if c != "cr_change_type"]
+        lines.append(f"## cr_change_type = {ct}")
         lines.append("")
         lines.append("| " + " | ".join(cols) + " |")
         lines.append("|" + "|".join(["---"] * len(cols)) + "|")
