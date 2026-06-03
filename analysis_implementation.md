@@ -66,33 +66,21 @@ The online pipeline transforms an Indonesian / English Change Request (CR) into 
                        ▼
    Step 3   ─── Cross-Encoder Rerank (V3+) ────────────────────────────
                        BGE-Reranker-v2-m3, multi-query MAX scoring.
-                       Output: top-15 admitted seeds.
-                       Post-rerank score adjustments:
-                         + Traceability bonus (+0.10) for code candidates
-                           in any retrieved doc-chunk's offline
-                           doc_code_candidates row.
-                         − Negative filter (additive −1.0) for candidates
-                           whose NAME (not snippet) contains an out-of-scope
-                           operation (needle ≥ 6 chars). Additive on the
-                           cross-encoder logit so it works correctly across
-                           positive AND negative scores. (Softened from −5.0
-                           after −5.0 + snippet matching crushed legitimate
-                           CR-02 candidates — see §4.4 / Invariant #10.)
+                       Output: plain top-15 by cross-encoder score (3·f).
+                       (RETIRED post-rerank adjustments: traceability bonus
+                        3·b, negative filter 3·c, named-entry pinning 3·e —
+                        all found inert by the Stage-3 contribution study;
+                        archival-only, no longer called.)
                        │
                        ▼
-   Step 3.6/3.7 ─────── Pre-validation Gates ─────────────────────────
-                       (3.5 score floor RETIRED — inert by ablation;
-                            archival-only, never invoked.)
-                       3.6  Semantic dedup. Doc chunks whose top-1 code
-                            resolution is already in the pool are
-                            collapsed into the code candidate;
-                            (section_title, text) attached as
-                            "Business Context" for the LLM #2 prompt.
-                       3.7  Plausibility (density-only, threshold 0.50).
-                            If a single file accounts for > 50 % of code
-                            candidates, drop those candidates UNLESS
-                            their name matches a named_entry_point.
-                            No per-file count cap.
+   Step 3.6 ─────────── Pre-validation Gates (3.5 + 3.7 RETIRED) ──────
+                       3.5 score floor inert + 3.7 plausibility NET-NEGATIVE
+                       → both retired (archival-only, never invoked).
+                       3.6 semantic dedup RETAINED (within-noise on F1, kept
+                       for LLM #2 Business Context + doc/code de-dup): doc
+                       chunks whose top-1 code resolution is already in the
+                       pool are collapsed into the code candidate;
+                       (section_title, text) attached as "Business Context".
                        │
                        ▼
    Step 4   ─── LLM #2  validate_sis (V4+) ───────────────────────────
@@ -495,7 +483,7 @@ The pre-registered test is correctly **deferred** at n=5 < MIN_PAIRED_N=15. V5 (
 
 - RRF pool → up to 200 candidates feed the cross-encoder (`top_k_rrf_pool=200`). The `layered_code` path contributes up to 60 (12 per layer × 5 layers).
 - Cross-encoder reranks down to top-15 by raw_reranker_score.
-- Pre-validation gates (3.5 / 3.6 / 3.7) drop a small handful per CR (typically 0–3).
+- Pre-validation gates: 3.5 + 3.7 RETIRED (drop nothing); 3.6 dedup retained (merges doc→code, no F1 claim).
 - LLM #2 confirms ~half of survivors (acceptance ≈ 50–60 %).
 - Doc → code resolution expands to ~10–20 pairs; LLM #3 prunes hard (~80–95 % rejection — most doc resolutions are not impactful seeds).
 - BFS adds ~3–20 propagated nodes around the validated seeds per CR (the wider retrieval pool and sibling promotion keep this much tighter than naïve BFS, which can reach ~30+).
@@ -515,20 +503,20 @@ The following architectural invariants are FROZEN. Violating any of them require
 1. **10 node types** (`shared/models.py::NodeType`): `File, Class, Function, Method, Interface, TypeAlias, Enum, ExternalPackage, InterfaceField, Variable`.
 2. **14 structural edge types** (`shared/models.py::EdgeType`, `shared/constants.py::EDGE_CONFIG`): see §3.1 above.
 3. **5 canonical LLM stages in V7**: `interpret`, `validate_sis`, `validate_trace`, `validate_propagation`, `synthesize`. Per-CR call counts can exceed 5 because Step 7 spawns `validate_collapsed_children` sub-calls and Step 7.5 spawns one `validate_siblings` call per file with a qualifying anchor. The five canonical stage names remain the architectural contract.
-4. **8 canonical ablation variants** (`evaluation/variant_flags.py::ALL_VARIANTS = ["V0","V1","V2","V3","V4","V5","V6","V7"]`). V3 = deterministic-filtering peak (cross-encoder + both gates 3.6/3.7, no LLM gating; score floor retired/inert, so cross-encoder is V3's only differentiator from V2). V7 = full pipeline (BFS + LLM #4 + Step 7.5 sibling promotion + LLM #5 aggregator).
+4. **8 canonical ablation variants** (`evaluation/variant_flags.py::ALL_VARIANTS = ["V0","V1","V2","V3","V4","V5","V6","V7"]`). V3 = deterministic-filtering peak (cross-encoder rerank + top-K, no LLM gating; all pre-validation gates retired, so the cross-encoder is V3's only differentiator from V2). V7 = full pipeline (BFS + LLM #4 + Step 7.5 sibling promotion + LLM #5 aggregator).
 5. **3 change_type values**: `ADDITION, MODIFICATION, DELETION`.
 6. **Fail-CLOSED at every validator.** Both per-item (drop on missing verdict) and per-batch (drop on exception, continue) at LLM #2, #3, #4 primary, #4 child-collapse, and #4 sibling-batch. The runner annotates the report with `degraded_run=True` when any drop fires.
 7. **Distributed Justification Principle.** Entity-level justifications come VERBATIM from LLM #2 / LLM #3 / LLM #4 (including its sibling-batch sub-stage) or a synthetic `auto_exempt` string. LLM #5 never re-justifies entities. File-level justifications may be authored by LLM #5 because file summarisation is summarisation, not validation.
 8. **Truncation decoupled from output.** The LLM #5 prompt may be truncated to fit the token budget; the report's `impacted_entities` list always contains the FULL validated CIS regardless.
 9. **CALLS reverse depth = 2.** Combined with the UTILITY-CALLS cutoff and the per-node-type fan-in cap, this is the structural defence against graph flood.
-10. **Negative filter is ADDITIVE (default −1.0 on the cross-encoder logit, name-only, ≥6-char needle).** A multiplicative penalty would invert sign on negative logits and inadvertently promote out-of-scope candidates. The current parameters replace an earlier −5.0 / name+snippet design that crushed legitimate candidates whose snippets contained out-of-scope vocabulary as substrings.
+10. **Negative filter — RETIRED (3·c).** Found inert on entity F1 in the Stage-3 contribution study; `apply_negative_filter` is archival-only and no longer called. (Historical design note, retained for context: it was additive −1.0 on the cross-encoder logit, name-only, ≥6-char needle — additive because a multiplicative penalty would invert sign on negative logits; the −1.0/name-only parameters replaced an earlier −5.0/name+snippet design that crushed legitimate candidates.)
 11. **The Wilcoxon test target is entity-level `f1_set` (Total F1, set-level).** Bounded `F1@K` is absent from the codebase because it cannot detect graph floods.
 12. **NFR-01 compares the validated SIS, not impacted_entities.** Specifically `trace_sink["step_5b_llm3_verdicts"]["validated_code_seeds"]` across two V7 runs. BFS + LLM #4 + Step 7.5 carry network-induced variance that NFR-01 is not designed to test.
 13. **File-type entities are filtered from `impacted_entities` at synthesis.** Every CIS node with `node_type == "File"` or without `::` in its id is dropped. Their `file_path` values are still injected into `impacted_files` via `extra_impacted_file_paths` so file-level reporting is preserved.
 14. **TYPED_BY is NOT in `PROPAGATION_VALIDATION_EXEMPT_EDGES`.** Only `IMPLEMENTS` and `DEFINES_METHOD` remain auto-exempt at depth 1. TYPED_BY goes through LLM #4 like any other propagated chain.
 15. **Sibling promotion (Step 7.5) anchors require non-empty LLM #2 `mechanism_of_impact`.** Anchors without an articulate mechanism (e.g. CRUD funcs of unrelated domain entities) cannot drive lateral file-local expansion; this prevents per-file overshoot.
 16. **LLM #1 is two-stage by default.** `interpret_cr_two_stage` (`interpret_intent` + `interpret_anchors`, the latter grounded in the cached project skeleton) runs whenever `variant_flags.two_stage_interpret=True` AND a skeleton file exists. The single-stage `interpret` path is the documented fallback. Both return the identical `CRInterpretation` shape, so all downstream code is mode-agnostic.
-17. **Anchor priming is a SOFT signal, never a hard pin.** `CRInterpretation.anchor_candidates` (populated when `variant_flags.anchor_priming=True`, default) contributes only an additive score-floor boost (`anchor_priming_boost=0.10`) and a synthetic-BM25 boost (`anchor_priming_bm25_boost=1.5`). A boosted candidate still below the floor is dropped, and any anchor-surfaced candidate still faces LLM #2. Contrast `named_entry_points`, which DO hard-pin past the top-K truncation and the gates.
+17. **Anchor priming is a SOFT signal, never a hard pin.** `CRInterpretation.anchor_candidates` (populated when `variant_flags.anchor_priming=True`, default) contributes a synthetic-BM25 boost (`anchor_priming_bm25_boost=1.5`); the additive score-floor boost (`anchor_priming_boost=0.10`) is now inert (score floor retired). Any anchor-surfaced candidate still faces LLM #2. (`named_entry_points` formerly hard-pinned past the gates and top-K, but named-entry pinning 3·e is now retired — it no longer pins anything.)
 18. **Stores are profile-namespaced under `./data/<profile>/`.** `get_settings(profile)` rewrites the five store paths after `Settings()` resolves `.env`, so the profile (resolved `--profile` flag > `IMPACTRACER_PROFILE` env > `"citrakara"`) is authoritative over any store-path vars in `.env`. `load_pipeline_context` fails fast (`RuntimeError`) when the chosen profile's `code_nodes` table is empty/absent, so `analyze`/`evaluate` never run against an un-indexed profile.
 
 ---

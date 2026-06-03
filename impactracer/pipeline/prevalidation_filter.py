@@ -1,16 +1,12 @@
-"""Pre-validation deterministic gates (FR-C4).
+"""Pre-validation deterministic gates (FR-C4) — only 3.6 semantic dedup active.
 
-Two sub-steps executed in order:
+A 42-CR two-repo contribution study retired the score floor (3.5, strictly
+inert) and the plausibility/density gate (3.7, net-negative) — their
+``step_3_*`` functions are archival-only and never invoked. Semantic dedup
+(3.6) is RETAINED on engineering/robustness grounds (Business Context for LLM #2
++ doc/code de-duplication; measured within-noise on F1, not an accuracy claim).
 
-- Step 3.6 - Cross-collection semantic deduplication.
-- Step 3.7 - Layer-aware affinity rescoring + file-density plausibility
-             gate with named_entry_points exemption.
-
-(Step 3.5, the reranker score floor, is RETIRED — found strictly inert by a
-42-CR two-repo ablation. ``step_3_5_score_filter`` remains for archival only
-and is never invoked.)
-
-No LLM calls. Purely deterministic.
+Reference: stage3_contribution_study.md.
 """
 
 from __future__ import annotations
@@ -33,15 +29,24 @@ def apply_prevalidation_gates(
     enable_dedup: bool = True,
     enable_plausibility: bool = True,
 ) -> list[Candidate]:
-    """Apply Steps 3.6, 3.7 in order (semantic dedup, plausibility+affinity).
+    """Pre-validation: only Step 3.6 semantic dedup is active.
 
-    NOTE: the Step 3.5 score floor is RETIRED. A 42-CR two-repo ablation
-    (floor on vs off, all else fixed) found it strictly inert — it changed no
-    candidate on any CR because the calibrated threshold admits all normalized
-    cross-encoder scores. ``step_3_5_score_filter`` is retained below for
-    archival only and is never invoked; ``enable_score_floor`` is accepted for
-    signature/back-compat but has no effect. See the retirement note on
-    ``step_3_5_score_filter``.
+    The Stage-3 contribution study (42 CRs, two repos) retired two of the three
+    gates as non-contributory to entity F1:
+      - 3.5 score floor: strictly inert (admits all normalized scores) — RETIRED.
+      - 3.7 plausibility/density: net-NEGATIVE (LOO -0.005 / ADD -0.008) — RETIRED.
+    ``step_3_5_score_filter`` / ``step_3_7_plausibility_and_affinity`` are kept
+    below for archival only and are NEVER invoked; ``enable_score_floor`` /
+    ``enable_plausibility`` are dead flags.
+
+    Step 3.6 semantic dedup is RETAINED on engineering/robustness grounds (NOT
+    an F1 claim — it measured within-noise): it merges a doc chunk into its
+    resolved code candidate and carries the doc's section text into
+    ``merged_doc_contexts`` as Business Context for the LLM #2 prompt (V4+),
+    and prevents the same impact being double-counted as both a doc and a code
+    candidate. Active on all variants when ``enable_dedup`` is True.
+
+    Reference: stage3_contribution_study.md.
     """
     if enable_dedup:
         attach_doc_contexts = not bool(getattr(settings, "code_only_mode", False))
@@ -49,15 +54,6 @@ def apply_prevalidation_gates(
             candidates, conn, attach_doc_contexts=attach_doc_contexts
         )
         logger.info("[gates] Post-3.6 (semantic dedup): {} candidates", len(candidates))
-    else:
-        logger.debug("[gates] Step 3.6 DISABLED (enable_dedup=False)")
-
-    if enable_plausibility:
-        candidates = step_3_7_plausibility_and_affinity(candidates, cr_interp, settings)
-        logger.info("[gates] Post-3.7 (plausibility+affinity): {} candidates", len(candidates))
-    else:
-        logger.debug("[gates] Step 3.7 DISABLED (enable_plausibility=False)")
-
     return candidates
 
 
@@ -117,7 +113,11 @@ def step_3_6_semantic_dedup(
     conn: sqlite3.Connection,
     attach_doc_contexts: bool = True,
 ) -> list[Candidate]:
-    """Merge doc chunks whose top-1 code resolution is already in the list.
+    """ACTIVE — retained on engineering/robustness grounds (measured
+    within-noise on F1, NOT an accuracy claim): provides LLM #2 Business
+    Context and prevents doc/code double-counting. See apply_prevalidation_gates.
+
+    Merge doc chunks whose top-1 code resolution is already in the list.
 
     For each doc_chunks candidate, look up top-1 code node from
     doc_code_candidates. If that code_id is already a candidate, append
@@ -203,7 +203,11 @@ def step_3_7_plausibility_and_affinity(
     cr_interp: CRInterpretation,
     settings: object,
 ) -> list[Candidate]:
-    """Rescore by layer affinity, then enforce density-only plausibility gate.
+    """RETIRED / ARCHIVAL — never invoked (see apply_prevalidation_gates).
+    Found NET-NEGATIVE (LOO -0.005 / ADD -0.008) in the Stage-3 contribution
+    study; kept for reference only.
+
+    Rescore by layer affinity, then enforce density-only plausibility gate.
 
     Phase A: multiply reranker_score by _affinity_factor(c, cr_interp).
     Phase B: drop CODE candidates from files whose fraction of total code

@@ -31,8 +31,6 @@ from impactracer.pipeline.interpreter import interpret_cr
 from impactracer.pipeline.llm_client import LLMClient
 from impactracer.pipeline.prevalidation_filter import apply_prevalidation_gates
 from impactracer.pipeline.retriever import (
-    apply_negative_filter,
-    apply_traceability_bonus,
     build_bm25_from_chroma,
     build_metadata_cache,
     hybrid_search,
@@ -490,18 +488,16 @@ def run_analysis(
             _graph_rerank_on, len(candidates),
         )
 
-        # Snapshot raw cross-encoder logits before any post-rerank adjustment.
+        # Snapshot raw cross-encoder logits (used by Top-K truncation + Step 8
+        # context-priority; the score floor that also consumed it is retired).
         for c in candidates:
             c.raw_reranker_score = c.reranker_score
 
-        # Traceability bonus: additive +0.1 for code candidates associated with
-        # any retrieved doc chunk in the offline traceability table.
-        candidates = apply_traceability_bonus(candidates, ctx.conn)
-
-        # Negative filter (penalty -1.0, name-only).
-        candidates = apply_negative_filter(
-            candidates, cr_interp.out_of_scope_operations
-        )
+        # RETIRED: traceability bonus (3·b) and negative filter (3·c). The
+        # Stage-3 contribution study found both inert on entity F1
+        # (apply_traceability_bonus / apply_negative_filter remain in
+        # retriever.py for archival only and are no longer called here).
+        # Candidates keep their raw cross-encoder scores unmodified.
 
         candidates.sort(key=lambda c: c.raw_reranker_score, reverse=True)
 
@@ -563,62 +559,20 @@ def run_analysis(
             for c in candidates
         ])
 
-        # Named-entry-point hard pass-through.
-        # Before the top-K truncation, force-include any candidate whose
-        # node_id, file_path, or name matches a token in
-        # cr_interp.named_entry_points. The cross-encoder may rank the
-        # CR-named file out of the top-K when the CR text body is short
-        # (e.g. "delete formatters.ts") while service-method bodies score
-        # higher on lexical density. The exemption ensures that files the
-        # LLM #1 interpreter explicitly named survive into the SIS.
-        named_patterns_raw = list(cr_interp.named_entry_points or [])
-        named_patterns = [p.lower() for p in named_patterns_raw if p]
-
-        def _is_named(c) -> bool:
-            if not named_patterns:
-                return False
-            fields = [c.node_id or "", c.file_path or "", c.name or ""]
-            haystacks = [f.lower() for f in fields]
-            for p in named_patterns:
-                for h in haystacks:
-                    if p in h:
-                        return True
-            return False
-
-        # Partition into pinned (named) and rest, preserving relative order.
-        # Tag pinned candidates so downstream gates respect the pin.
-        pinned = []
-        rest = []
-        for c in candidates:
-            if _is_named(c):
-                c.pinned_by_named_entry = True
-                pinned.append(c)
-            else:
-                rest.append(c)
-
-        if pinned:
-            logger.info(
-                "[runner] Named-entry-point pinning: {} candidates pinned by patterns={}",
-                len(pinned), named_patterns_raw,
-            )
-
-        # Truncate to max_admitted_seeds AFTER all post-rerank adjustments.
-        # Pinned candidates always survive; remaining slots filled by top
-        # cross-encoder ranks. If pinned count exceeds the cap, all pinned
-        # are kept (the cap is a soft floor in that case).
+        # RETIRED: named-entry-point pinning (3·e). The Stage-3 contribution
+        # study found it inert on entity F1, so truncation is now a plain
+        # top-K by cross-encoder score with no pin partition and no
+        # named-entry exemptions. (candidates are already sorted desc by
+        # raw_reranker_score above.)
         seat_cap = settings.max_admitted_seeds
-        if len(pinned) >= seat_cap:
-            candidates = pinned
-        else:
-            remaining = seat_cap - len(pinned)
-            candidates = pinned + rest[:remaining]
+        candidates = candidates[:seat_cap]
 
         _trace("step_3_reranked", [
             {"node_id": c.node_id, "collection": c.collection,
              "rrf_score": c.rrf_score, "reranker_score": c.reranker_score,
              "raw_reranker_score": c.raw_reranker_score, "file_path": c.file_path,
              "name": c.name,
-             "named_entry_point_pinned": _is_named(c)}
+             "named_entry_point_pinned": False}
             for c in candidates
         ])
 
@@ -637,41 +591,10 @@ def run_analysis(
                 min_s, max_s,
             )
     else:
-        # V0-V2: no reranker — cap at max_admitted_seeds from the RRF pool.
-        # Named entry points are pinned before
-        # truncation so they survive the cap.
-        named_patterns_raw = list(cr_interp.named_entry_points or [])
-        named_patterns = [p.lower() for p in named_patterns_raw if p]
-
-        def _is_named_v012(c) -> bool:
-            if not named_patterns:
-                return False
-            fields = [c.node_id or "", c.file_path or "", c.name or ""]
-            haystacks = [f.lower() for f in fields]
-            for p in named_patterns:
-                for h in haystacks:
-                    if p in h:
-                        return True
-            return False
-
-        pinned = []
-        rest = []
-        for c in candidates:
-            if _is_named_v012(c):
-                c.pinned_by_named_entry = True
-                pinned.append(c)
-            else:
-                rest.append(c)
+        # V0-V2: no reranker — plain cap at max_admitted_seeds from the RRF
+        # pool order. (Named-entry pinning retired; see 3·e retirement.)
         seat_cap = settings.max_admitted_seeds
-        if len(pinned) >= seat_cap:
-            candidates = pinned
-        else:
-            candidates = pinned + rest[: seat_cap - len(pinned)]
-        if pinned:
-            logger.info(
-                "[runner] Named-entry-point pinning (no rerank): {} pinned",
-                len(pinned),
-            )
+        candidates = candidates[:seat_cap]
         logger.info("[runner] Step 3: Cross-encoder DISABLED ({})", variant_flags.variant_id)
 
     # ------------------------------------------------------------------

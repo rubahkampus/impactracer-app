@@ -24,7 +24,7 @@
 
 **Canonical architecture additions** beyond the original blueprint:
 - **Two-stage LLM #1 (default-on).** `interpret_cr` splits into stage 1a (`CRIntent` — actionability + change_type + layers + domain_concepts, no project context) and stage 1b (`CRAnchors` — `search_queries`, `layered_search_queries`, `named_entry_points`, `anchor_candidates`, `out_of_scope_operations`), where 1b is grounded in a cached project skeleton. Controlled by `VariantFlags.two_stage_interpret` (default True); degrades to single-stage when the skeleton file is absent.
-- **Anchor priming (default-on).** `CRInterpretation` carries an extra `anchor_candidates` field (0–10 bare identifier guesses at likely host/sibling symbols). Controlled by `VariantFlags.anchor_priming` (default True). Retrieval treats anchors as a SOFT signal: an additive `Settings.anchor_priming_boost` at the score-floor gate and an `Settings.anchor_priming_bm25_boost` multiplier on a synthetic BM25 query (retriever Path 4). Never a hard pin — a hallucinated anchor still faces the validator chain.
+- **Anchor priming (default-on).** `CRInterpretation` carries an extra `anchor_candidates` field (0–10 bare identifier guesses at likely host/sibling symbols). Controlled by `VariantFlags.anchor_priming` (default True). Retrieval treats anchors as a SOFT signal via an `Settings.anchor_priming_bm25_boost` multiplier on a synthetic BM25 query (retriever Path 4). (The additive `anchor_priming_boost` formerly applied at the score-floor gate is now inert — the score floor is retired — so only the BM25 multiplicative boost remains active.) Never a hard pin — a hallucinated anchor still faces the validator chain.
 - **Project skeleton.** The indexer writes a deterministic, ~1500-token textual codebase summary to `data/project_skeleton.txt` (`indexer/project_skeleton.py`). It is the source of project vocabulary for stage 1b's anchor extraction. See §3.9.
 - LLM #1 emits an additional `layered_search_queries` field (5 layers × 1–2 phrases) consumed by the retriever as a first-class RRF path.
 - The synthesizer's `impacted_entities` list is HARD-FILTERED to qualified `file::symbol` entries only (File-type nodes never appear). File-type CIS nodes still drive `impacted_files`.
@@ -94,12 +94,12 @@ Forward slashes in all node IDs and file paths, even on Windows. `pathlib.Path.a
 ## 2. Architectural Invariants (Non-Negotiable)
 
 1. **Five primary LLM invocations in V7.** Names: `interpret`, `validate_sis`, `validate_trace`, `validate_propagation`, `synthesize`. Step 7 additionally runs an internal child-validation call (`validate_collapsed_children`, parameterised with the same LLM #4 prompt) for collapsed children. Step 7.5 runs `validate_siblings` micro-batches, one per file with a qualifying anchor — also parameterised from the LLM #4 module. Per-CR LLM call counts can therefore exceed 5 in practice (typically 5–25 distinct calls including child + sibling batches), but the **five canonical stage names** remain the architectural contract.
-2. **Deterministic structural pipeline.** AST extraction, embedding, RRF fusion, BFS propagation, and both pre-validation gates (3.6 dedup, 3.7 plausibility) produce bit-identical output on identical input. Determinism in LLM steps is enforced by `temperature=0`, `seed=42`, Pydantic `response_schema`.
+2. **Deterministic structural pipeline.** AST extraction, embedding, RRF fusion, cross-encoder rerank + top-K truncation, semantic dedup (3.6), and BFS propagation produce bit-identical output on identical input. (The 3.5 score floor and 3.7 plausibility gate are retired; only 3.6 dedup remains active — see Step 3.6/3.7.) Determinism in LLM steps is enforced by `temperature=0`, `seed=42`, Pydantic `response_schema`.
 3. **All LLM outputs are Pydantic-schema-constrained** via `LLMClient.call(response_schema=...)`. Never free-form text. Every schema inherits from `TruncatingModel` (in `shared/models.py`).
 4. **3 `change_type` values only:** `ADDITION`, `MODIFICATION`, `DELETION`. Uppercase, no others.
 5. **14 structural edge types** (canonical and frozen): `CALLS, INHERITS, IMPLEMENTS, TYPED_BY, FIELDS_ACCESSED, DEFINES_METHOD, HOOK_DEPENDS_ON, PASSES_CALLBACK, IMPORTS, RENDERS, DEPENDS_ON_EXTERNAL, CLIENT_API_CALLS, DYNAMIC_IMPORT, CONTAINS`. Adding a new type requires the SQLite CHECK migration.
 6. **10 node types** (canonical and frozen): `File, Class, Function, Method, Interface, TypeAlias, Enum, ExternalPackage, InterfaceField, Variable`. `Variable` covers `const NAME = <new_expression|object|array|call_expression>` (Mongoose schemas, factory results, large frozen objects, template arrays); arrow-function `const` declarations remain `Function`.
-7. **8 canonical ablation variants V0..V7.** No V3.5, no V6.5. `VariantFlags.ALL_VARIANTS = ["V0","V1","V2","V3","V4","V5","V6","V7"]`. V3 represents the deterministic-filtering peak (cross-encoder + both gates, no LLM gating; the score floor is retired/inert so V3's only differentiator from V2 is the cross-encoder). V7 is the full pipeline (BFS + LLM #4 + LLM #5 aggregator).
+7. **8 canonical ablation variants V0..V7.** No V3.5, no V6.5. `VariantFlags.ALL_VARIANTS = ["V0","V1","V2","V3","V4","V5","V6","V7"]`. V3 represents the deterministic-filtering peak (cross-encoder rerank + top-K, no LLM gating; all pre-validation gates retired, so V3's only differentiator from V2 is the cross-encoder). V7 is the full pipeline (BFS + LLM #4 + LLM #5 aggregator).
 8. **Forward slashes everywhere.** `pathlib.Path.as_posix()` for any path written to SQLite, ChromaDB metadata, or `node_id`.
 9. **Single pre-registered statistical test.** V7 vs V5, one-sided paired Wilcoxon signed-rank, on the **entity-level `f1_set`** metric. `MIN_PAIRED_N = 15`. `ALPHA = 0.05`. **No Bonferroni** (only one test exists).
 10. **Set-level metrics only.** `f1_set`, `precision_set`, `recall_set`, computed against the full unpruned validated CIS. There is no `F1@K` in the codebase. Bounded top-K metrics cannot distinguish a graph-flood result (recall via flood) from a focused one and are therefore forbidden.
@@ -391,27 +391,30 @@ candidates = ctx.reranker.rerank_multi_query(
 )
 ```
 
-The cross-encoder scores the **full RRF pool** (~200 candidates) on every variant where it is enabled. Each candidate retains its raw cross-encoder logit in `raw_reranker_score` and a sigmoid-normalised score in `reranker_score`. Post-rerank adjustments and graph-rerank (when enabled) operate on this full ranked pool; the final `candidates[:settings.max_admitted_seeds]` truncation runs **after** all adjustments. `max_admitted_seeds = 15`.
-
-Post-rerank score adjustments:
-- **Traceability bonus** (+0.10) on `raw_reranker_score` for code candidates that any retrieved doc-chunk traceability-links to.
-- **Negative filter** (additive −1.0 on `raw_reranker_score`, name-only match, needle ≥ 6 chars) for candidates whose name contains an entry from `cr_interp.out_of_scope_operations`. Additive — multiplicative would invert sign on negative logits and inadvertently promote out-of-scope candidates. The current parameters (−1.0 penalty, name-only matching, needle ≥ 6 chars) were chosen to avoid crushing legitimate matches: an earlier −5.0 penalty with name-or-snippet matching incorrectly demoted CR-02 candidates whose snippets contained out-of-scope vocabulary as substrings.
+The cross-encoder scores the **full RRF pool** (~200 candidates) on every variant where it is enabled. Each candidate retains its raw cross-encoder logit in `raw_reranker_score` and a sigmoid-normalised score in `reranker_score`. Graph-rerank (when enabled) operates on this full ranked pool; the final `candidates[:settings.max_admitted_seeds]` truncation (Step 3·f, a plain top-K by score) runs **after** rerank. `max_admitted_seeds = 15`.
 
 A `step_3_reranked_full` trace key captures the full ranked pool before the `max_admitted_seeds` truncation; it is consumed by `tools/diagnose_k_widening.py` for the post-hoc rank-bucket analysis reported in the K-widening empirical study.
 
-**Graph-aware rerank (default-disabled):** when `settings.enable_graph_rerank = True`, a 2-iteration label-propagation rerank inserts between the cross-encoder and the top-K truncation. Graph propagation blends a structural signal via `α * cross_encoder_norm + (1-α) * graph_norm`; Mode B optionally adds graph-discovered candidates not in the original RRF pool. Disabled by default because no α value won both entity-F1 and file-F1 on the target codebase's calibration set — its structural graph lacks form↔schema edges (form components fetch via API + Zod parse, severing the path graph rerank would exploit). Code preserved for codebases with denser structural coupling.
+**RETIRED post-rerank adjustments (3·b, 3·c, 3·e).** Traceability bonus (+0.10), negative filter (−1.0, name-only), and named-entry-point pinning were all retired after a 42-CR two-repo Stage-3 contribution study found none improves entity F1 (bonus & negative filter inert; pinning inert). The truncation is now a plain top-K by cross-encoder score with no pin partition and no named-entry exemptions. The `apply_traceability_bonus` / `apply_negative_filter` functions remain in `retriever.py` for archival only and are no longer called. Reference: `stage3_contribution_study.md`.
 
-### Step 3.6 / 3.7 — Pre-Validation Gates (FR-C4)
+**Graph-aware rerank (default-disabled, KEPT optional):** when `settings.enable_graph_rerank = True`, a 2-iteration label-propagation rerank inserts between the cross-encoder and the top-K truncation. Graph propagation blends a structural signal via `α * cross_encoder_norm + (1-α) * graph_norm`; Mode B optionally adds graph-discovered candidates not in the original RRF pool. Disabled by default; the contribution study found it helps one repo (citrakara) only and it is not part of the production config. Retained as an optional knob for codebases with denser structural coupling.
 
-`pipeline/prevalidation_filter.py`. Each gate is independently toggleable.
+### Step 3.6 / 3.7 — Pre-Validation Gates (FR-C4) — 3.5/3.7 retired, 3.6 retained
 
-(Step 3.5, a reranker score floor, was retired: a 42-CR two-repo ablation found
-it strictly inert — it changed no candidate on any CR, because the calibrated
-threshold admits all normalized cross-encoder scores. The function is retained
-in source for archival only and is never invoked.)
+`pipeline/prevalidation_filter.py`. The Stage-3 contribution study (42 CRs,
+two repos) found none of the three gates improves entity F1 — 3.5 score floor
+strictly inert, 3.6 semantic dedup exactly inert, 3.7 plausibility/density
+**net-negative** — so **3.5 and 3.7 are RETIRED** (`step_3_5_score_filter` /
+`step_3_7_plausibility_and_affinity` archival-only, never invoked;
+`enable_score_floor` / `enable_plausibility_gate` dead flags).
 
-- **3.6 Semantic dedup** (`enable_dedup_gate`): for each `doc_chunks` candidate, look up its top-1 code resolution via `doc_code_candidates`. If that code_id is already in the candidate list, collapse the doc into the code candidate (attach `(section_title, text)` as Business Context for the LLM #2 prompt) and drop the doc.
-- **3.7 Plausibility — density only** (`enable_plausibility_gate`): if a single file accounts for more than `settings.plausibility_gate_density_threshold` (=0.50) of code candidates, drop those candidates UNLESS their name matches a `named_entry_point`. No per-file count cap.
+- **3.6 Semantic dedup** (`enable_dedup_gate`) — **RETAINED** on
+  engineering/robustness grounds (NOT an F1 claim; measured within-noise): for
+  each `doc_chunks` candidate, look up its top-1 code resolution via
+  `doc_code_candidates`; if that code_id is already in the list, collapse the
+  doc into the code candidate (attach `(section_title, text)` as Business
+  Context for the LLM #2 prompt) and drop the doc. This is the one pre-validation
+  mechanism still active. Reference: `stage3_contribution_study.md`.
 
 ### Step 4 — Validate SIS (LLM #2, FR-C5)
 
@@ -600,25 +603,30 @@ the keys for the steps they skip.)
 
 `evaluation/variant_flags.py`. `VariantFlags.ALL_VARIANTS = ["V0", "V1", "V2", "V3", "V4", "V5", "V6", "V7"]`.
 
-Dedup (3.6) and Plaus (3.7) are universal — they run on every variant V0–V7.
-The score floor (3.5) is retired (inert; archival-only) and is no longer a
-column. The chain is therefore distinguished purely by retrieval method, the
-cross-encoder, and the LLM/BFS stages.
+The score floor (3.5) and plausibility (3.7) gates are RETIRED
+(inert/archival-only) and are no longer columns; semantic dedup (3.6) is
+retained but runs on every variant (not a differentiator). The chain is
+therefore distinguished purely by retrieval method, the cross-encoder, and the
+LLM/BFS stages.
 
-| Variant | BM25 | Dense | RRF | XEnc | Dedup | Plaus | LLM #2 | LLM #3 | BFS | LLM #4 |
-|---------|------|-------|-----|------|-------|-------|--------|--------|-----|--------|
-| V0 | ✓ | ☐ | ☐ | ☐ | ✓ | ✓ | ☐ | ☐ | ☐ | ☐ |
-| V1 | ☐ | ✓ | ☐ | ☐ | ✓ | ✓ | ☐ | ☐ | ☐ | ☐ |
-| V2 | ✓ | ✓ | ✓ | ☐ | ✓ | ✓ | ☐ | ☐ | ☐ | ☐ |
-| V3 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ☐ | ☐ | ☐ |
-| V4 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ☐ | ☐ |
-| V5 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ☐ |
-| V6 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ |
-| V7 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+(Score floor 3.5 + plausibility 3.7 retired; semantic dedup 3.6 retained but
+runs on every variant. None differentiate a variant, so the gate columns are
+omitted.)
+
+| Variant | BM25 | Dense | RRF | XEnc | LLM #2 | LLM #3 | BFS | LLM #4 |
+|---------|------|-------|-----|------|--------|--------|-----|--------|
+| V0 | ✓ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ |
+| V1 | ☐ | ✓ | ☐ | ☐ | ☐ | ☐ | ☐ | ☐ |
+| V2 | ✓ | ✓ | ✓ | ☐ | ☐ | ☐ | ☐ | ☐ |
+| V3 | ✓ | ✓ | ✓ | ✓ | ☐ | ☐ | ☐ | ☐ |
+| V4 | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ☐ | ☐ |
+| V5 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ | ☐ |
+| V6 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ☐ |
+| V7 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 LLM #1 (`interpret`) and LLM #5 (`synthesize`) run for every variant.
 
-V3 absorbs the former diagnostic V3.5: it represents the deterministic-filtering peak (cross-encoder + semantic dedup + density gate, no LLM gating). Since dedup and density are universal and the score floor is retired (inert), V3's only differentiator from V2 is the cross-encoder. V7 absorbs the former V6.5: with LLM #5 demoted to aggregator-only, V6.5 and V7 are behaviourally identical.
+V3 absorbs the former diagnostic V3.5: it represents the deterministic-filtering peak (cross-encoder rerank + top-K, no LLM gating). With all pre-validation gates retired, V3's only differentiator from V2 is the cross-encoder. V7 absorbs the former V6.5: with LLM #5 demoted to aggregator-only, V6.5 and V7 are behaviourally identical.
 
 **Cross-variant additive assertions** (the harness verifies these per CR):
 - `|CIS(V7)| ≤ |CIS(V6)|` — LLM #4 only rejects.
@@ -758,10 +766,12 @@ sibling_promotion_max_per_file       = 12       # candidate ceiling per file
 sibling_admit_max_per_file           = 4        # admission ceiling per file
 sibling_admit_max_per_cr             = 0        # 0 = no global cap
 
-# Pre-validation gates (FR-C4)
-# (min_reranker_score_for_validation still exists in config but is DEAD — the
-#  score floor that consumed it is retired/inert; archival-only.)
-plausibility_gate_density_threshold   = 0.50    # density-only; no max_per_file cap
+# Pre-validation gates (FR-C4) — 3.5 + 3.7 RETIRED; 3.6 dedup retained.
+# These settings still exist in config but are DEAD; the gates that consumed
+# them are retired/archival-only (see stage3_contribution_study.md):
+#   min_reranker_score_for_validation  (score floor 3.5 — inert)
+#   plausibility_gate_density_threshold (plausibility 3.7 — net-negative)
+# (Semantic dedup 3.6 has no threshold setting and remains active.)
 anchor_priming_boost                  = 0.10    # additive score-floor boost for anchor-matched names
 anchor_priming_bm25_boost             = 1.5     # multiplier on the synthetic anchor BM25 query (Path 4)
 

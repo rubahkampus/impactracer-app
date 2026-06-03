@@ -122,7 +122,10 @@ def apply_negative_filter(
     out_of_scope_operations: list[str],
     penalty: float = 1.0,
 ) -> list[Candidate]:
-    """Additive demotion for out-of-scope candidates.
+    """RETIRED / ARCHIVAL — no longer called by the pipeline (3·c). Found inert
+    on entity F1 in the Stage-3 contribution study; kept for reference only.
+
+    Additive demotion for out-of-scope candidates.
 
     Penalty softened from -5.0 to -1.0 after forensic
     analysis on CR-02 showed LLM #1 emits phrases like "default grace period
@@ -166,7 +169,10 @@ def apply_traceability_bonus(
     bonus: float = 0.1,
     top_k_per_doc: int = 3,
 ) -> list[Candidate]:
-    """Additive bonus for code candidates that the offline traceability
+    """RETIRED / ARCHIVAL — no longer called by the pipeline (3·b). Found inert
+    on entity F1 in the Stage-3 contribution study; kept for reference only.
+
+    Additive bonus for code candidates that the offline traceability
     matrix associates with a retrieved doc chunk.
 
     For each doc-chunk candidate in the pool, look up its top-K code

@@ -291,8 +291,8 @@ section just inventories the modules.
   — the cross-encoder scores the entire 200-candidate pool, not a
   15-pre-truncated subset.
 - [pipeline/prevalidation_filter.py](impactracer/pipeline/prevalidation_filter.py) —
-  the two deterministic gates (3.6 semantic dedup, 3.7 plausibility +
-  affinity). Each is independently toggleable via `VariantFlags`.
+  pre-validation gates: 3.5 score floor + 3.7 plausibility RETIRED (inert /
+  net-negative); 3.6 semantic dedup RETAINED (see §3.4).
 - [pipeline/validator.py](impactracer/pipeline/validator.py) — LLM #2
   (Step 4). Per-batch fail-closed: if a batch's structured-output validation
   fails after retries, the entire batch is dropped and `degraded_run` flips
@@ -442,7 +442,7 @@ CRInterpretation(
         "utility": ["refund handler"],
         "type_definition": ["OrderStatus enum"],
     },
-    named_entry_points=["cancelOrder"],          # hard-pinned past gates + top-K
+    named_entry_points=["cancelOrder"],          # (pinning retired — field still emitted, no longer pins)
     anchor_candidates=["createOrder", "OrderStatus"],  # soft retrieval boost only
     out_of_scope_operations=["delete order", "shipping update"],
     is_nfr=False,
@@ -471,18 +471,19 @@ is identical, so the rest of the pipeline is mode-agnostic.
 `variant_flags.anchor_priming=True`, default) are guesses at likely host/sibling
 symbols the CR does *not* name. They are grounded in the project skeleton's
 naming conventions so they match the real index (camelCase vs PascalCase).
-Crucially they are a **soft** signal — a small additive score-floor boost
-(`anchor_priming_boost=0.10`) plus a synthetic BM25 boost
-(`anchor_priming_bm25_boost=1.5`) at step 2 — *not* a hard pin. A hallucinated
-anchor cannot force a candidate through; only `named_entry_points` hard-pin.
+Crucially they are a **soft** signal — a synthetic BM25 boost
+(`anchor_priming_bm25_boost=1.5`) at step 2 (the additive score-floor boost
+`anchor_priming_boost=0.10` is now inert, score floor retired) — *not* a hard
+pin. A hallucinated anchor cannot force a candidate through. (Named-entry
+pinning, which formerly hard-pinned, is also retired.)
 
 **Fail-closed**: if `is_actionable=False`, the runner returns a minimal
 rejection `ImpactReport` immediately (no retrieval, no LLM #2-5).
 
 **Why this step matters for retrieval**: the `search_queries` are
 **always English**, even for Indonesian CRs, because the cross-encoder is
-strongest on English identifiers. The `out_of_scope_operations` will be
-applied as a negative filter (−1.0 penalty) at step 2.
+strongest on English identifiers. (`out_of_scope_operations` was formerly
+applied as a negative filter at step 2, but that filter is now retired/inert.)
 
 ### 3.2 Step 2 — Adaptive RRF Hybrid Search
 
@@ -516,12 +517,14 @@ All ranked lists fuse via **Reciprocal Rank Fusion** with weights from
 `1 / (rrf_k + rank)` (default `rrf_k=60`), then summed across paths and
 weighted by path.
 
-Post-fusion bonuses / penalties:
+Post-fusion bonuses / penalties — **RETIRED** (traceability bonus 3·b and
+negative filter 3·c found inert in the Stage-3 contribution study; functions
+kept archival-only, no longer applied):
 
-- **+0.1** for any code candidate linked via `doc_code_candidates` to a doc
-  chunk that survived `dense_doc` (traceability bonus).
-- **−1.0** ("hard demotion") for any candidate whose `name` or `text_snippet`
-  contains a phrase from `out_of_scope_operations` (≥ 6 chars).
+- ~~**+0.1** for any code candidate linked via `doc_code_candidates` to a doc
+  chunk that survived `dense_doc` (traceability bonus).~~
+- ~~**−1.0** ("hard demotion") for any candidate whose `name` or `text_snippet`
+  contains a phrase from `out_of_scope_operations` (≥ 6 chars).~~
 
 Output: `list[Candidate]` with up to **200** entries (`top_k_rrf_pool=200`).
 Each `Candidate` carries `rrf_score`, `collection`, `node_type`, `file_path`,
@@ -551,27 +554,25 @@ Optional **graph-aware label-propagation rerank** (default off,
 the rerank. Shipped off because the calibration trade-off doesn't
 generalise on the target codebase.
 
-### 3.4 Steps 3.6 / 3.7 — The Deterministic Gates
+### 3.4 Steps 3.5 / 3.6 / 3.7 — Pre-Validation Gates (3.5 + 3.7 retired)
 
 [pipeline/prevalidation_filter.py](impactracer/pipeline/prevalidation_filter.py).
-Both gates run only when `VariantFlags` enables them.
+A 42-CR two-repo contribution study
+([stage3_contribution_study.md](stage3_contribution_study.md)) found none of the
+three gates improves entity F1: the 3.5 score floor is strictly inert, 3.6
+semantic dedup is exactly inert, and 3.7 plausibility/density is **net-negative**.
 
-**Gate 3.6 — Semantic dedup** (`enable_dedup_gate`): for every doc-chunk
-candidate, look up its top-1 code resolution in `doc_code_candidates`. If that
-code id is already in the pool, **merge** the doc into the code candidate
-(append to `merged_doc_ids` and `merged_doc_contexts`) and **drop** the doc
-candidate. Result: the LLM #2 validator will see the code node + the
-business-context paragraphs that justify it, in one prompt.
-
-**Gate 3.7 — Plausibility + Affinity** (`enable_plausibility_gate`): two
-sub-gates.
-
-- **Affinity rescoring**: layer-compatibility bonus per `(change_type,
-  file_classification)` — e.g. ADDITION + UTILITY gets a small boost.
-- **File-density plausibility**: if a single file contributes more than
-  `plausibility_gate_density_threshold * pool_size` candidates AND none of
-  them appear in `named_entry_points`, the file's contribution is rejected.
-  Prevents one generic utility file from monopolising the SIS.
+- **3.5 score floor + 3.7 plausibility — RETIRED.** `step_3_5_score_filter` /
+  `step_3_7_plausibility_and_affinity` archival-only, never invoked;
+  `enable_score_floor` / `enable_plausibility_gate` are dead flags.
+- **3.6 semantic dedup — RETAINED** (`enable_dedup_gate`) on
+  engineering/robustness grounds, NOT as an F1 contributor (measured
+  within-noise): for every doc-chunk candidate whose top-1 code resolution is
+  already in the pool, **merge** the doc into the code candidate (append
+  `merged_doc_ids` / `merged_doc_contexts`) and **drop** the doc. The LLM #2
+  validator (V4+) then sees the code node plus the business-context paragraphs
+  that justify it, in one prompt; also prevents the same impact being
+  double-counted as both a doc and a code candidate.
 
 ### 3.5 Step 4 — Validate SIS (LLM #2, fail-closed)
 

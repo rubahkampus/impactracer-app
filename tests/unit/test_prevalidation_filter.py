@@ -383,32 +383,44 @@ def test_apply_gates_all_disabled():
     assert len(result) == 1
 
 
-def test_apply_gates_score_floor_active():
+def test_apply_gates_only_dedup_active():
+    # Post-retirement contract: score floor (3.5) and plausibility (3.7) are
+    # RETIRED (inert regardless of flag); only semantic dedup (3.6) is active.
+    # The score floor would have dropped c_low (below 0.5) — it must NOT.
+    # Dedup MUST still merge the doc into its resolved code candidate.
     c_low = _make_code_candidate(node_id="low", reranker_score=0.1)
     c_high = _make_code_candidate(node_id="high", reranker_score=0.8)
-    conn = _make_db_with_candidates([])
+    doc = _make_doc_candidate(node_id="sdd__v_1")
+    code = _make_code_candidate()
+    conn = _make_db_with_candidates([("sdd__v_1", code.node_id, 0.7)])
     cr = _make_cr()
     settings = _make_settings(min_reranker_score=0.5)
     result = apply_prevalidation_gates(
-        [c_low, c_high], cr, settings, conn,
-        enable_score_floor=True, enable_dedup=False, enable_plausibility=False,
+        [c_low, c_high, doc, code], cr, settings, conn,
+        enable_score_floor=True, enable_dedup=True, enable_plausibility=True,
     )
-    assert len(result) == 1
-    assert result[0].node_id == "high"
+    # Score floor RETIRED: c_low (0.1 < 0.5) survives.
+    assert any(c.node_id == "low" for c in result)
+    # Plausibility RETIRED: no density drop.
+    # Dedup ACTIVE: the doc is merged into its resolved code candidate and dropped.
+    assert doc not in result
+    assert "sdd__v_1" in code.merged_doc_ids
 
 
-def test_apply_gates_dedup_merges_doc():
+def test_apply_gates_dedup_can_be_disabled():
+    # With enable_dedup=False, even dedup is a no-op (full pass-through).
     doc = _make_doc_candidate(node_id="sdd__v_1")
     code = _make_code_candidate()
     conn = _make_db_with_candidates([("sdd__v_1", code.node_id, 0.7)])
     cr = _make_cr()
     settings = _make_settings()
+    candidates = [doc, code]
     result = apply_prevalidation_gates(
-        [doc, code], cr, settings, conn,
-        enable_score_floor=False, enable_dedup=True, enable_plausibility=False,
+        candidates, cr, settings, conn,
+        enable_score_floor=True, enable_dedup=False, enable_plausibility=True,
     )
-    assert len(result) == 1
-    assert "sdd__v_1" in result[0].merged_doc_ids
+    assert result == candidates
+    assert "sdd__v_1" not in code.merged_doc_ids
 
 
 # ---------------------------------------------------------------------------
