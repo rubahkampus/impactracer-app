@@ -294,13 +294,6 @@ def bfs_propagate(
     return CISResult(sis_nodes=sis_nodes, propagated_nodes=propagated_nodes)
 
 
-# NOTE: Step 6.5 graph-collapse (collapse_contains_subtrees) was REMOVED
-# 2026-06. It folded leaf InterfaceField children into their parent, but
-# InterfaceField is a retired node type (absent from the index), so the
-# function folded 0 nodes on every CR — structurally dead. Removed along with
-# its _CONTAINS_PARENT/CHILD type tables and the validate_collapsed_children
-# downstream LLM #4 sub-call.
-
 
 
 
@@ -496,3 +489,263 @@ def apply_deletion_import_only_filter(cis: CISResult) -> tuple[CISResult, int]:
 
     filtered = CISResult(sis_nodes=cis.sis_nodes, propagated_nodes=kept)
     return filtered, len(demoted)
+
+
+# =========================================================================
+# Propagator — the deterministic propagation component (steps 6 + 6.6-6.9).
+# =========================================================================
+# Composes the building blocks above into the full V6 propagation pass and
+# owns its cache + trace surface, so the runner calls it once. Two arms:
+#   OUTWARD : BFS over dependency edges + DELETION import-only filter +
+#             weight-decay top-K prune.
+#   IN-FILE : raw CONTAINS-sibling expansion + anchor-rrf top-K prune.
+# Both arms inject unvalidated nodes (LLM #4 prunes them at V7). The raw pool
+# is cached BEFORE the prunes so the top-K stays a re-tunable view-time knob.
+
+
+def _bfs_cis_trace(cis: CISResult) -> dict:
+    return {
+        "sis_seeds": [
+            {"node_id": k, "depth": v.depth, "source_seed": v.source_seed}
+            for k, v in cis.sis_nodes.items()
+        ],
+        "propagated_nodes": [
+            {"node_id": k, "depth": v.depth,
+             "causal_chain": v.causal_chain, "source_seed": v.source_seed}
+            for k, v in cis.propagated_nodes.items()
+        ],
+    }
+
+
+def _expand_siblings(cis, conn, sis_justifications, trace_mechanisms,
+                     trace_justifications, admitted_candidates, settings, variant_cache):
+    """In-file arm: inject raw CONTAINS-sibling candidates of mechanism-carrying
+    seeds, tagged ``sibling_candidate``. Caches the per-candidate context
+    (file, anchor, anchor rrf) the V7 sibling validator and the 6.9 prune need.
+    Returns the trace payload."""
+    anchors: list[str] = []
+    anchor_just: dict[str, str] = {}
+    for nid in list(cis.sis_nodes) + list(cis.propagated_nodes):
+        if "::" not in nid:
+            continue
+        v2 = sis_justifications.get(nid) or {}
+        mechanism = (v2.get("mechanism_of_impact") or "").strip()
+        fallback = v2.get("justification") or ""
+        if not mechanism:
+            mechanism = (trace_mechanisms.get(nid) or "").strip()
+            if mechanism and not fallback:
+                fallback = trace_justifications.get(nid) or ""
+        if not mechanism:
+            continue
+        anchors.append(nid)
+        anchor_just[nid] = mechanism or fallback
+
+    already = set(cis.sis_nodes) | set(cis.propagated_nodes)
+    per_file = collect_file_local_siblings(
+        anchor_ids=anchors, conn=conn, already_in_cis=already,
+        max_per_file=getattr(settings, "sibling_promotion_max_per_file", 12),
+    )
+
+    anchor_rrf = {c.node_id: float(c.rrf_score or 0.0) for c in admitted_candidates}
+    meta: dict[str, dict[str, str]] = {}
+    injected = 0
+    for file_path, sibs in per_file.items():
+        for sib_id, sib_type, first_anchor in sibs:
+            if sib_id in cis.sis_nodes or sib_id in cis.propagated_nodes:
+                continue
+            cis.propagated_nodes[sib_id] = NodeTrace(
+                depth=1, causal_chain=["CONTAINS"], path=[first_anchor, sib_id],
+                source_seed=first_anchor, low_confidence_seed=False,
+                justification="", justification_source="sibling_candidate",
+            )
+            meta[sib_id] = {
+                "file_path": file_path, "node_type": sib_type, "anchor": first_anchor,
+                "anchor_justification": anchor_just.get(first_anchor, ""),
+                "anchor_rrf": anchor_rrf.get(first_anchor, 0.0),
+            }
+            injected += 1
+
+    if variant_cache is not None:
+        variant_cache.put_sibling_candidates(meta)
+    logger.info(
+        "[graph_bfs] sibling EXPANSION injected {} raw candidates across {} files "
+        "(anchors={}, unvalidated)",
+        injected, sum(1 for s in per_file.values() if s), len(anchors),
+    )
+    return {
+        "anchors": list(anchors),
+        "raw_candidates": list(meta),
+        "candidates_per_file": {
+            fp: [sid for sid, _t, _a in sibs] for fp, sibs in per_file.items()
+        },
+    }
+
+
+def _prune_bfs_arm(cis, settings):
+    """Outward arm precision: keep the top-K BFS nodes by edge-weight decay.
+    Siblings are exempt (they tie under decay). Returns the trace payload or None."""
+    if not getattr(settings, "enable_propagation_weight_prune", True):
+        return None
+    from impactracer.shared.constants import propagation_decay_score
+    k = getattr(settings, "propagation_prune_top_k", 10)
+    siblings = {n: t for n, t in cis.propagated_nodes.items()
+                if t.justification_source == "sibling_candidate"}
+    bfs = {n: t for n, t in cis.propagated_nodes.items()
+           if t.justification_source != "sibling_candidate"}
+    if not (k and k > 0 and len(bfs) > k):
+        return None
+    scored = sorted(
+        bfs.items(),
+        key=lambda kv: propagation_decay_score(kv[1].causal_chain or [], kv[1].depth),
+        reverse=True,
+    )
+    cis.propagated_nodes = {**dict(scored[:k]), **siblings}
+    logger.info(
+        "[graph_bfs] weight-decay prune {} -> {} BFS nodes (top-{}); {} siblings exempt",
+        len(bfs), k, k, len(siblings),
+    )
+    return {"pre_count": len(bfs), "kept_count": k, "top_k": k,
+            "dropped": [n for n, _ in scored[k:]]}
+
+
+def _prune_sibling_arm(cis, settings, variant_cache):
+    """In-file arm precision: keep the top-K siblings by anchor rrf_score.
+    Returns the trace payload or None."""
+    if not (getattr(settings, "enable_sibling_precision_prune", True)
+            and getattr(settings, "enable_sibling_promotion", True)):
+        return None
+    k = getattr(settings, "sibling_prune_top_k", 10)
+    meta = (variant_cache.get_sibling_candidates() if variant_cache is not None else None) or {}
+    sib_nodes = [n for n, t in cis.propagated_nodes.items()
+                 if t.justification_source == "sibling_candidate"]
+    if not (k and k > 0 and len(sib_nodes) > k):
+        return None
+
+    def anchor_rrf(sib_id: str) -> float:
+        m = meta.get(sib_id)
+        return float(m["anchor_rrf"]) if m and "anchor_rrf" in m else 0.0
+
+    ranked = sorted(sib_nodes, key=anchor_rrf, reverse=True)
+    dropped = ranked[k:]
+    for nid in dropped:
+        del cis.propagated_nodes[nid]
+    kept = len(sib_nodes) - len(dropped)
+    logger.info(
+        "[graph_bfs] sibling-precision prune {} -> {} siblings (anchor-rrf top-{}, dropped {})",
+        len(sib_nodes), kept, k, len(dropped),
+    )
+    return {"pre_count": len(sib_nodes), "kept_count": kept, "top_k": k, "dropped": dropped}
+
+
+def propagate(
+    *,
+    cis_from_seeds,
+    graph: nx.MultiDiGraph,
+    conn: sqlite3.Connection,
+    all_code_seeds: list[str],
+    low_conf: dict[str, bool],
+    validated_code_seeds: list[str],
+    resolutions: list,
+    admitted_candidates: list,
+    sis_justifications: dict,
+    trace_mechanisms: dict,
+    trace_justifications: dict,
+    change_type: str,
+    settings,
+    variant_cache,
+    trace,
+) -> CISResult:
+    """Run the full deterministic propagation pass and return the CIS.
+
+    ``cis_from_seeds`` is a zero-arg builder for the BFS-disabled / no-seed
+    fallback (the runner supplies it so candidate hydration stays its concern).
+    ``trace`` is the runner's trace callback. Cache-hit on ``bfs_cis`` replays
+    the raw pool; the prunes re-apply every run so K stays a view-time knob.
+    """
+    cache_hit = False
+    if variant_cache is not None and all_code_seeds:
+        cached = variant_cache.get_bfs_cis()
+        if cached is not None:
+            cis = cached
+            logger.info(
+                "[graph_bfs] [cache HIT] bfs_cis ({} sis + {} propagated, BFS skipped)",
+                len(cis.sis_nodes), len(cis.propagated_nodes),
+            )
+            trace("step_6_bfs_raw_cis", _bfs_cis_trace(cis))
+            cache_hit = True
+
+    if cache_hit:
+        pass
+    elif all_code_seeds:
+        sis_reranker = {
+            c.node_id: c.reranker_score
+            for c in admitted_candidates if c.node_id in set(all_code_seeds)
+        }
+        for r in resolutions:
+            for cid in r["code_ids"]:
+                sis_reranker.setdefault(cid, 0.0)
+        high_conf = compute_confidence_tiers(
+            all_code_seeds, sis_reranker, settings.bfs_high_conf_top_n
+        )
+        logger.info("[graph_bfs] High-confidence seeds (top-{}): {}",
+                    settings.bfs_high_conf_top_n, len(high_conf))
+
+        node_type_by_id: dict[str, str] = {}
+        seed_file_classification: dict[str, str] = {}
+        ids_to_fetch = list(set(graph.nodes()) | set(all_code_seeds))
+        for i in range(0, len(ids_to_fetch), 500):
+            chunk = ids_to_fetch[i:i + 500]
+            ph = ",".join("?" * len(chunk))
+            for nid_, ntype_, fclass_ in conn.execute(
+                f"SELECT node_id, node_type, file_classification "
+                f"FROM code_nodes WHERE node_id IN ({ph})", chunk,
+            ).fetchall():
+                if ntype_:
+                    node_type_by_id[nid_] = ntype_
+                if fclass_:
+                    seed_file_classification[nid_] = fclass_
+
+        cis = bfs_propagate(
+            graph, all_code_seeds, high_confidence=high_conf,
+            low_confidence_seed_map=low_conf,
+            seed_file_classification=seed_file_classification,
+            node_type_by_id=node_type_by_id,
+        )
+        logger.info("[graph_bfs] BFS: {} SIS seeds, {} propagated nodes",
+                    len(cis.sis_nodes), len(cis.propagated_nodes))
+        trace("step_6_bfs_raw_cis", _bfs_cis_trace(cis))
+    else:
+        # No code seeds: CIS = admitted candidates only (runner-hydrated).
+        cis = cis_from_seeds()
+        logger.info("[graph_bfs] No code seeds — CIS from admitted candidates")
+
+    # OUTWARD arm — DELETION import-only filter (deterministic; DEL CRs only).
+    if change_type.upper() == "DELETION" and cis.propagated_nodes:
+        cis, n_demoted = apply_deletion_import_only_filter(cis)
+        trace("step_6p6_deletion_import_only_filter", {
+            "n_demoted": n_demoted, "kept_propagated_count": len(cis.propagated_nodes),
+        })
+
+    # IN-FILE arm — raw sibling expansion (skipped on cache-hit; cached pool
+    # already holds the siblings). Runs BEFORE put_bfs_cis so they persist.
+    if (not cache_hit and getattr(settings, "enable_sibling_promotion", True)):
+        payload = _expand_siblings(
+            cis, conn, sis_justifications, trace_mechanisms, trace_justifications,
+            admitted_candidates, settings, variant_cache,
+        )
+        trace("step_6p7_sibling_expansion", payload)
+
+    # Cache the RAW pool (BFS + raw siblings) BEFORE the prunes, so K is a
+    # re-tunable view-time knob and the cache is a faithful unpruned record.
+    if not cache_hit and variant_cache is not None and all_code_seeds:
+        variant_cache.put_bfs_cis(cis)
+
+    # Deterministic precision prunes (re-applied every run, incl. cache-hit).
+    p8 = _prune_bfs_arm(cis, settings)
+    if p8 is not None:
+        trace("step_6p8_weight_decay_prune", p8)
+    p9 = _prune_sibling_arm(cis, settings, variant_cache)
+    if p9 is not None:
+        trace("step_6p9_sibling_precision_prune", p9)
+
+    return cis

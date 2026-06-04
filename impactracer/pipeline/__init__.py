@@ -3,8 +3,8 @@
 Modules:
     llm_client                 - OpenRouter httpx client, cross-cutting
     interpreter                - LLM #1 (FR-B1, FR-B2)
-    retriever                  - FR-C1, FR-C2 (Adaptive RRF)
-    prevalidation_filter       - FR-C4 (Steps 3.5, 3.6, 3.7)
+    retriever                  - FR-C1, FR-C2 (RRF hybrid search)
+    prevalidation_filter       - FR-C4 (Step 3.6 semantic dedup)
     validator                  - LLM #2 (FR-C5)
     seed_resolver              - FR-C6
     traceability_validator     - LLM #3 (FR-C7)

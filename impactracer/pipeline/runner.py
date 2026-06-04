@@ -1,8 +1,10 @@
-"""Online pipeline orchestrator (nine steps, five LLM invocations).
+"""Online pipeline orchestrator: interpret -> retrieve -> validate -> propagate
+-> assemble, with five canonical LLM stages.
 
 Invoked by :func:`impactracer.cli.analyze`. Consumes a :class:`VariantFlags`
 instance so the same code powers both full V7 analysis and the ablation
-harness variants V0 through V6.
+variants V0-V6. Each step delegates to its component module; the deterministic
+propagation pass lives in graph_bfs.propagate.
 
 Reference: master_blueprint.md §4.
 """
@@ -35,6 +37,7 @@ from impactracer.pipeline.retriever import (
     build_metadata_cache,
     hybrid_search,
 )
+from impactracer.pipeline.graph_bfs import propagate
 from impactracer.pipeline.seed_resolver import resolve_doc_to_code
 from impactracer.pipeline.synthesizer import (
     assemble_impact_report,
@@ -281,14 +284,8 @@ def run_analysis(
         shared_llm_client=shared_llm_client,
     )
 
-    # ------------------------------------------------------------------
-    # Step 1 — Interpret CR (LLM #1, always-on)
-    #
-    # When variant_flags.two_stage_interpret is True AND a project-skeleton
-    # file is available on disk, LLM #1 is split into two calls (intent +
-    # project-grounded anchors). The cached CRInterpretation memoises the
-    # glued result so V1-V7 share it.
-    # ------------------------------------------------------------------
+    # Step 1 — Interpret CR (LLM #1, always-on). Two-stage (intent + project-
+    # grounded anchors) when a skeleton exists; cached so V1-V7 share it.
     logger.info("[runner] Step 1: Interpret CR")
     if variant_cache is not None:
         cached_interp = variant_cache.get_interp()
@@ -391,14 +388,8 @@ def run_analysis(
     # Aggregate degraded flag across all LLM batches in this run.
     degraded_run: bool = False
 
-    # ------------------------------------------------------------------
-    # Step 2 — Adaptive RRF Hybrid Search (FR-C1, FR-C2)
-    #
-    # Cache key: the hybrid_search output depends on which
-    # of bm25/dense/rrf are enabled. V0 (bm25-only), V1 (dense-only), and
-    # V2+ (bm25+dense+RRF) each produce a different candidate list and
-    # cache under a separate key. V2-V7 share the V2+ retrieval key.
-    # ------------------------------------------------------------------
+    # Step 2 — RRF hybrid search (FR-C1/C2). Cached per retrieval shape:
+    # V0 (bm25-only), V1 (dense-only), V2+ (bm25+dense+RRF) each key separately.
     logger.info("[runner] Step 2: Hybrid search (variant={})", variant_flags.variant_id)
     if variant_cache is not None:
         if variant_flags.variant_id == "V0":
@@ -437,19 +428,9 @@ def run_analysis(
         logger.warning("[runner] Zero candidates — returning empty report")
         return _minimal_rejection_report("No candidates retrieved — check index and affected_layers")
 
-    # ------------------------------------------------------------------
-    # Step 3 — Cross-Encoder Rerank (FR-C3) + optional graph-aware rerank
-    # Graph-aware rerank inserted between the cross-encoder and the
-    # top-K truncation. Cross-encoder scores ALL 200 RRF candidates;
-    # graph propagation blends in a structural signal; the truncation
-    # to max_admitted_seeds happens on the blended score.
-    #
-    # Cache key: V3-V7 all reach the same post-gate
-    # candidate list (rerank + 3 gates is a pure function of the V2+
-    # retrieval pool + cr_interp). Cache the post-gate result under
-    # `rerank_gated`. On hit, skip the rerank, pinning, normalisation,
-    # and the three gates entirely.
-    # ------------------------------------------------------------------
+    # Step 3 — Cross-encoder rerank (FR-C3) + optional graph-aware rerank, then
+    # top-K. The post-rerank+gates pool (V3-V7) is cached under `rerank_gated`;
+    # on hit, rerank/pinning/normalisation/gates are all skipped.
     _rerank_gated_cache_hit = False
     if (
         variant_cache is not None
@@ -476,22 +457,9 @@ def run_analysis(
                 for c in candidates
             ])
 
-    # ------------------------------------------------------------------
-    # Step 3.6 — Semantic dedup (POST-RETRIEVAL, PRE-RERANK, PRE-TRUNCATION).
-    #
-    # Dedup is a retrieval-hygiene step and runs on the FULL RRF pool before the
-    # cross-encoder and before the top-K cut. Rationale (2026-06, evidenced):
-    #   * Running dedup AFTER the top-K cut (the previous order) let a doc chunk
-    #     and its resolved code twin BOTH consume top-K seats, then merged them —
-    #     wasting a seat the next candidate could have taken. Moving dedup ahead
-    #     of the cut recovers those seats (+1/+2/+2 GT on V0/V1/V2 over 24 CRs).
-    #   * Dedup placement around the cross-encoder is INERT on V3: a live rerank
-    #     A/B (dedup before vs after rerank) gave identical GT recall (40/85
-    #     both). So deduping before the reranker costs nothing and is the
-    #     cleanest single dedup point.
-    # Skipped on the rerank_gated cache hit (the cached pool is already deduped).
-    # enable_score_floor / enable_plausibility are dead flags (retired gates).
-    # ------------------------------------------------------------------
+    # Step 3.6 — Semantic dedup on the full RRF pool, BEFORE rerank + top-K cut
+    # (so doc/code twins don't each consume a seat). enable_score_floor /
+    # enable_plausibility are dead flags (retired gates). Skipped on cache hit.
     if not _rerank_gated_cache_hit and variant_flags.enable_dedup_gate:
         _pre_dedup = len(candidates)
         candidates = apply_prevalidation_gates(
@@ -686,16 +654,8 @@ def run_analysis(
         logger.warning("[runner] Zero candidates after gates — returning empty report")
         return _minimal_rejection_report("All candidates rejected by pre-validation gates")
 
-    # ------------------------------------------------------------------
-    # Step 4 — SIS Validation (LLM #2, FR-C5)
-    # Batched max 5. Returns (ids, justifications, degraded).
-    #
-    # Cache key: the LLM #2 verdicts on the post-gate
-    # candidate list are a pure function of (candidates, cr_interp).
-    # V4-V7 all share the same post-gate candidates (via rerank_gated
-    # cache) and the same cr_interp, so the LLM #2 verdicts are
-    # cacheable across V4-V7 under one key.
-    # ------------------------------------------------------------------
+    # Step 4 — SIS validation (LLM #2, FR-C5). Batched max 5, fail-closed.
+    # Verdicts cached across V4-V7 (pure function of post-gate candidates + interp).
     sis_justifications: dict[str, dict[str, str]] = {}
     if variant_flags.enable_sis_validation:
         logger.info("[runner] Step 4: SIS validation (batched, fail-closed)")
@@ -734,9 +694,7 @@ def run_analysis(
         sis_ids = [c.node_id for c in candidates]
         logger.info("[runner] Step 4: SIS validation DISABLED — {} seeds", len(sis_ids))
 
-    # ------------------------------------------------------------------
-    # Step 5 — Resolve doc-chunk SIS to code seeds (FR-C6)
-    # ------------------------------------------------------------------
+    # Step 5 — Resolve doc-chunk SIS hits to code seeds (FR-C6). All variants.
     logger.info("[runner] Step 5: Seed resolution")
     sis_id_set = set(sis_ids)
     # Sort admitted candidates by raw_reranker_score desc (absolute quality);
@@ -776,19 +734,11 @@ def run_analysis(
         ],
     })
 
-    # ------------------------------------------------------------------
-    # Step 5b — Trace validation (LLM #3, FR-C7)
-    #
-    # Cache key: LLM #3 verdicts on the resolutions are a
-    # pure function of (resolutions, cr_interp). V5-V7 share the same
-    # resolutions (because they share SIS verdicts) and the same
-    # cr_interp, so trace_verdicts is cacheable across V5-V7.
-    # ------------------------------------------------------------------
+    # Step 5b — Trace validation (LLM #3, FR-C7). Verdicts cached across V5-V7.
+    # Emits a mechanism map (non-empty only for CONFIRMED) that makes a
+    # doc-resolved seed anchor-eligible for sibling promotion like a code seed.
     low_conf: dict[str, bool] = {}
     trace_justifications: dict[str, str] = {}
-    # LLM #3 now emits a mechanism map (non-empty only for CONFIRMED seeds),
-    # mirroring LLM #2. This is what makes a doc-resolved seed anchor-eligible
-    # for sibling promotion on par with a direct code seed.
     trace_mechanisms: dict[str, str] = {}
 
     if variant_flags.enable_trace_validation and resolutions:
@@ -905,396 +855,41 @@ def run_analysis(
     logger.info("[runner] Combined code seeds: {}", len(all_code_seeds))
 
     # ------------------------------------------------------------------
-    # Step 6 — BFS propagation (FR-D1)
-    #
-    # Cache key: the BFS output is a pure function of
-    # (all_code_seeds, low_conf, graph, settings). V6 and V7 share all
-    # of those, so the post-BFS CIS is cacheable across the two variants
-    # under one `bfs_cis` key.
+    # Step 6 — Propagation (deterministic; the Propagator component).
+    # Delegates the full deterministic pass (BFS + DELETION filter + sibling
+    # expansion + both top-K precision prunes) to graph_bfs.propagate, which
+    # owns its bfs_cis cache + trace surface. Runs only when BFS is enabled;
+    # otherwise the CIS is the validated seeds alone.
     # ------------------------------------------------------------------
-    _bfs_cis_cache_hit = False
-    if variant_cache is not None and variant_flags.enable_bfs and all_code_seeds:
-        _cached_bfs_cis = variant_cache.get_bfs_cis()
-        if _cached_bfs_cis is not None:
-            cis = _cached_bfs_cis
-            logger.info(
-                "[runner] [cache HIT] bfs_cis ({} sis + {} propagated, BFS skipped)",
-                len(cis.sis_nodes), len(cis.propagated_nodes),
-            )
-            _trace("step_6_bfs_raw_cis", {
-                "sis_seeds": [
-                    {"node_id": k, "depth": v.depth, "source_seed": v.source_seed}
-                    for k, v in cis.sis_nodes.items()
-                ],
-                "propagated_nodes": [
-                    {"node_id": k, "depth": v.depth,
-                     "causal_chain": v.causal_chain, "source_seed": v.source_seed}
-                    for k, v in cis.propagated_nodes.items()
-                ],
-            })
-            _bfs_cis_cache_hit = True
-
-    if _bfs_cis_cache_hit:
-        pass  # CIS already loaded from cache; skip Step 6 and Step 6.5.
-    elif variant_flags.enable_bfs and all_code_seeds:
-        logger.info("[runner] Step 6: BFS propagation")
-        from impactracer.pipeline.graph_bfs import bfs_propagate, compute_confidence_tiers
-
-        # Build reranker score map for confidence tiering.
-        sis_reranker_map: dict[str, float] = {
-            c.node_id: c.reranker_score
-            for c in admitted_candidates
-            if c.node_id in set(all_code_seeds)
-        }
-        for r in resolutions:
-            for cid in r["code_ids"]:
-                sis_reranker_map.setdefault(cid, 0.0)
-
-        high_conf = compute_confidence_tiers(
-            all_code_seeds, sis_reranker_map, settings.bfs_high_conf_top_n
-        )
-        logger.info(
-            "[runner] High-confidence seeds (top-{}): {}",
-            settings.bfs_high_conf_top_n,
-            len(high_conf),
-        )
-
-        # Bulk-fetch (file_classification, node_type) for BFS depth cap and fan-in cap.
-        all_graph_node_ids = list(ctx.graph.nodes())
-        seed_file_classification: dict[str, str] = {}
-        node_type_by_id: dict[str, str] = {}
-        ids_to_fetch = list(set(all_graph_node_ids) | set(all_code_seeds))
-        if ids_to_fetch:
-            CHUNK = 500
-            for i in range(0, len(ids_to_fetch), CHUNK):
-                chunk = ids_to_fetch[i:i + CHUNK]
-                placeholders = ",".join("?" * len(chunk))
-                rows = ctx.conn.execute(
-                    f"SELECT node_id, node_type, file_classification "
-                    f"FROM code_nodes WHERE node_id IN ({placeholders})",
-                    chunk,
-                ).fetchall()
-                for row in rows:
-                    nid_, ntype_, fclass_ = row
-                    if ntype_:
-                        node_type_by_id[nid_] = ntype_
-                    if fclass_:
-                        seed_file_classification[nid_] = fclass_
-
-        cis = bfs_propagate(
-            ctx.graph,
-            all_code_seeds,
-            high_confidence=high_conf,
-            low_confidence_seed_map=low_conf,
-            seed_file_classification=seed_file_classification,
-            node_type_by_id=node_type_by_id,
-        )
-        logger.info(
-            "[runner] BFS: {} SIS seeds, {} propagated nodes",
-            len(cis.sis_nodes), len(cis.propagated_nodes),
-        )
-        _trace("step_6_bfs_raw_cis", {
-            "sis_seeds": [
-                {"node_id": k, "depth": v.depth, "source_seed": v.source_seed}
-                for k, v in cis.sis_nodes.items()
-            ],
-            "propagated_nodes": [
-                {"node_id": k, "depth": v.depth,
-                 "causal_chain": v.causal_chain, "source_seed": v.source_seed}
-                for k, v in cis.propagated_nodes.items()
-            ],
-        })
-    elif all_code_seeds:
-        # BFS disabled: CIS = seeds only.
-        cis = _candidates_to_cis(admitted_candidates)
-        if validated_code_seeds:
-            # Add validated code seeds that aren't already in admitted_candidates.
-            existing = set(cis.sis_nodes.keys())
-            for code_id in validated_code_seeds:
-                if code_id not in existing:
-                    cis.sis_nodes[code_id] = NodeTrace(
-                        depth=0,
-                        causal_chain=[],
-                        path=[code_id],
-                        source_seed=code_id,
-                        low_confidence_seed=low_conf.get(code_id, True),
-                    )
-        logger.info("[runner] Step 6: BFS DISABLED — {} SIS seeds", len(cis.sis_nodes))
-    else:
-        cis = _candidates_to_cis(admitted_candidates)
-        logger.info("[runner] Step 6: No code seeds — CIS from admitted candidates")
-
-    # Step 6.5 (Graph Collapse) REMOVED 2026-06: it only folded leaf
-    # InterfaceField children, a node type retired from the index, so it was
-    # structurally dead (0 nodes folded on every CR). Its downstream chain
-    # (validate_collapsed_children, collapsed_children rendering) is removed
-    # with it. The NodeTrace.collapsed_children field is retained (always
-    # empty) to avoid a cache/schema migration.
-
-    # ------------------------------------------------------------------
-    # Step 6.6 — DELETION-only import-only filter (Sprint 25).
-    # For DELETION CRs, demote propagated nodes whose causal chain is
-    # purely IMPORTS/DYNAMIC_IMPORT — these are dead references a linter
-    # would clean up after the deletion, not part of the cognitive impact
-    # set. ADDITION / MODIFICATION CRs skip this filter unchanged.
-    # Runs deterministically; no LLM call.
-    # ------------------------------------------------------------------
-    if (
-        variant_flags.enable_bfs
-        and (cr_interp.change_type or "").upper() == "DELETION"
-        and cis.propagated_nodes
-    ):
-        from impactracer.pipeline.graph_bfs import apply_deletion_import_only_filter
-        cis, _n_demoted_import_only = apply_deletion_import_only_filter(cis)
-        _trace("step_6p6_deletion_import_only_filter", {
-            "n_demoted": _n_demoted_import_only,
-            "kept_propagated_count": len(cis.propagated_nodes),
-        })
-
-    # ------------------------------------------------------------------
-    # Step 6.7 — File-local sibling EXPANSION (the in-file arm of
-    # propagation; runs at V6 alongside outward BFS).
-    #
-    # V6/V7 split (2026-06): sibling promotion was a monolith (collect +
-    # LLM-validate fused, gated enable_bfs). It is now two halves mirroring
-    # BFS's two halves:
-    #   - EXPANSION (here, Step 6.7, V6+): collect_file_local_siblings injects
-    #     RAW unvalidated candidates as propagated nodes tagged
-    #     justification_source="sibling_candidate". Deterministic — NO LLM,
-    #     NO admission caps (parallel to raw BFS nodes entering V6 unvalidated).
-    #   - VALIDATION (Step 7.5, V7+, gated enable_propagation_validation):
-    #     validate_siblings_for_file admits/rejects them, applies caps.
-    # Rationale: sibling promotion IS propagation, just inward (in-file
-    # CONTAINS) instead of outward (dependency edges). Both expand at V6 and
-    # are pruned by LLM #4 at V7, so V6->V7 isolates propagation pruning over
-    # BOTH arms via two distinct LLM #4 calls.
-    #
-    # Anchor pool = any confirmed seed carrying a NON-EMPTY mechanism, from
-    # EITHER validator (LLM #2 sis_justifications, or LLM #3 trace_mechanisms
-    # for doc-resolved seeds CONFIRMED under the two-standard test). A seed
-    # with only a PARTIAL/low-confidence verdict has no mechanism and is NOT
-    # anchor-eligible, exactly as a weak LLM #2 verdict is excluded.
-    #
-    # Must run BEFORE put_bfs_cis below so the raw candidates persist in the
-    # bfs_cis cache (justification_source round-trips), letting a propagate-only
-    # resume reconstruct them. The candidate->context map (file, anchor, anchor
-    # mechanism) the V7 validator needs is cached separately.
-    # ------------------------------------------------------------------
-    if (
-        variant_flags.enable_bfs
-        and getattr(settings, "enable_sibling_promotion", True)
-        and not _bfs_cis_cache_hit
-    ):
-        from impactracer.pipeline.graph_bfs import collect_file_local_siblings
-
-        anchors_for_sibling: list[str] = []
-        anchor_justifications: dict[str, str] = {}
-        for nid in list(cis.sis_nodes.keys()) + list(cis.propagated_nodes.keys()):
-            if "::" not in nid:
-                continue
-            v2 = sis_justifications.get(nid) or {}
-            mechanism = (v2.get("mechanism_of_impact") or "").strip()
-            justification_fallback = v2.get("justification") or ""
-            if not mechanism:
-                mechanism = (trace_mechanisms.get(nid) or "").strip()
-                if mechanism and not justification_fallback:
-                    justification_fallback = trace_justifications.get(nid) or ""
-            if not mechanism:
-                continue
-            anchors_for_sibling.append(nid)
-            anchor_justifications[nid] = mechanism or justification_fallback
-
-        already_in_cis_set = set(cis.sis_nodes.keys()) | set(cis.propagated_nodes.keys())
-        per_file_candidates = collect_file_local_siblings(
-            anchor_ids=anchors_for_sibling,
-            conn=ctx.conn,
-            already_in_cis=already_in_cis_set,
-            max_per_file=getattr(settings, "sibling_promotion_max_per_file", 12),
-        )
-
-        # Resolve anchor file_paths once so each candidate can record its
-        # in-file anchor (the validation context LLM #4 needs at V7).
-        anchor_fp: dict[str, str] = {}
-        if anchors_for_sibling:
-            ph_a = ",".join("?" * len(anchors_for_sibling))
-            for nid, fp in ctx.conn.execute(
-                f"SELECT node_id, file_path FROM code_nodes WHERE node_id IN ({ph_a})",
-                anchors_for_sibling,
-            ).fetchall():
-                if fp:
-                    anchor_fp[nid] = fp
-
-        # Anchor rrf_score map (from the validated retrieval pool) — the Step
-        # 6.9 sibling-precision signal. A sibling inherits its anchor's rrf:
-        # a bake-off on the sibling pool found anchor rrf the best deterministic
-        # ranker of GT siblings (83% GT @ top-5, vs 0% semantic / 33% PPR /
-        # 50% flat-tie / 17% random) — siblings of strongly-retrieved seeds are
-        # the likely real co-changes. Persisted in the meta so it survives a
-        # propagate-only cache resume (where Step 6.7 does not re-run).
-        _anchor_rrf = {c.node_id: float(c.rrf_score or 0.0) for c in admitted_candidates}
-
-        # Inject raw candidates + build the candidate->context map for V7 + 6.9.
-        sibling_candidate_meta: dict[str, dict[str, str]] = {}
-        _raw_sib_count = 0
-        for file_path, sibs in per_file_candidates.items():
-            if not sibs:
-                continue
-            for sib_id, sib_type, first_anchor in sibs:
-                if sib_id in cis.sis_nodes or sib_id in cis.propagated_nodes:
-                    continue
-                cis.propagated_nodes[sib_id] = NodeTrace(
-                    depth=1,
-                    causal_chain=["CONTAINS"],
-                    path=[first_anchor, sib_id],
-                    source_seed=first_anchor,
-                    low_confidence_seed=False,
-                    justification="",
-                    justification_source="sibling_candidate",
+    def _seeds_only_cis() -> CISResult:
+        c = _candidates_to_cis(admitted_candidates)
+        for code_id in validated_code_seeds:
+            if code_id not in c.sis_nodes:
+                c.sis_nodes[code_id] = NodeTrace(
+                    depth=0, causal_chain=[], path=[code_id], source_seed=code_id,
+                    low_confidence_seed=low_conf.get(code_id, True),
                 )
-                sibling_candidate_meta[sib_id] = {
-                    "file_path": file_path,
-                    "node_type": sib_type,
-                    "anchor": first_anchor,
-                    "anchor_justification": anchor_justifications.get(first_anchor, ""),
-                    "anchor_rrf": _anchor_rrf.get(first_anchor, 0.0),
-                }
-                _raw_sib_count += 1
+        return c
 
-        if variant_cache is not None:
-            variant_cache.put_sibling_candidates(sibling_candidate_meta)
-
-        logger.info(
-            "[runner] Step 6.7: sibling EXPANSION injected {} raw candidates "
-            "across {} files (anchors={}, unvalidated)",
-            _raw_sib_count,
-            sum(1 for s in per_file_candidates.values() if s),
-            len(anchors_for_sibling),
+    if variant_flags.enable_bfs:
+        cis = propagate(
+            cis_from_seeds=_seeds_only_cis,
+            graph=ctx.graph, conn=ctx.conn,
+            all_code_seeds=all_code_seeds, low_conf=low_conf,
+            validated_code_seeds=validated_code_seeds, resolutions=resolutions,
+            admitted_candidates=admitted_candidates,
+            sis_justifications=sis_justifications,
+            trace_mechanisms=trace_mechanisms,
+            trace_justifications=trace_justifications,
+            change_type=(cr_interp.change_type or ""),
+            settings=settings, variant_cache=variant_cache, trace=_trace,
         )
-        _trace("step_6p7_sibling_expansion", {
-            "anchors": list(anchors_for_sibling),
-            "raw_candidates": list(sibling_candidate_meta.keys()),
-            "candidates_per_file": {
-                fp: [sid for sid, _t, _a in sibs]
-                for fp, sibs in per_file_candidates.items()
-            },
-        })
+    else:
+        cis = _seeds_only_cis()
+        logger.info("[runner] Step 6: BFS disabled — {} SIS seeds", len(cis.sis_nodes))
 
-    # Cache the post-BFS post-collapse RAW pool (BFS + raw siblings) for V6-V7
-    # sharing. NOTE: cached BEFORE the Step 6.8 prune so the raw flood is what
-    # persists — letting propagation_prune_top_k be re-tuned without re-running
-    # BFS, and keeping the cache a faithful record of the unpruned propagation.
-    if (
-        not _bfs_cis_cache_hit
-        and variant_cache is not None
-        and variant_flags.enable_bfs
-        and all_code_seeds
-    ):
-        variant_cache.put_bfs_cis(cis)
-
-    # ------------------------------------------------------------------
-    # Step 6.8 — Weight-decay prune for the OUTWARD-BFS arm (deterministic
-    # flood control). Ranks BFS-propagated nodes by edge-weight-aware decay
-    # (constants.propagation_decay_score) and keeps the top-K. SIS seeds and
-    # raw siblings are NOT scored or cut here — siblings are EXEMPT (they share
-    # CONTAINS depth-1 so the decay scorer ties them; cutting by that tie loses
-    # GT — measured) and get their own deterministic step at 6.9. Always-on at
-    # V6+ so V7's LLM #4 validates a shrunk, higher-precision pool.
-    #
-    # Runs AFTER put_bfs_cis and REGARDLESS of cache-hit: the cache stores the
-    # raw pool, and this idempotent cut is re-applied on every run (incl.
-    # propagate-only resumes that load bfs_cis from cache), so K stays a
-    # view-time knob. Detachable via enable_propagation_weight_prune;
-    # propagation_prune_top_k=0 disables the cut (score/trace only). No LLM.
-    # ------------------------------------------------------------------
-    if (
-        variant_flags.enable_bfs
-        and getattr(settings, "enable_propagation_weight_prune", True)
-        and cis.propagated_nodes
-    ):
-        from impactracer.shared.constants import propagation_decay_score
-
-        _tk = getattr(settings, "propagation_prune_top_k", 10)
-        _siblings = {
-            nid: tr for nid, tr in cis.propagated_nodes.items()
-            if tr.justification_source == "sibling_candidate"
-        }
-        _bfs = {
-            nid: tr for nid, tr in cis.propagated_nodes.items()
-            if tr.justification_source != "sibling_candidate"
-        }
-        if _tk and _tk > 0 and len(_bfs) > _tk:
-            scored = sorted(
-                _bfs.items(),
-                key=lambda kv: propagation_decay_score(kv[1].causal_chain or [], kv[1].depth),
-                reverse=True,
-            )
-            cis.propagated_nodes = {**dict(scored[:_tk]), **_siblings}
-            logger.info(
-                "[runner] Step 6.8: weight-decay prune {} -> {} BFS nodes "
-                "(top-{}); {} siblings exempt",
-                len(_bfs), _tk, _tk, len(_siblings),
-            )
-            _trace("step_6p8_weight_decay_prune", {
-                "pre_count": len(_bfs), "kept_count": _tk,
-                "top_k": _tk, "dropped": [nid for nid, _ in scored[_tk:]],
-            })
-
-    # ------------------------------------------------------------------
-    # Step 6.9 — Sibling-precision prune (the in-file arm's deterministic
-    # precision step, PARALLEL to Step 6.8 for the outward-BFS arm).
-    #
-    # Siblings are exempt from 6.8 (they tie under decay scoring). Here they are
-    # ranked by their ANCHOR's rrf_score (cached in sibling_candidate_meta at
-    # Step 6.7) and cut to the top-K per CR. SIS seeds and BFS nodes untouched.
-    # Bake-off on the sibling pool (2026-06) picked anchor-rrf over semantic
-    # (0% — GT siblings are unembeddable type defs), PPR (33%), flat-tie (50%);
-    # K=10 is recall-safe (100% sibling-GT kept, ~53% sibling noise cut), the
-    # same recall-safe philosophy as 6.8. Runs REGARDLESS of cache-hit (the
-    # anchor rrf survives in the meta); deterministic, no LLM. The surviving
-    # siblings still face V7's LLM #4 sibling validator (Step 7.5) + its caps.
-    # Detachable via enable_sibling_precision_prune; sibling_prune_top_k=0 off.
-    # ------------------------------------------------------------------
-    if (
-        variant_flags.enable_bfs
-        and getattr(settings, "enable_sibling_precision_prune", True)
-        and getattr(settings, "enable_sibling_promotion", True)
-    ):
-        _sk = getattr(settings, "sibling_prune_top_k", 10)
-        _sib_meta = (
-            variant_cache.get_sibling_candidates() if variant_cache is not None else None
-        ) or {}
-        _sib_nodes = [
-            nid for nid, tr in cis.propagated_nodes.items()
-            if tr.justification_source == "sibling_candidate"
-        ]
-        if _sk and _sk > 0 and len(_sib_nodes) > _sk:
-            def _anchor_rrf_of(sib_id: str) -> float:
-                m = _sib_meta.get(sib_id)
-                if m and "anchor_rrf" in m:
-                    return float(m["anchor_rrf"])
-                # Fallback when meta is unavailable: no signal -> 0 (keeps the
-                # cut deterministic but unranked; should not happen in practice
-                # because 6.7 always populates the meta before caching).
-                return 0.0
-
-            ranked = sorted(_sib_nodes, key=_anchor_rrf_of, reverse=True)
-            _drop = ranked[_sk:]
-            for nid in _drop:
-                del cis.propagated_nodes[nid]
-            _kept = len(_sib_nodes) - len(_drop)
-            logger.info(
-                "[runner] Step 6.9: sibling-precision prune {} -> {} siblings "
-                "(anchor-rrf top-{}, dropped {})",
-                len(_sib_nodes), _kept, _sk, len(_drop),
-            )
-            _trace("step_6p9_sibling_precision_prune", {
-                "pre_count": len(_sib_nodes), "kept_count": _kept,
-                "top_k": _sk, "dropped": _drop,
-            })
-
-    # ------------------------------------------------------------------
-    # Step 7 — Propagation validation (LLM #4, FR-D2)
-    # ------------------------------------------------------------------
+    # Step 7 — Propagation validation (LLM #4, FR-D2). Outward arm: prunes the
+    # BFS-propagated nodes; sibling_candidate nodes pass through to Step 7.5.
     llm4_justifications: dict[str, str] = {}
     if variant_flags.enable_propagation_validation and cis.propagated_nodes:
         logger.info(
@@ -1354,22 +949,10 @@ def run_analysis(
     elif variant_flags.enable_propagation_validation:
         logger.info("[runner] Step 7: Propagation validation SKIPPED (no propagated nodes)")
 
-    # ------------------------------------------------------------------
-    # Step 7.5 — File-local sibling VALIDATION (the in-file arm of LLM #4
-    # propagation validation; runs at V7 alongside outward-BFS validation).
-    #
-    # Consumes the RAW sibling candidates injected at Step 6.7 (tagged
-    # justification_source="sibling_candidate"). validate_siblings_for_file
-    # admits/rejects each via LLM #4 sibling-batch mode; REJECTED candidates
-    # are DROPPED from the CIS, admitted ones are relabelled "llm4_sibling"
-    # with their LLM justification. This is a DISTINCT LLM #4 call from
-    # Step 7's validate_propagation (which pruned the outward-BFS nodes and
-    # passed sibling_candidate nodes through untouched). The two parallel
-    # pruners together are what the V6->V7 boundary isolates.
-    #
-    # Caps (per_file/per_cr) apply HERE, post-validation, so the final
-    # admitted-sibling set is identical to the pre-split monolith.
-    # ------------------------------------------------------------------
+    # Step 7.5 — Sibling validation (in-file arm of LLM #4). A distinct LLM #4
+    # call from Step 7: admits/rejects the raw sibling_candidate nodes from
+    # Step 6.7, drops rejects, relabels admits "llm4_sibling". Caps apply here,
+    # post-validation.
     sibling_admitted_count = 0
     if (
         variant_flags.enable_propagation_validation
@@ -1538,9 +1121,8 @@ def run_analysis(
                 ],
             })
 
-    # Generate synthetic justifications for propagated nodes not processed by
-    # LLM #4 (BFS-only variants and exempt-edge auto-keeps). These are
-    # deterministic renderings of the BFS chain, not LLM-generated text.
+    # Synthetic justifications for propagated nodes LLM #4 didn't process
+    # (BFS-only variants, exempt-edge auto-keeps): deterministic chain renderings.
     for nid, trace in cis.propagated_nodes.items():
         if nid in llm4_justifications:
             continue
@@ -1627,9 +1209,7 @@ def run_analysis(
             justification_source=src,
         )
 
-    # ------------------------------------------------------------------
-    # Step 8 — Backlinks + Context (FR-E1, FR-E2)
-    # ------------------------------------------------------------------
+    # Step 8 — Backlinks + token-budgeted context (FR-E1/E2).
     logger.info("[runner] Step 8: Build context")
     all_node_ids = cis.all_node_ids()
 
@@ -1671,12 +1251,9 @@ def run_analysis(
         candidate_scores=candidate_scores,
     )
 
-    # ------------------------------------------------------------------
-    # Step 9 — Synthesize (LLM #5, FR-E3)
-    # LLM #5 produces only executive_summary + documentation_conflicts.
-    # impacted_entities is built deterministically from the full validated CIS;
-    # every validated node appears in the report regardless of prompt truncation.
-    # ------------------------------------------------------------------
+    # Step 9 — Synthesize (LLM #5, FR-E3). Aggregator only: emits executive_summary
+    # + documentation_conflicts; impacted_entities is built deterministically from
+    # the full validated CIS (every validated node appears, truncation-independent).
     logger.info("[runner] Step 9: Synthesize report (aggregator-only LLM #5)")
 
     impacted_entities_deterministic = build_deterministic_impacted_entities(

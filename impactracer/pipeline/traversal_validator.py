@@ -4,7 +4,7 @@ For each node reached by BFS (except exempted-edge single-hop neighbors),
 LLM #4 decides whether the structural path implies semantic impact.
 
 Fail-closed: per-node missing verdict → DROP; batch-level exception → DROP
-entire batch, continue. Same policy applies to collapsed-child batches.
+entire batch, continue.
 
 The causal chain is shown to LLM #4 as factual context only. The prompt
 explicitly forbids bare-topology justifications — the model must identify a
@@ -307,11 +307,6 @@ def validate_propagation(
                     node_id, justification,
                 )
 
-    # Per-child collapse validation REMOVED 2026-06 with Step 6.5: it
-    # re-validated each NodeTrace.collapsed_children entry, but graph-collapse
-    # (the only producer of collapsed_children) is gone, so that list is always
-    # empty and this loop was dead. LLM #4 now validates only the propagated
-    # nodes themselves.
     final_propagated = kept_propagated
 
     logger.info(

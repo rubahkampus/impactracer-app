@@ -1,7 +1,8 @@
-"""Dual-path hybrid search with Adaptive RRF (FR-C1, FR-C2).
+"""Dual-path hybrid search with Reciprocal Rank Fusion (FR-C1, FR-C2).
 
-Four ranked lists per query: dense-doc, bm25-doc, dense-code, bm25-code.
-Fused via Adaptive RRF where path weights depend on ``change_type``.
+Four ranked lists per query: dense-doc, bm25-doc, dense-code, bm25-code,
+fused via unweighted RRF (the change-type path weights were retired as inert;
+RRF_PATH_WEIGHTS is kept archival behind settings.uniform_rrf_weights).
 
 Reference: master_blueprint.md §4 Step 2.
 """
@@ -113,7 +114,7 @@ def build_metadata_cache(collection: object) -> dict[str, dict]:
 
 
 # ---------------------------------------------------------------------------
-# Adaptive RRF fusion
+# RRF fusion (unweighted)
 # ---------------------------------------------------------------------------
 
 
@@ -399,7 +400,7 @@ def hybrid_search(
     """Execute dual-path search and return RRF-sorted candidates (FR-C1, FR-C2).
 
     Assembles up to four ranked lists depending on variant flags, fuses via
-    Adaptive RRF, and returns the top-K RRF pool (settings.top_k_rrf_pool)
+    unweighted RRF, and returns the top-K RRF pool (settings.top_k_rrf_pool)
     for downstream reranking. The reranker then selects up to
     settings.max_admitted_seeds from this pool.
 
