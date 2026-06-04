@@ -108,6 +108,21 @@ class Settings(BaseSettings):
     # anchors are SIS-confirmed CRUD functions of a single domain entity
     # and LLM #4 correctly recognises every same-shape function as
     # similarly impacted, even when GT only names the one caller.
+    # Eval-only: force the CR change_type to this value, overriding LLM #1's
+    # classification. None (default) = use the LLM classification. Set to
+    # "ADDITION"|"MODIFICATION"|"DELETION" to drive the change_type-dependent
+    # treatments (RRF path weights, LLM #2/#3 framing) from a known label
+    # instead. The evaluate harness sets this per-CR from the GT label when
+    # --force-change-type-from-gt is passed. Not for production analyze.
+    force_change_type: str | None = None
+
+    # Re-admit the four retired propagation edges (PASSES_CALLBACK,
+    # HOOK_DEPENDS_ON, CLIENT_API_CALLS, DEPENDS_ON_EXTERNAL) into the BFS
+    # traversal config. Default False: they were retired 2026-06 as
+    # propagation-inert (zero TP on citrakara+nova). True is diagnostic-only —
+    # see constants.active_edge_config / RETIRED_PROPAGATION_EDGES.
+    enable_retired_edges: bool = False
+
     enable_sibling_promotion: bool = True
     sibling_promotion_max_per_file: int = 12        # candidate ceiling per file
     # Per-file admission cap: 4 strikes the balance between preventing
@@ -186,6 +201,21 @@ class Settings(BaseSettings):
     # Together these three toggles isolate "what would ImpacTracer score if
     # the SRS / SDD did not exist". Default False = production behaviour.
     code_only_mode: bool = False
+
+    # ---- RETIRED (2026-06): uniform RRF path weights ----------------
+    # The change-type-adaptive RRF_PATH_WEIGHTS table was ablated over all
+    # 24 citrakara CRs (V0-V3, variance-free) and found INERT: it moves only
+    # V2, on 8/24 CRs, magnitude <=0.125, pooled delta -0.0019 — inside the
+    # ~0.01-0.02 noise floor and washed out by V3's cross-encoder and every
+    # LLM stage (eval/rrf_weight_ablation/). So uniform is now the DEFAULT:
+    # all four paths (dense_doc, bm25_doc, dense_code, bm25_code) fuse with
+    # weight 1.0 regardless of change_type (plain unweighted RRF). The
+    # RRF_PATH_WEIGHTS table is kept archival (constants.py) and this flag is
+    # retained for reversibility — set False to restore adaptive weighting.
+    # Mirrors the score-floor/plausibility retirement (neutralized, not deleted).
+    # NOTE: change_type itself stays load-bearing elsewhere (LLM #2 ADDITION
+    # framing, V4+); only retrieval fusion drops it.
+    uniform_rrf_weights: bool = True
 
 
 # =========================================================================

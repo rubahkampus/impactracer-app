@@ -11,7 +11,7 @@
 **Scaffold:** the modules below are mature. Any session that wants to modify them must STOP and report — these define the contract.
 
 - `impactracer/shared/models.py` (all Pydantic schemas)
-- `impactracer/shared/constants.py` (EDGE_CONFIG, LAYER_COMPAT, RRF_PATH_WEIGHTS, fan-in caps, blacklists)
+- `impactracer/shared/constants.py` (EDGE_CONFIG, LAYER_COMPAT, fan-in caps, blacklists; RRF_PATH_WEIGHTS archival/retired)
 - `impactracer/shared/config.py` (Settings)
 - `impactracer/persistence/sqlite_client.py` (DDL)
 - `impactracer/persistence/chroma_client.py` (collection init)
@@ -77,7 +77,7 @@ Forward slashes in all node IDs and file paths, even on Windows. `pathlib.Path.a
 | FR-B1 | Validasi Kelayakan CR | `pipeline/interpreter.py` | #1 |
 | FR-B2 | Pembangkitan Objek CRInterpretation | `pipeline/interpreter.py` | #1 |
 | FR-C1 | Pencarian Hibrida Dua-Jalur | `pipeline/retriever.py` | — |
-| FR-C2 | Pemeringkatan Kandidat (Adaptive RRF) | `pipeline/retriever.py` | — |
+| FR-C2 | Pemeringkatan Kandidat (RRF, unweighted) | `pipeline/retriever.py` | — |
 | FR-C3 | Pemeringkatan Ulang Cross-Encoder | `indexer/reranker.py` (used online) | — |
 | FR-C4 | Penyaringan Pra-Validasi (3 gates) | `pipeline/prevalidation_filter.py` | — |
 | FR-C5 | Validasi Hasil Pencarian Awal | `pipeline/validator.py` | #2 |
@@ -97,8 +97,8 @@ Forward slashes in all node IDs and file paths, even on Windows. `pathlib.Path.a
 2. **Deterministic structural pipeline.** AST extraction, embedding, RRF fusion, cross-encoder rerank + top-K truncation, semantic dedup (3.6), and BFS propagation produce bit-identical output on identical input. (The 3.5 score floor and 3.7 plausibility gate are retired; only 3.6 dedup remains active — see Step 3.6/3.7.) Determinism in LLM steps is enforced by `temperature=0`, `seed=42`, Pydantic `response_schema`.
 3. **All LLM outputs are Pydantic-schema-constrained** via `LLMClient.call(response_schema=...)`. Never free-form text. Every schema inherits from `TruncatingModel` (in `shared/models.py`).
 4. **3 `change_type` values only:** `ADDITION`, `MODIFICATION`, `DELETION`. Uppercase, no others.
-5. **14 structural edge types** (canonical and frozen): `CALLS, INHERITS, IMPLEMENTS, TYPED_BY, FIELDS_ACCESSED, DEFINES_METHOD, HOOK_DEPENDS_ON, PASSES_CALLBACK, IMPORTS, RENDERS, DEPENDS_ON_EXTERNAL, CLIENT_API_CALLS, DYNAMIC_IMPORT, CONTAINS`. Adding a new type requires the SQLite CHECK migration.
-6. **10 node types** (canonical and frozen): `File, Class, Function, Method, Interface, TypeAlias, Enum, ExternalPackage, InterfaceField, Variable`. `Variable` covers `const NAME = <new_expression|object|array|call_expression>` (Mongoose schemas, factory results, large frozen objects, template arrays); arrow-function `const` declarations remain `Function`.
+5. **14 structural edge types** are extracted and stored (canonical and frozen): `CALLS, INHERITS, IMPLEMENTS, TYPED_BY, FIELDS_ACCESSED, DEFINES_METHOD, HOOK_DEPENDS_ON, PASSES_CALLBACK, IMPORTS, RENDERS, DEPENDS_ON_EXTERNAL, CLIENT_API_CALLS, DYNAMIC_IMPORT, CONTAINS`. Adding a new type requires the SQLite CHECK migration. **BFS propagation walks only 10 of them** — `PASSES_CALLBACK, HOOK_DEPENDS_ON, DEPENDS_ON_EXTERNAL, CLIENT_API_CALLS` were retired 2026-06 as propagation-inert (zero true positives across citrakara+nova) and removed from `EDGE_CONFIG`; they remain extracted for provenance and re-admittable via `settings.enable_retired_edges`.
+6. **10 node types** (canonical and frozen): `File, Class, Function, Method, Interface, TypeAlias, Enum, ExternalPackage, InterfaceField, Variable`. `Variable` covers `const NAME = <new_expression|object|array|call_expression>` (Mongoose schemas, factory results, large frozen objects, template arrays); arrow-function `const` declarations remain `Function`. **Two node types were retired from the index 2026-06** (`RETIRED_NODE_TYPES`): `ExternalPackage` (orphaned once `DEPENDS_ON_EXTERNAL`, its only inbound edge, was retired) and `InterfaceField` (field-level granularity — 46% of indexed nodes on citrakara but 0% of ground truth and 0% of propagated nodes, below the file/named-declaration granularity GT and the CIA literature operate at). Both stay defined in the schema/enum for reversibility but are not emitted by default, so **8 node types are indexed**. Re-enable via `settings.enable_retired_edges`.
 7. **8 canonical ablation variants V0..V7.** No V3.5, no V6.5. `VariantFlags.ALL_VARIANTS = ["V0","V1","V2","V3","V4","V5","V6","V7"]`. V3 represents the deterministic-filtering peak (cross-encoder rerank + top-K, no LLM gating; all pre-validation gates retired, so V3's only differentiator from V2 is the cross-encoder). V7 is the full pipeline (BFS + LLM #4 + LLM #5 aggregator).
 8. **Forward slashes everywhere.** `pathlib.Path.as_posix()` for any path written to SQLite, ChromaDB metadata, or `node_id`.
 9. **Single pre-registered statistical test.** V7 vs V5, one-sided paired Wilcoxon signed-rank, on the **entity-level `f1_set`** metric. `MIN_PAIRED_N = 15`. `ALPHA = 0.05`. **No Bonferroni** (only one test exists).
@@ -175,18 +175,18 @@ Emit **14 edge types**. Pass 2 runs after Pass 1 has populated `code_nodes` for 
 | `INHERITS` | Class → Class | reverse | 3 |
 | `IMPLEMENTS` | Class → Interface | reverse | 3 |
 | `TYPED_BY` | Function/Method → Interface/TypeAlias | reverse | 3 |
-| `FIELDS_ACCESSED` | Function → InterfaceField | reverse | 2 |
+| `FIELDS_ACCESSED` | Function → InterfaceField | — *(retired)* | — |
 | `DEFINES_METHOD` | Class → Method | forward | 1 |
-| `PASSES_CALLBACK` | Function → Function | forward | 1 |
-| `HOOK_DEPENDS_ON` | Function → Function/Interface | reverse | 1 |
+| `PASSES_CALLBACK` | Function → Function | — *(retired)* | — |
+| `HOOK_DEPENDS_ON` | Function → Function/Interface | — *(retired)* | — |
 | `IMPORTS` | File → File | reverse | 1 |
 | `RENDERS` | Function → Function | reverse | 1 |
-| `DEPENDS_ON_EXTERNAL` | File → ExternalPackage | reverse | 1 |
-| `CLIENT_API_CALLS` | Function → API_ROUTE Function | reverse | 1 |
+| `DEPENDS_ON_EXTERNAL` | File → ExternalPackage | — *(retired)* | — |
+| `CLIENT_API_CALLS` | Function → API_ROUTE Function | — *(retired)* | — |
 | `DYNAMIC_IMPORT` | File/Function → File | reverse | 1 |
-| `CONTAINS` | File → {Function, Method, Interface, TypeAlias, Class, Enum, InterfaceField, Variable} and Interface → InterfaceField | reverse | 1 |
+| `CONTAINS` | File → {Function, Method, Interface, TypeAlias, Class, Enum, Variable} (+ InterfaceField and Interface → InterfaceField only when retired nodes enabled) | reverse | 1 |
 
-These depths and directions are encoded in `shared/constants.py::EDGE_CONFIG`. Use that constant; never hard-code per-edge BFS rules elsewhere.
+The 9 propagated depths/directions are encoded in `shared/constants.py::EDGE_CONFIG`. Use that constant; never hard-code per-edge BFS rules elsewhere. The **5** edges marked *(retired)* are still extracted (Source → Target columns hold) but were removed from `EDGE_CONFIG` in 2026-06: four (`PASSES_CALLBACK`, `HOOK_DEPENDS_ON`, `DEPENDS_ON_EXTERNAL`, `CLIENT_API_CALLS`) as propagation-inert (zero true positives on citrakara+nova), and `FIELDS_ACCESSED` because its only target — the `InterfaceField` node type — is itself retired. They live in `RETIRED_PROPAGATION_EDGES` and can be re-admitted via `settings.enable_retired_edges`. The `CONTAINS` File→{named declaration} backbone is unaffected; only its InterfaceField sub-branch is gated.
 
 **LLM #4 auto-exempt edges:** depth-1 IMPLEMENTS and DEFINES_METHOD skip propagation validation. They receive a synthetic justification `"Direct <edge> contract from <seed> — auto-admitted exempt edge."`. `TYPED_BY` is intentionally NOT in this set — auto-exempt TYPED_BY admissions historically produced too many false positives, so LLM #4 adjudicates depth-1 TYPED_BY on the same footing as deeper propagation chains.
 
@@ -350,7 +350,7 @@ downstream as SOFT signals only (score-floor additive boost + BM25 boost,
 
 If `is_actionable=False`, the runner short-circuits to a minimal rejection ImpactReport and exits. A coherence soft-fix is then applied: DELETION CRs must include `"code"` in `affected_layers`; ADDITION CRs must not be code-only.
 
-### Step 2 — Adaptive RRF Hybrid Search (FR-C1, FR-C2)
+### Step 2 — RRF Hybrid Search (FR-C1, FR-C2)
 
 `pipeline/retriever.py::hybrid_search(cr_interp, ctx, settings, cr_text)`.
 
@@ -367,13 +367,18 @@ The `dense_code` path additionally:
 - **Raw-CR multilingual dense pass** — when `settings.enable_raw_cr_dense_pass = True` and `cr_text` is provided, the retriever embeds the raw (Indonesian / English / mixed) CR text once and merges its nearest-neighbour code candidates into `dense_code` via score-max. BGE-M3's multilingual capability bridges the Indonesian-CR ↔ English-identifier gap without going through LLM #1.
 - **Traceability pool seeding** — when `settings.enable_traceability_pool_seeding = True`, code nodes that the offline `doc_code_candidates` table links to any retrieved doc-chunk (above `settings.traceability_seed_min_score = 0.40`, capped at `settings.traceability_seed_top_k_per_doc = 5` per doc) are injected into `dense_code` with a synthetic rank. Promotes the offline traceability precomputation from a rerank +0.1 bonus into a pool-membership signal.
 
-**Adaptive RRF formula:**
+**RRF formula (unweighted):**
 ```
-ARRF(d) = Σ_{p ∈ paths_present} W[change_type][p] / (rrf_k + rank_p(d) + 1)
+RRF(d) = Σ_{p ∈ paths_present} 1 / (rrf_k + rank_p(d) + 1)
 ```
-where `W = RRF_PATH_WEIGHTS[change_type]` from `shared/constants.py`. `rrf_k = 60`.
+`rrf_k = 60`. All paths fuse with equal weight. (The change-type-adaptive
+`RRF_PATH_WEIGHTS[change_type]` table was retired 2026-06 — ablation found it
+inert: moved only V2 on 8/24 CRs, pooled Δ−0.0019, inside the noise floor and
+washed out by the cross-encoder + LLM stages. Table kept archival; restore via
+`settings.uniform_rrf_weights=False`. `change_type` remains load-bearing in
+LLM #2 ADDITION framing — only retrieval fusion drops it.)
 
-After fusion: sort all unique node ids by ARRF score descending; take the top `settings.top_k_rrf_pool` (=200) candidates. Build `Candidate` DTOs by hydrating ChromaDB metadata + SQLite columns.
+After fusion: sort all unique node ids by RRF score descending; take the top `settings.top_k_rrf_pool` (=200) candidates. Build `Candidate` DTOs by hydrating ChromaDB metadata + SQLite columns.
 
 **Variant degenerations** of Step 2:
 - V0: only `bm25_doc` + `bm25_code`.
@@ -391,7 +396,7 @@ candidates = ctx.reranker.rerank_multi_query(
 )
 ```
 
-The cross-encoder scores the **full RRF pool** (~200 candidates) on every variant where it is enabled. Each candidate retains its raw cross-encoder logit in `raw_reranker_score` and a sigmoid-normalised score in `reranker_score`. Graph-rerank (when enabled) operates on this full ranked pool; the final `candidates[:settings.max_admitted_seeds]` truncation (Step 3·f, a plain top-K by score) runs **after** rerank. `max_admitted_seeds = 15`.
+The cross-encoder scores the **full RRF pool** on every variant where it is enabled — but as of 2026-06 that pool is **already deduped**: Step 3.6 semantic dedup now runs POST-RETRIEVAL, BEFORE the rerank and the top-K cut (see Step 3.6 below), so the reranker scores the deduped pool. Each candidate retains its raw cross-encoder logit in `raw_reranker_score` and a sigmoid-normalised score in `reranker_score`. Graph-rerank (when enabled) operates on this full ranked pool; the final `candidates[:settings.max_admitted_seeds]` truncation (Step 3·f, a plain top-K by score) runs **after** rerank. `max_admitted_seeds = 15`. Ordering: **RRF → dedup (3.6) → rerank → top-K cut**.
 
 A `step_3_reranked_full` trace key captures the full ranked pool before the `max_admitted_seeds` truncation; it is consumed by `tools/diagnose_k_widening.py` for the post-hoc rank-bucket analysis reported in the K-widening empirical study.
 
@@ -408,13 +413,19 @@ strictly inert, 3.6 semantic dedup exactly inert, 3.7 plausibility/density
 `step_3_7_plausibility_and_affinity` archival-only, never invoked;
 `enable_score_floor` / `enable_plausibility_gate` dead flags).
 
-- **3.6 Semantic dedup** (`enable_dedup_gate`) — **RETAINED** on
-  engineering/robustness grounds (NOT an F1 claim; measured within-noise): for
-  each `doc_chunks` candidate, look up its top-1 code resolution via
-  `doc_code_candidates`; if that code_id is already in the list, collapse the
-  doc into the code candidate (attach `(section_title, text)` as Business
-  Context for the LLM #2 prompt) and drop the doc. This is the one pre-validation
-  mechanism still active. Reference: `stage3_contribution_study.md`.
+- **3.6 Semantic dedup** (`enable_dedup_gate`) — **RETAINED**, and as of 2026-06
+  **reordered to run POST-RETRIEVAL, before the rerank and the top-K cut** (was
+  previously after the cut). For each `doc_chunks` candidate, look up its top-1
+  code resolution via `doc_code_candidates`; if that code_id is already in the
+  list, collapse the doc into the code candidate (attach `(section_title, text)`
+  as Business Context for the LLM #2 prompt) and drop the doc. Running it on the
+  FULL pool before truncation frees top-K seats that a doc/code duplicate pair
+  would otherwise both occupy — the earlier "exactly inert" F1 finding was an
+  artefact of running dedup AFTER the cut; moving it before the cut yields
+  **+1/+2/+2 GT on V0/V1/V2** over 24 CRs, and is **inert on V3** (live A/B
+  around the reranker gave identical 40/85). This is the one pre-validation
+  mechanism still active. Ordering: **RRF → dedup (3.6) → rerank → top-K cut**.
+  Reference: `stage3_contribution_study.md`.
 
 ### Step 4 — Validate SIS (LLM #2, FR-C5)
 

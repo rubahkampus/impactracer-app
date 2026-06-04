@@ -96,6 +96,28 @@ class VariantFlags:
         "V0", "V1", "V2", "V3", "V4", "V5", "V6", "V7"
     ]
 
+    #: Run-mode variant subsets (for `evaluate --mode`).
+    #: RETRIEVAL_ONLY runs the deterministic + LLM #2/#3 chain (V0-V5) and
+    #: populates the shared VariantCache (interp, SIS, trace, rerank_gated, …).
+    #: PROPAGATE_ONLY runs only the graph/propagation variants (V6, V7),
+    #: resuming the V0-V5 prefix from a cache produced by a prior RETRIEVAL_ONLY
+    #: run (`--cache-from`). Their union is ALL_VARIANTS, so a RETRIEVAL_ONLY
+    #: run followed by a PROPAGATE_ONLY run reproduces the full V0-V7 matrix.
+    RETRIEVAL_ONLY: ClassVar[list[str]] = ["V0", "V1", "V2", "V3", "V4", "V5"]
+    PROPAGATE_ONLY: ClassVar[list[str]] = ["V6", "V7"]
+
+    @classmethod
+    def variants_for_mode(cls, mode: str) -> list[str]:
+        """Return the variant id list for an evaluate run-mode.
+
+        mode in {"full", "retrieval-only", "propagate-only"}.
+        """
+        return {
+            "full": list(cls.ALL_VARIANTS),
+            "retrieval-only": list(cls.RETRIEVAL_ONLY),
+            "propagate-only": list(cls.PROPAGATE_ONLY),
+        }[mode]
+
     @classmethod
     def v0(cls) -> "VariantFlags":
         # 3.6 dedup and 3.7 plausibility run universally on

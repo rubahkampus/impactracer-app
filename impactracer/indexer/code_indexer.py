@@ -21,6 +21,7 @@ Reference: master_blueprint.md §3.2 (Pass 1), §3.4 (Pass 2).
 
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 from pathlib import Path
@@ -30,6 +31,25 @@ from tree_sitter import Node, Parser
 from tree_sitter_languages import get_parser as _get_ts_parser_impl
 
 from impactracer.indexer.skeletonizer import skeletonize_node
+from impactracer.shared.constants import RETIRED_NODE_TYPES, RETIRED_PROPAGATION_EDGES
+
+
+def _resolve_emit_retired_edges() -> bool:
+    """Whether the indexer writes the four retired edge types.
+
+    Default False (retired 2026-06; index stays clean). Re-enable by setting
+    Settings.enable_retired_edges (env IMPACTRACER_ENABLE_RETIRED_EDGES=1) and
+    re-indexing. Falls back to the raw env var if Settings cannot be built.
+    """
+    try:
+        from impactracer.shared.config import Settings
+        return bool(Settings().enable_retired_edges)
+    except Exception:
+        return os.getenv("IMPACTRACER_ENABLE_RETIRED_EDGES", "").lower() in ("1", "true", "yes")
+
+
+#: Resolved once at import. Gate applied in :func:`_emit_edge`.
+_EMIT_RETIRED_EDGES: bool = _resolve_emit_retired_edges()
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +425,8 @@ def extract_nodes(
     )
 
     # --- ExternalPackage nodes ---
+    # Built here but filtered at the _insert_nodes write chokepoint when
+    # retired (RETIRED_NODE_TYPES, default on). See _insert_nodes / _emit_edge.
     for pkg_id, pkg_node in external_packages.items():
         nodes.append(pkg_node)
 
@@ -1220,7 +1242,16 @@ def _build_enum_node(
 # ---------------------------------------------------------------------------
 
 def _insert_nodes(nodes: list[dict[str, Any]], conn: sqlite3.Connection) -> None:
-    """INSERT OR REPLACE all node dicts into code_nodes."""
+    """INSERT OR REPLACE all node dicts into code_nodes.
+
+    Node types in ``RETIRED_NODE_TYPES`` (ExternalPackage, InterfaceField) are
+    NOT written by default (retired 2026-06). The extraction logic that builds
+    them is left intact for reversibility; this is the single write chokepoint
+    where the gate is applied. Set ``IMPACTRACER_ENABLE_RETIRED_EDGES=1`` (env)
+    or ``settings.enable_retired_edges`` and re-index to restore them.
+    """
+    if not _EMIT_RETIRED_EDGES:
+        nodes = [n for n in nodes if n["node_type"] not in RETIRED_NODE_TYPES]
     sql = """
         INSERT OR REPLACE INTO code_nodes (
             node_id, node_type, name, file_path, file_classification,
@@ -1442,7 +1473,16 @@ def _emit_edge(
     conn: sqlite3.Connection,
     counter: list[int],
 ) -> None:
-    """INSERT OR IGNORE one structural edge. Increments counter[0]."""
+    """INSERT OR IGNORE one structural edge. Increments counter[0].
+
+    Edge types in ``RETIRED_PROPAGATION_EDGES`` are NOT written to the index
+    (retired 2026-06 as propagation-inert; see constants). The extraction logic
+    that calls this for those types is left intact for reversibility — set
+    ``IMPACTRACER_ENABLE_RETIRED_EDGES=1`` (env) to re-enable emission and then
+    re-index. Default: dropped at the write chokepoint so the index stays clean.
+    """
+    if not _EMIT_RETIRED_EDGES and edge_type in RETIRED_PROPAGATION_EDGES:
+        return
     conn.execute(
         "INSERT OR IGNORE INTO structural_edges (source_id, target_id, edge_type) "
         "VALUES (?, ?, ?)",
@@ -2319,25 +2359,36 @@ def _emit_contains_edges(
     """Emit CONTAINS edges for every node owned by this file.
 
     Two passes:
-      1. File → {Function, Method, Interface, TypeAlias, Class, Enum, InterfaceField}
-      2. Interface → InterfaceField  (derived from ``file::Interface.field`` id convention)
+      1. File → {Function, Method, Interface, TypeAlias, Class, Enum, Variable}
+         (+ InterfaceField only when retired nodes are enabled)
+      2. Interface → InterfaceField  (only when retired nodes are enabled)
+
+    The InterfaceField CONTAINS sub-branch is gated 2026-06: InterfaceField is a
+    retired node type (see RETIRED_NODE_TYPES), so by default no such nodes exist
+    and both the IN-list entry and Pass 2 are skipped. The File→{named
+    declaration} backbone is unaffected. Re-enabled via settings.enable_retired_edges.
 
     Blueprint §3.4.
     """
-    # --- Pass 1: File → direct children (including InterfaceField + Variable) ---
+    # --- Pass 1: File → direct children (named declarations) ---
+    _child_types = [
+        "Function", "Method", "Interface", "TypeAlias", "Class", "Enum", "Variable",
+    ]
+    if _EMIT_RETIRED_EDGES:
+        _child_types.append("InterfaceField")
+    _ph = ",".join("?" * len(_child_types))
     cur = conn.execute(
-        "SELECT node_id FROM code_nodes WHERE file_path = ? AND node_type IN "
-        "('Function','Method','Interface','TypeAlias','Class','Enum','InterfaceField','Variable')",
-        (file_posix,),
+        f"SELECT node_id FROM code_nodes WHERE file_path = ? AND node_type IN ({_ph})",
+        (file_posix, *_child_types),
     )
     for row in cur:
         child_id = row[0]
         if child_id in known_node_ids:
             _emit_edge(file_posix, child_id, "CONTAINS", conn, counter)
 
-    # --- Pass 2: Interface → InterfaceField ---
-    # InterfaceField node_ids have the form  "src/…/file.ts::InterfaceName.fieldName"
-    # The parent Interface node_id is        "src/…/file.ts::InterfaceName"
+    # --- Pass 2: Interface → InterfaceField (retired; skipped by default) ---
+    if not _EMIT_RETIRED_EDGES:
+        return
     cur2 = conn.execute(
         "SELECT node_id FROM code_nodes WHERE file_path = ? AND node_type = 'InterfaceField'",
         (file_posix,),

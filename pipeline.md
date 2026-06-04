@@ -140,17 +140,22 @@ has a single responsibility.
 [shared/constants.py](impactracer/shared/constants.py) — system-wide constants. The
 canonical numbers live here:
 
-- `RRF_PATH_WEIGHTS` — per `ChangeType` (ADDITION/MODIFICATION/DELETION),
-  the relative weight of the four retrieval paths in RRF fusion.
+- `RRF_PATH_WEIGHTS` — **RETIRED 2026-06, archival.** Formerly per `ChangeType`
+  (ADDITION/MODIFICATION/DELETION) relative weights of the four retrieval paths;
+  ablation found it inert (moves only V2, pooled Δ−0.0019, inside noise). RRF now
+  fuses unweighted; table kept for reversibility (`settings.uniform_rrf_weights`).
 - `LAYER_COMPAT` — a `FileClassification × ChunkType` matrix used by the
   traceability matrix to weight doc↔code similarity (e.g. an `API_ROUTE` file
   weighted highly against an `FR` doc chunk, less against a `Design` chunk).
-- `EDGE_CONFIG` — **the 14 edge types** with their BFS direction and depth:
-  `CALLS` (reverse, depth 2), `INHERITS`/`IMPLEMENTS`/`TYPED_BY` (reverse,
-  depth 3), `FIELDS_ACCESSED` (reverse, depth 2),
-  `DEFINES_METHOD`/`PASSES_CALLBACK` (forward, depth 1),
-  `HOOK_DEPENDS_ON`/`IMPORTS`/`RENDERS`/`DEPENDS_ON_EXTERNAL`/`CLIENT_API_CALLS`/`DYNAMIC_IMPORT`/`CONTAINS`
-  (reverse, depth 1).
+- `EDGE_CONFIG` — **the 9 propagated edge types** with their BFS direction and
+  depth: `CALLS` (reverse, depth 2), `INHERITS`/`IMPLEMENTS`/`TYPED_BY` (reverse,
+  depth 3), `DEFINES_METHOD` (forward, depth 1),
+  `IMPORTS`/`RENDERS`/`DYNAMIC_IMPORT`/`CONTAINS` (reverse, depth 1).
+  (14 edge types are extracted/stored; **5** are retired 2026-06 and live in
+  `RETIRED_PROPAGATION_EDGES`: `PASSES_CALLBACK`, `HOOK_DEPENDS_ON`,
+  `DEPENDS_ON_EXTERNAL`, `CLIENT_API_CALLS` (inert), and `FIELDS_ACCESSED`
+  (its only target, the `InterfaceField` node type, is itself retired —
+  `RETIRED_NODE_TYPES`). Re-admittable via `settings.enable_retired_edges`.)
 - `NODE_TYPE_MAX_FAN_IN` — per node-type in-degree caps used to drop hub
   nodes from BFS (e.g. a `Function` with > 50 callers is excluded as noise).
 - `SEVERITY_BY_EDGE_CHAIN_TYPE` — the rules that map a causal chain to one of
@@ -224,9 +229,11 @@ Eight steps end-to-end:
    all hashes.
 2. Purge SQLite rows for deleted files; recompute reverse-dependencies.
 3. **Pass 1** ([indexer/code_indexer.py](impactracer/indexer/code_indexer.py)::`extract_nodes()`):
-   Tree-Sitter AST walk emits the 10 node types
-   (File, Class, Function, Method, Interface, TypeAlias, Enum, InterfaceField,
-   Variable, ExternalPackage). Function/Method bodies are passed through
+   Tree-Sitter AST walk emits the node types
+   (File, Class, Function, Method, Interface, TypeAlias, Enum, Variable;
+   `ExternalPackage` and `InterfaceField` are defined but retired from the
+   index 2026-06 — `RETIRED_NODE_TYPES` — so **8 are emitted by default**).
+   Function/Method bodies are passed through
    [indexer/skeletonizer.py](impactracer/indexer/skeletonizer.py)::`skeletonize_node()`
    to produce a token-budgeted abstraction (preserves calls/returns/throws,
    folds JSX/arrays/long strings).
@@ -485,7 +492,7 @@ rejection `ImpactReport` immediately (no retrieval, no LLM #2-5).
 strongest on English identifiers. (`out_of_scope_operations` was formerly
 applied as a negative filter at step 2, but that filter is now retired/inert.)
 
-### 3.2 Step 2 — Adaptive RRF Hybrid Search
+### 3.2 Step 2 — RRF Hybrid Search
 
 [pipeline/retriever.py](impactracer/pipeline/retriever.py)::`hybrid_search(cr_interp, ctx, settings, cr_text)`.
 
@@ -512,10 +519,11 @@ Each list has `top_k_per_query = 30` entries. Plus:
   them into the RRF pool with a synthetic rank of 5. Promotes the offline
   similarity precomputation from a rerank +0.1 bonus to a true seeding signal.
 
-All ranked lists fuse via **Reciprocal Rank Fusion** with weights from
-`RRF_PATH_WEIGHTS[change_type]`. RRF score per candidate per path:
-`1 / (rrf_k + rank)` (default `rrf_k=60`), then summed across paths and
-weighted by path.
+All ranked lists fuse via **Reciprocal Rank Fusion**, unweighted. RRF score
+per candidate per path: `1 / (rrf_k + rank)` (default `rrf_k=60`), summed across
+paths with equal weight. (The change-type-adaptive `RRF_PATH_WEIGHTS[change_type]`
+table was retired 2026-06 — ablation found it inert; kept archival, restore via
+`settings.uniform_rrf_weights=False`.)
 
 Post-fusion bonuses / penalties — **RETIRED** (traceability bonus 3·b and
 negative filter 3·c found inert in the Stage-3 contribution study; functions
@@ -554,22 +562,27 @@ Optional **graph-aware label-propagation rerank** (default off,
 the rerank. Shipped off because the calibration trade-off doesn't
 generalise on the target codebase.
 
-### 3.4 Steps 3.5 / 3.6 / 3.7 — Pre-Validation Gates (3.5 + 3.7 retired)
+### 3.4 Step 3.6 — Pre-Validation Dedup (3.5 + 3.7 retired)
 
 [pipeline/prevalidation_filter.py](impactracer/pipeline/prevalidation_filter.py).
 A 42-CR two-repo contribution study
 ([stage3_contribution_study.md](stage3_contribution_study.md)) found none of the
-three gates improves entity F1: the 3.5 score floor is strictly inert, 3.6
-semantic dedup is exactly inert, and 3.7 plausibility/density is **net-negative**.
+three gates improves entity F1: 3.5 score floor strictly inert, 3.7
+plausibility/density **net-negative**, and 3.6 dedup F1-inert **when run after the
+top-K cut** — but reordering 3.6 to run BEFORE the cut (2026-06) makes it
+recover wasted seats (see below).
 
 - **3.5 score floor + 3.7 plausibility — RETIRED.** `step_3_5_score_filter` /
   `step_3_7_plausibility_and_affinity` archival-only, never invoked;
   `enable_score_floor` / `enable_plausibility_gate` are dead flags.
-- **3.6 semantic dedup — RETAINED** (`enable_dedup_gate`) on
-  engineering/robustness grounds, NOT as an F1 contributor (measured
-  within-noise): for every doc-chunk candidate whose top-1 code resolution is
-  already in the pool, **merge** the doc into the code candidate (append
-  `merged_doc_ids` / `merged_doc_contexts`) and **drop** the doc. The LLM #2
+- **3.6 semantic dedup — RETAINED and REORDERED** (`enable_dedup_gate`) to run
+  **post-retrieval, before the cross-encoder rerank and the top-K cut**
+  (ordering: RRF → dedup → rerank → cut). For every doc-chunk candidate whose
+  top-1 code resolution is already in the pool, **merge** the doc into the code
+  candidate (append `merged_doc_ids` / `merged_doc_contexts`) and **drop** the doc.
+  Running on the full pool before truncation frees top-K seats a doc/code
+  duplicate pair would otherwise both occupy: **+1/+2/+2 GT on V0/V1/V2** over 24
+  CRs, **inert on V3** (live A/B around the reranker: identical 40/85). The LLM #2
   validator (V4+) then sees the code node plus the business-context paragraphs
   that justify it, in one prompt; also prevents the same impact being
   double-counted as both a doc and a code candidate.
@@ -754,11 +767,13 @@ this function pulls the justification from the right source:
 
 `severity` is computed by `severity_for_chain(causal_chain)`:
 
-- Contract chains (IMPLEMENTS, TYPED_BY, FIELDS_ACCESSED) → **Tinggi**.
-- Behavioural chains (CALLS, INHERITS, DEFINES_METHOD, HOOK_DEPENDS_ON,
-  PASSES_CALLBACK) → **Menengah**.
-- Module-composition chains (IMPORTS, RENDERS, DEPENDS_ON_EXTERNAL,
-  CLIENT_API_CALLS, DYNAMIC_IMPORT, CONTAINS) → **Rendah**.
+- Contract chains (IMPLEMENTS, TYPED_BY) → **Tinggi**.
+- Behavioural chains (CALLS, INHERITS, DEFINES_METHOD) → **Menengah**.
+- Module-composition chains (IMPORTS, RENDERS, DYNAMIC_IMPORT, CONTAINS)
+  → **Rendah**.
+  (The retired edges PASSES_CALLBACK/HOOK_DEPENDS_ON/DEPENDS_ON_EXTERNAL/
+  CLIENT_API_CALLS no longer appear in chains; if re-enabled they default to
+  Rendah.)
 - Empty chain (SIS seed at depth 0) → **Tinggi** (the change site itself).
 
 The `impacted_files` array is built deterministically from the distinct

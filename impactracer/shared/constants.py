@@ -11,8 +11,15 @@ from impactracer.shared.models import ChangeType, Severity
 
 
 # =========================================================================
-# Adaptive RRF weights (indexed by change_type)
+# RRF path weights (indexed by change_type) — RETIRED 2026-06, ARCHIVAL.
 # =========================================================================
+# Ablated over all 24 citrakara CRs (variance-free, V0-V3) and found inert:
+# moves only V2 on 8/24 CRs, pooled delta -0.0019 (inside noise), washed out
+# by V3's cross-encoder + every LLM stage. Production now fuses with uniform
+# weight 1.0 (Settings.uniform_rrf_weights defaults True). This table is no
+# longer consulted unless that flag is set False; kept for reversibility.
+# Evidence: eval/rrf_weight_ablation/. NOTE change_type stays load-bearing
+# elsewhere (LLM #2 ADDITION framing) — only retrieval fusion drops it.
 
 RRF_PATH_WEIGHTS: dict[ChangeType, dict[str, float]] = {
     "ADDITION": {
@@ -89,23 +96,77 @@ EDGE_CONFIG: dict[str, dict] = {
     "INHERITS":            {"direction": "reverse", "max_depth": 3},
     "IMPLEMENTS":          {"direction": "reverse", "max_depth": 3},
     "TYPED_BY":            {"direction": "reverse", "max_depth": 3},
-    "FIELDS_ACCESSED":     {"direction": "reverse", "max_depth": 2},
+    # FIELDS_ACCESSED retired 2026-06 together with the InterfaceField node type
+    # (its only possible target). See RETIRED_PROPAGATION_EDGES / RETIRED_NODE_TYPES.
     # Structural ownership (forward direction)
     # Containment relation, not a semantic propagation pathway. Depth-1 only.
     "DEFINES_METHOD":      {"direction": "forward", "max_depth": 1},
-    "PASSES_CALLBACK":     {"direction": "forward", "max_depth": 1},
-    # Reactive
-    "HOOK_DEPENDS_ON":     {"direction": "reverse", "max_depth": 1},
     # Module composition
     "IMPORTS":             {"direction": "reverse", "max_depth": 1},
     "RENDERS":             {"direction": "reverse", "max_depth": 1},
-    "DEPENDS_ON_EXTERNAL": {"direction": "reverse", "max_depth": 1},
-    "CLIENT_API_CALLS":    {"direction": "reverse", "max_depth": 1},
     "DYNAMIC_IMPORT":      {"direction": "reverse", "max_depth": 1},
+    # --- RETIRED EDGES (propagation-inert; see RETIRED_PROPAGATION_EDGES) -----
+    # Empirically retired 2026-06 as methodological deadweight: across the
+    # citrakara+nova corpora these contributed ZERO true positives to BFS.
+    # Two are empty in every index (PASSES_CALLBACK, HOOK_DEPENDS_ON); two are
+    # populated but structurally propagation-dead (CLIENT_API_CALLS never sat on
+    # a seed->node chain; DEPENDS_ON_EXTERNAL targets only ExternalPackage nodes,
+    # which EXCLUDED_PROPAGATION_NODE_TYPES bars BFS from entering). They are
+    # left OUT of EDGE_CONFIG so the BFS never walks them. The extractor still
+    # emits them (schema/provenance intact) and re-enabling is a one-liner via
+    # settings.enable_retired_edges -> see _RETIRED_EDGE_CONFIG below.
+    #   "PASSES_CALLBACK":     {"direction": "forward", "max_depth": 1},
+    #   "HOOK_DEPENDS_ON":     {"direction": "reverse", "max_depth": 1},
+    #   "DEPENDS_ON_EXTERNAL": {"direction": "reverse", "max_depth": 1},
+    #   "CLIENT_API_CALLS":    {"direction": "reverse", "max_depth": 1},
+    # -------------------------------------------------------------------------
     # CONTAINS bridges the File↔symbol membrane. Reverse only: given a changed
     # symbol, find which files contain it — not enumerate all sibling symbols.
     "CONTAINS":            {"direction": "reverse", "max_depth": 1},
 }
+
+#: Edge types retired from BFS propagation (2026-06). Inert by construction —
+#: zero true-positive contribution on citrakara+nova. Kept here so the
+#: extractor/schema stay honest and the decision is reversible: passing
+#: ``settings.enable_retired_edges=True`` merges these back into the active
+#: traversal config via :func:`active_edge_config`.
+#:
+#: FIELDS_ACCESSED is a SECOND-WAVE retirement: it is retired not because it is
+#: merely empty (INHERITS/IMPLEMENTS are also empty but RETAINED as class/
+#: interface-granularity contract edges), but because its ONLY possible target
+#: is an ``InterfaceField`` node — and InterfaceField is itself retired (see
+#: RETIRED_NODE_TYPES). With no InterfaceField nodes the edge cannot fire.
+RETIRED_PROPAGATION_EDGES: dict[str, dict] = {
+    "PASSES_CALLBACK":     {"direction": "forward", "max_depth": 1},
+    "HOOK_DEPENDS_ON":     {"direction": "reverse", "max_depth": 1},
+    "DEPENDS_ON_EXTERNAL": {"direction": "reverse", "max_depth": 1},
+    "CLIENT_API_CALLS":    {"direction": "reverse", "max_depth": 1},
+    "FIELDS_ACCESSED":     {"direction": "reverse", "max_depth": 2},
+}
+
+#: Node types retired from the index (2026-06). Defined in the schema/enum for
+#: reversibility but NOT emitted by default. ``ExternalPackage`` was orphaned
+#: once DEPENDS_ON_EXTERNAL (its only inbound edge) was retired. ``InterfaceField``
+#: is field-level granularity: 46% of indexed nodes on citrakara yet 0% of
+#: ground truth and 0% of propagated nodes — below the file/named-declaration
+#: granularity that the ground truth and the CIA literature operate at. Both are
+#: re-emitted (with their edges) when ``settings.enable_retired_edges`` is True.
+RETIRED_NODE_TYPES: frozenset[str] = frozenset({
+    "ExternalPackage",
+    "InterfaceField",
+})
+
+
+def active_edge_config(enable_retired_edges: bool = False) -> dict[str, dict]:
+    """Return the BFS edge config; optionally re-admit the retired edges.
+
+    Default (``False``) returns ``EDGE_CONFIG`` unchanged — the four retired
+    edges stay propagation-inert. ``True`` overlays ``RETIRED_PROPAGATION_EDGES``
+    for diagnostic/ablation use (e.g. confirming they still catch nothing).
+    """
+    if not enable_retired_edges:
+        return EDGE_CONFIG
+    return {**EDGE_CONFIG, **RETIRED_PROPAGATION_EDGES}
 
 LOW_CONF_CAPPED_EDGES: frozenset[str] = frozenset({"CALLS"})
 """Edges whose depth is capped to 1 for low-confidence seeds."""
@@ -153,9 +214,9 @@ NODE_TYPE_MAX_FAN_IN: dict[str, int] = {
     "Interface": 100,        # Type definitions are referenced widely; allow more.
     "TypeAlias": 100,
     "Enum": 100,
-    "InterfaceField": 200,   # Field-level access has the highest fan-in by nature.
+    "InterfaceField": 200,   # RETIRED node type (2026-06); retained for reversibility.
     "File": 200,             # File nodes act as containers; high fan-in is expected.
-    "ExternalPackage": 0,    # Never propagate INTO an ExternalPackage from BFS.
+    "ExternalPackage": 0,    # RETIRED node type (2026-06); never propagated regardless.
     "Variable": 80,          # Top-level const declarations (schemas, constant data).
 }
 """Max in-degree before a node is excluded from BFS propagation (not seeds)."""
@@ -180,19 +241,20 @@ SEVERITY_BY_EDGE_CHAIN_TYPE: dict[str, Severity] = {
     # Contract dependency chain -> HIGH
     "IMPLEMENTS": "Tinggi",
     "TYPED_BY": "Tinggi",
-    "FIELDS_ACCESSED": "Tinggi",
+    # FIELDS_ACCESSED retired 2026-06 (InterfaceField target retired); if
+    # re-enabled, severity_for_chain falls back to "Rendah".
     # Behavioral dependency chain -> MEDIUM
     "CALLS": "Menengah",
     "INHERITS": "Menengah",
     "DEFINES_METHOD": "Menengah",
-    "HOOK_DEPENDS_ON": "Menengah",
-    "PASSES_CALLBACK": "Menengah",
     # Module composition chain -> LOW
     "IMPORTS": "Rendah",
     "RENDERS": "Rendah",
-    "DEPENDS_ON_EXTERNAL": "Rendah",
-    "CLIENT_API_CALLS": "Rendah",
     "DYNAMIC_IMPORT": "Rendah",
+    # Retired edges (HOOK_DEPENDS_ON, PASSES_CALLBACK, DEPENDS_ON_EXTERNAL,
+    # CLIENT_API_CALLS) omitted — propagation-inert (see EDGE_CONFIG). If
+    # re-enabled via enable_retired_edges, severity_for_chain falls back to
+    # "Rendah" for them, which is the correct tier anyway.
     # File ownership -> LOW (structural containment, not semantic dependency)
     "CONTAINS": "Rendah",
 }

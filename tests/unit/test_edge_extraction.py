@@ -9,9 +9,23 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
 
+from impactracer.indexer import code_indexer
 from impactracer.indexer.code_indexer import extract_nodes, extract_edges
 from impactracer.persistence.sqlite_client import init_schema
+
+
+@pytest.fixture(autouse=True)
+def _emit_retired_edges(monkeypatch):
+    """Exercise the extractor for ALL 14 edge types, including the four retired
+    from propagation in 2026-06 (PASSES_CALLBACK, HOOK_DEPENDS_ON,
+    CLIENT_API_CALLS, DEPENDS_ON_EXTERNAL). Production gates their emission off
+    at the _emit_edge chokepoint, but the extraction LOGIC is deliberately kept
+    (reversible via settings.enable_retired_edges). These acceptance tests
+    validate that logic, so emission is force-enabled here.
+    """
+    monkeypatch.setattr(code_indexer, "_EMIT_RETIRED_EDGES", True)
 
 
 # ---------------------------------------------------------------------------

@@ -39,8 +39,9 @@ The online pipeline transforms an Indonesian / English Change Request (CR) into 
                        │     DELETION ⇒ ensure 'code' in affected_layers
                        │     ADDITION ⇒ ensure not code-only
                        ▼
-   Step 2   ─── Adaptive RRF Hybrid Search ─────────────────────────────
-   (V0+)               Four ranked lists fused per change_type:
+   Step 2   ─── RRF Hybrid Search (unweighted) ───────────────────────────
+   (V0+)               Four ranked lists fused (equal weight; change-type
+                       path weighting retired 2026-06 as inert):
                          • dense_doc   (BGE-M3 embedding × ChromaDB)
                          • bm25_doc    (rank_bm25 over chunked SRS/SDD)
                          • dense_code  (BGE-M3 embedding × ChromaDB)
@@ -64,23 +65,26 @@ The online pipeline transforms an Indonesian / English Change Request (CR) into 
                        Output: top-K RRF pool (top_k_rrf_pool = 200).
                        │
                        ▼
-   Step 3   ─── Cross-Encoder Rerank (V3+) ────────────────────────────
-                       BGE-Reranker-v2-m3, multi-query MAX scoring.
-                       Output: plain top-15 by cross-encoder score (3·f).
-                       (RETIRED post-rerank adjustments: traceability bonus
-                        3·b, negative filter 3·c, named-entry pinning 3·e —
-                        all found inert by the Stage-3 contribution study;
-                        archival-only, no longer called.)
+   Step 3.6 ─────────── Semantic Dedup (POST-RETRIEVAL, on FULL pool) ──
+                       Runs BEFORE rerank + top-K cut (reordered 2026-06).
+                       Doc chunks whose top-1 code resolution is already in
+                       the pool are merged into that code candidate;
+                       (section_title, text) attached as "Business Context"
+                       for LLM #2 (V4+). Running dedup BEFORE the top-K cut
+                       (not after) frees seats a doc/code duplicate pair would
+                       otherwise waste: +1/+2/+2 GT on V0/V1/V2 over 24 CRs;
+                       INERT on V3 (live A/B around the reranker: identical
+                       40/85). 3.5 score floor + 3.7 plausibility RETIRED
+                       (archival-only, never invoked).
                        │
                        ▼
-   Step 3.6 ─────────── Pre-validation Gates (3.5 + 3.7 RETIRED) ──────
-                       3.5 score floor inert + 3.7 plausibility NET-NEGATIVE
-                       → both retired (archival-only, never invoked).
-                       3.6 semantic dedup RETAINED (within-noise on F1, kept
-                       for LLM #2 Business Context + doc/code de-dup): doc
-                       chunks whose top-1 code resolution is already in the
-                       pool are collapsed into the code candidate;
-                       (section_title, text) attached as "Business Context".
+   Step 3   ─── Cross-Encoder Rerank (V3+) + top-K cut ────────────────
+                       BGE-Reranker-v2-m3, multi-query MAX scoring on the
+                       deduped pool, then plain top-15 by cross-encoder score
+                       (3·f). V0–V2: no reranker — plain top-15 of the deduped
+                       RRF pool. (RETIRED post-rerank adjustments: traceability
+                       bonus 3·b, negative filter 3·c, named-entry pinning 3·e
+                       — inert per the Stage-3 study; archival-only.)
                        │
                        ▼
    Step 4   ─── LLM #2  validate_sis (V4+) ───────────────────────────
@@ -305,16 +309,13 @@ The structural graph is a `networkx.MultiDiGraph` materialised once per pipeline
 | `INHERITS` | reverse | 3 | Class hierarchies are typically shallow; 3 hops covers all real cases. |
 | `IMPLEMENTS` | reverse | 3 | Interface contract graph. |
 | `TYPED_BY` | reverse | 3 | Type-reference propagation. |
-| `FIELDS_ACCESSED` | reverse | 2 | Field-level access has higher fan-out than method calls. |
 | `DEFINES_METHOD` | forward | 1 | Definitional containment, not semantic propagation. |
-| `PASSES_CALLBACK` | forward | 1 | |
-| `HOOK_DEPENDS_ON` | reverse | 1 | React hook dependency edge. |
 | `IMPORTS` | reverse | 1 | Module composition; no transitive impact assumed. |
-| `RENDERS` | reverse | 1 | |
-| `DEPENDS_ON_EXTERNAL` | reverse | 1 | |
-| `CLIENT_API_CALLS` | reverse | 1 | |
+| `RENDERS` | reverse | 1 | UI parent→child composition. The single most productive propagation edge on the evaluated corpora (caught 13/17 BFS true positives, all sole-credit). Extractor is JSX/TSX-specific but the relation generalises to other component frameworks. |
 | `DYNAMIC_IMPORT` | reverse | 1 | |
 | `CONTAINS` | reverse | 1 | File ↔ symbol containment. Reverse-only: given a changed symbol, find which files contain it; do NOT enumerate sibling symbols. |
+
+**Retired from propagation (2026-06).** Five edges are no longer in `EDGE_CONFIG`. Four — `PASSES_CALLBACK`, `HOOK_DEPENDS_ON`, `DEPENDS_ON_EXTERNAL`, `CLIENT_API_CALLS` — were found propagation-inert by a two-corpus audit (citrakara+nova, zero true positives): `PASSES_CALLBACK`/`HOOK_DEPENDS_ON` are empty in every index; `CLIENT_API_CALLS` never sat on a seed→node chain; `DEPENDS_ON_EXTERNAL` targets only `ExternalPackage` nodes, which BFS never enters. The fifth — `FIELDS_ACCESSED` — is retired because its only target, the `InterfaceField` node type, is itself retired (`RETIRED_NODE_TYPES`); with no InterfaceField nodes it cannot fire. All five are still extracted/stored (provenance) and re-admittable via `settings.enable_retired_edges` (`constants.RETIRED_PROPAGATION_EDGES` / `active_edge_config`). BFS now walks **9** edge types.
 
 ### 3.2 Confidence-tier CALLS cap
 
@@ -483,7 +484,7 @@ The pre-registered test is correctly **deferred** at n=5 < MIN_PAIRED_N=15. V5 (
 
 - RRF pool → up to 200 candidates feed the cross-encoder (`top_k_rrf_pool=200`). The `layered_code` path contributes up to 60 (12 per layer × 5 layers).
 - Cross-encoder reranks down to top-15 by raw_reranker_score.
-- Pre-validation gates: 3.5 + 3.7 RETIRED (drop nothing); 3.6 dedup retained (merges doc→code, no F1 claim).
+- Pre-validation gates: 3.5 + 3.7 RETIRED (drop nothing); 3.6 dedup retained and **moved post-retrieval / pre-rerank / pre-cut** (2026-06) — merges doc→code; recovers top-K seats wasted by doc/code duplicates (+1/+2/+2 GT on V0/V1/V2; inert on V3).
 - LLM #2 confirms ~half of survivors (acceptance ≈ 50–60 %).
 - Doc → code resolution expands to ~10–20 pairs; LLM #3 prunes hard (~80–95 % rejection — most doc resolutions are not impactful seeds).
 - BFS adds ~3–20 propagated nodes around the validated seeds per CR (the wider retrieval pool and sibling promotion keep this much tighter than naïve BFS, which can reach ~30+).
@@ -500,7 +501,7 @@ The pre-registered test is correctly **deferred** at n=5 < MIN_PAIRED_N=15. V5 (
 
 The following architectural invariants are FROZEN. Violating any of them requires updating this document AND `master_blueprint.md`.
 
-1. **10 node types** (`shared/models.py::NodeType`): `File, Class, Function, Method, Interface, TypeAlias, Enum, ExternalPackage, InterfaceField, Variable`.
+1. **10 node types** (`shared/models.py::NodeType`): `File, Class, Function, Method, Interface, TypeAlias, Enum, ExternalPackage, InterfaceField, Variable`. (`ExternalPackage` and `InterfaceField` retired from the index 2026-06 — `RETIRED_NODE_TYPES`; **8 indexed by default**, re-enable via `settings.enable_retired_edges`.)
 2. **14 structural edge types** (`shared/models.py::EdgeType`, `shared/constants.py::EDGE_CONFIG`): see §3.1 above.
 3. **5 canonical LLM stages in V7**: `interpret`, `validate_sis`, `validate_trace`, `validate_propagation`, `synthesize`. Per-CR call counts can exceed 5 because Step 7 spawns `validate_collapsed_children` sub-calls and Step 7.5 spawns one `validate_siblings` call per file with a qualifying anchor. The five canonical stage names remain the architectural contract.
 4. **8 canonical ablation variants** (`evaluation/variant_flags.py::ALL_VARIANTS = ["V0","V1","V2","V3","V4","V5","V6","V7"]`). V3 = deterministic-filtering peak (cross-encoder rerank + top-K, no LLM gating; all pre-validation gates retired, so the cross-encoder is V3's only differentiator from V2). V7 = full pipeline (BFS + LLM #4 + Step 7.5 sibling promotion + LLM #5 aggregator).

@@ -9,7 +9,7 @@ import pytest
 
 from impactracer.persistence.sqlite_client import connect, init_schema
 from impactracer.persistence.chroma_client import get_client, init_collections
-from impactracer.shared.constants import EDGE_CONFIG
+from impactracer.shared.constants import EDGE_CONFIG, RETIRED_PROPAGATION_EDGES
 
 
 # ---------------------------------------------------------------------------
@@ -25,7 +25,9 @@ _ALL_NODE_TYPES = (
     "ExternalPackage", "InterfaceField",
 )
 
-_ALL_EDGE_TYPES = tuple(EDGE_CONFIG.keys())  # 14 canonical values (incl. CONTAINS)
+# All 14 extracted/stored edge types: 10 propagated (EDGE_CONFIG) + 4 retired.
+# The DDL CHECK accepts all 14; only EDGE_CONFIG was trimmed to 10 in 2026-06.
+_ALL_EDGE_TYPES = tuple(EDGE_CONFIG.keys()) + tuple(RETIRED_PROPAGATION_EDGES.keys())
 
 
 def _fresh_conn() -> sqlite3.Connection:
@@ -123,7 +125,7 @@ def test_edge_type_check_rejects_invalid() -> None:
 
 
 def test_all_14_edge_types_accepted() -> None:
-    """Every value in EDGE_CONFIG inserts into structural_edges without error."""
+    """All 14 stored edge types (10 propagated + 4 retired) insert without error."""
     conn = _fresh_conn()
     src_id = "src/lib/a.ts::source"
     tgt_id = "src/lib/a.ts::target"
@@ -143,9 +145,22 @@ def test_all_14_edge_types_accepted() -> None:
     assert inserted_types == set(_ALL_EDGE_TYPES)
 
 
-def test_edge_config_has_exactly_14_entries() -> None:
-    """EDGE_CONFIG must define exactly 14 edge types (13 + CONTAINS)."""
-    assert len(EDGE_CONFIG) == 14
+def test_edge_config_has_exactly_9_propagated_entries() -> None:
+    """EDGE_CONFIG defines the 9 propagated edge types (post 2026-06 retirements).
+
+    14 edge types are extracted/stored. 5 are retired from propagation and live
+    in RETIRED_PROPAGATION_EDGES: PASSES_CALLBACK, HOOK_DEPENDS_ON,
+    DEPENDS_ON_EXTERNAL, CLIENT_API_CALLS (wave 1, inert), and FIELDS_ACCESSED
+    (wave 2 — its only target, the InterfaceField node type, was retired). The
+    two sets together still total 14.
+    """
+    assert len(EDGE_CONFIG) == 9
+    assert len(RETIRED_PROPAGATION_EDGES) == 5
+    assert len(set(EDGE_CONFIG) | set(RETIRED_PROPAGATION_EDGES)) == 14
+    assert set(EDGE_CONFIG).isdisjoint(RETIRED_PROPAGATION_EDGES)
+    # FIELDS_ACCESSED specifically is retired, not active.
+    assert "FIELDS_ACCESSED" in RETIRED_PROPAGATION_EDGES
+    assert "FIELDS_ACCESSED" not in EDGE_CONFIG
 
 
 # ---------------------------------------------------------------------------

@@ -322,6 +322,24 @@ def run_analysis(
         if variant_cache is not None:
             variant_cache.put_interp(cr_interp)
 
+    # Eval-only change_type override. When settings.force_change_type is set
+    # (e.g. from the GT label), overwrite LLM #1's classification BEFORE it
+    # drives the change_type-dependent treatments (RRF path weights at Step 2,
+    # LLM #2/#3 ADDITION framing). Applied after both the cache-miss and
+    # cache-HIT paths so it takes effect regardless of cache state; the value
+    # is also written back to the cache so resumed variants see the same type.
+    # NOT used in production analyze; an evaluation harness affordance for
+    # measuring against the designed GT change-type strata.
+    _forced = getattr(settings, "force_change_type", None)
+    if _forced and cr_interp.change_type != _forced:
+        logger.info(
+            "[runner] change_type OVERRIDE: {} -> {} (force_change_type)",
+            cr_interp.change_type, _forced,
+        )
+        cr_interp = cr_interp.model_copy(update={"change_type": _forced})
+        if variant_cache is not None:
+            variant_cache.put_interp(cr_interp)
+
     logger.info(
         "[runner] === INTERPRETER OUTPUT ===\n"
         "  is_actionable : {}\n"
@@ -457,6 +475,38 @@ def run_analysis(
                  "merged_doc_ids": list(c.merged_doc_ids)}
                 for c in candidates
             ])
+
+    # ------------------------------------------------------------------
+    # Step 3.6 — Semantic dedup (POST-RETRIEVAL, PRE-RERANK, PRE-TRUNCATION).
+    #
+    # Dedup is a retrieval-hygiene step and runs on the FULL RRF pool before the
+    # cross-encoder and before the top-K cut. Rationale (2026-06, evidenced):
+    #   * Running dedup AFTER the top-K cut (the previous order) let a doc chunk
+    #     and its resolved code twin BOTH consume top-K seats, then merged them —
+    #     wasting a seat the next candidate could have taken. Moving dedup ahead
+    #     of the cut recovers those seats (+1/+2/+2 GT on V0/V1/V2 over 24 CRs).
+    #   * Dedup placement around the cross-encoder is INERT on V3: a live rerank
+    #     A/B (dedup before vs after rerank) gave identical GT recall (40/85
+    #     both). So deduping before the reranker costs nothing and is the
+    #     cleanest single dedup point.
+    # Skipped on the rerank_gated cache hit (the cached pool is already deduped).
+    # enable_score_floor / enable_plausibility are dead flags (retired gates).
+    # ------------------------------------------------------------------
+    if not _rerank_gated_cache_hit and variant_flags.enable_dedup_gate:
+        _pre_dedup = len(candidates)
+        candidates = apply_prevalidation_gates(
+            candidates,
+            cr_interp,
+            settings,
+            ctx.conn,
+            enable_score_floor=variant_flags.enable_score_floor,
+            enable_dedup=variant_flags.enable_dedup_gate,
+            enable_plausibility=variant_flags.enable_plausibility_gate,
+        )
+        logger.info(
+            "[runner] Step 3.6 dedup (pre-rerank, full pool): {} -> {} candidates",
+            _pre_dedup, len(candidates),
+        )
 
     if _rerank_gated_cache_hit:
         pass  # Skip the rerank + gates block entirely.
@@ -598,32 +648,20 @@ def run_analysis(
         logger.info("[runner] Step 3: Cross-encoder DISABLED ({})", variant_flags.variant_id)
 
     # ------------------------------------------------------------------
-    # Steps 3.6, 3.7 — Pre-validation gates (FR-C4)
+    # Post-truncation snapshot (dedup already ran pre-rerank above).
     #
-    # Step 3.6 dedup and 3.7 plausibility run universally (V0-V7).
-    # Step 3.5 (score floor) is RETIRED — strictly inert in a 42-CR two-repo
-    # ablation; apply_prevalidation_gates ignores enable_score_floor. The flag
-    # is still passed for signature/cache-key stability but has no effect.
+    # Step 3.6 dedup now runs ONCE, on the full RRF pool before rerank+cut
+    # (see the Step 3.6 block earlier). Step 3.5 score floor and 3.7
+    # plausibility are RETIRED (dead flags). This block only emits the
+    # admission summary + step_3_gates_survivors trace for the final top-K
+    # and caches it; it no longer re-runs any gate.
     #
     # Skipped on cache hit for the post-gate candidate list.
     # ------------------------------------------------------------------
     if not _rerank_gated_cache_hit:
-        post_rerank_count = len(candidates)
-        candidates = apply_prevalidation_gates(
-            candidates,
-            cr_interp,
-            settings,
-            ctx.conn,
-            enable_score_floor=variant_flags.enable_score_floor,
-            enable_dedup=variant_flags.enable_dedup_gate,
-            enable_plausibility=variant_flags.enable_plausibility_gate,
-        )
-
         logger.info(
-            "[runner] admission_summary variant={} post_rerank={} post_gates={} admitted={}",
+            "[runner] admission_summary variant={} admitted={} (dedup ran pre-rerank)",
             variant_flags.variant_id,
-            post_rerank_count,
-            len(candidates),
             len(candidates),
         )
         _trace("step_3_gates_survivors", [
