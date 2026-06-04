@@ -375,14 +375,6 @@ def build_context(
             block_lines.append(
                 f"Mechanism of impact (LLM #2): {trace_obj.mechanism_of_impact}"
             )
-        if trace_obj is not None and trace_obj.collapsed_children:
-            collapsed = trace_obj.collapsed_children
-            child_preview = ", ".join(collapsed[:20])
-            if len(collapsed) > 20:
-                child_preview += f" ... (+{len(collapsed) - 20} more)"
-            block_lines.append(
-                f"Collapsed CONTAINS children ({len(collapsed)}): {child_preview}"
-            )
         if bl:
             block_lines.append(
                 "Traceability backlinks: " + ", ".join(f"{d}({s:.3f})" for d, s in bl[:3])

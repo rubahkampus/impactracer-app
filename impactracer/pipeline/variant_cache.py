@@ -303,6 +303,36 @@ class VariantCache:
             },
         )
 
+    # ----------------------------------------------------------------
+    # Step 7.5a — raw sibling CANDIDATES (V6 deterministic expansion).
+    # After the V6/V7 split, sibling promotion has two halves mirroring
+    # BFS's two halves:
+    #   V6 (expand): collect_file_local_siblings injects RAW, unvalidated
+    #     candidates into the CIS as propagated nodes tagged
+    #     ``justification_source="sibling_candidate"`` (parallel to raw BFS
+    #     nodes). This cache stores the per-candidate context LLM #4 needs at
+    #     V7 (file_path, the in-file anchor, that anchor's mechanism) so the
+    #     V7 validator can run without re-deriving siblings.
+    #   V7 (prune): validate_siblings_for_file admits/rejects them.
+    # The raw candidate node_ids themselves ride the ``bfs_cis`` cache (they
+    # are propagated nodes); this map only carries the validation context.
+    # ----------------------------------------------------------------
+
+    def get_sibling_candidates(self) -> dict[str, dict[str, str]] | None:
+        raw = self._read_json("sibling_candidates")
+        if raw is None:
+            return None
+        return {str(k): dict(v) for k, v in raw.get("candidate_meta", {}).items()}
+
+    def put_sibling_candidates(
+        self,
+        candidate_meta: dict[str, dict[str, str]],
+    ) -> None:
+        self._write_json(
+            "sibling_candidates",
+            {"candidate_meta": {k: dict(v) for k, v in candidate_meta.items()}},
+        )
+
 
 # ----------------------------------------------------------------------
 # Candidate serialisation helpers

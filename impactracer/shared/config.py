@@ -131,6 +131,47 @@ class Settings(BaseSettings):
     sibling_admit_max_per_file: int = 4
     sibling_admit_max_per_cr: int = 0               # 0 = no global cap
 
+    # ---- Step 6.8: Weight-decay propagation prune -------------------
+    # Deterministic flood control: after BFS + sibling expansion, rank the
+    # propagated pool by edge-weight-aware decay (constants.propagation_decay_
+    # score: prod(edge_weight)/(1+depth), weights = measured edge productivity)
+    # and keep only the top-K. SIS seeds are never scored or cut. Always-on at
+    # V6+ so V7's LLM #4 validates a shrunk, higher-precision pool. Selected
+    # over PPR / semantic-cosine by an offline V6 sweep (removed ~68% of
+    # propagated FPs retaining ~70% of TPs, more surgically than either).
+    # Detachable: set enable_propagation_weight_prune=False to restore the raw
+    # unpruned flood. 0 disables the cut (scores only).
+    # K=10 is the RECALL-SAFE floor found by a live K-sweep on the V6 BFS pool
+    # (2026-06): BFS-GT recall is 100% at K>=10 and drops below it (the binding
+    # CR, ADD-2, has its last BFS-GT at rank 9). Earlier K=20 was the safe
+    # choice; K=10 is the tight choice — recall-identical on this corpus, with
+    # marginally better precision and ~half the BFS budget on flood CRs. NOTE
+    # the floor is set by one CR via insertion order, so it is corpus-specific;
+    # raise toward 12-15 for a safety margin if generalising. Edge-weight tuning
+    # canNOT lower it further: the binding CR is single-edge (all RENDERS) so GT
+    # and noise are score-tied — a tie-breaker problem, not a weight problem.
+    # As a PRE-V7 filter the goal is to hand V7 the full recall with less noise,
+    # not to maximise V6 F1 (which peaks ~0.29 at K=3 by shedding GT). This is
+    # an efficiency layer at zero recall cost, not an accuracy knob.
+    # Env-overridable (bare name, like TOP_K_RRF_POOL): PROPAGATION_PRUNE_TOP_K=<n>.
+    enable_propagation_weight_prune: bool = True
+    propagation_prune_top_k: int = 10
+
+    # ---- Step 6.9: Sibling-precision prune (in-file arm, parallel to 6.8) ----
+    # Deterministic precision step for the in-file arm, mirroring how Step 6.8
+    # prunes the outward-BFS arm. Siblings are EXEMPT from 6.8 (they tie under
+    # decay scoring); instead they are ranked here by their ANCHOR's rrf_score
+    # and cut to the top-K. A sibling-pool bake-off (2026-06) found anchor-rrf
+    # the best deterministic sibling ranker — 83% sibling-GT @ top-5 vs 0%
+    # semantic (GT siblings are mostly unembeddable type defs), 33% PPR, 50%
+    # flat-tie, 17% random; combining signals only hurt. K=10 is the recall-
+    # safe point (100% sibling-GT retained, ~53% sibling noise cut), matching
+    # the 6.8 philosophy: hand V7's sibling validator the full recall with
+    # less noise. Detachable; sibling_prune_top_k=0 disables the cut.
+    # Env-overridable (bare name, like TOP_K_RRF_POOL): SIBLING_PRUNE_TOP_K=<n>.
+    enable_sibling_precision_prune: bool = True
+    sibling_prune_top_k: int = 10
+
     # ---- Step 2: Traceability-matrix pool seeding -------------------
     # After dense_doc retrieval, query doc_code_candidates for code-nodes
     # linked to those doc-chunks above this threshold and inject them into

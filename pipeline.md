@@ -686,6 +686,23 @@ Output: a `CISResult` (Change Impact Set) with two dicts:
 into its parent's `collapsed_children` list. Reduces the prompt token count
 for LLM #4 without losing information.
 
+**Step 6.7 — Sibling expansion** (V6+, deterministic, no LLM): the in-file arm
+of propagation, parallel to outward BFS. `collect_file_local_siblings()` injects
+the CONTAINS-siblings of every mechanism-carrying confirmed seed as **raw,
+unvalidated** propagated nodes tagged `justification_source="sibling_candidate"`.
+They are pruned later by the dedicated LLM #4 sibling validator at Step 7.5.
+
+**Step 6.8 — Weight-decay propagation prune** (V6+, deterministic, no LLM,
+default-on via `settings.enable_propagation_weight_prune`): ranks the propagated
+pool (BFS nodes + raw siblings) by an edge-weight-aware decay
+(`constants.propagation_decay_score`: `prod(edge_weight)/(1+depth)`, weights =
+measured edge productivity — `RENDERS`=1.0 workhorse, `IMPORTS`=0.3 flood source)
+and keeps only the top-`propagation_prune_top_k` (default **20**). SIS seeds are
+never scored or cut. Chosen over PPR / semantic-cosine by an offline V6 sweep
+(retains 100% of propagated true positives at K=20 while cutting ~32% of
+propagated false positives — a recall-safe efficiency layer that shrinks the
+pool LLM #4 must validate at Step 7, not an accuracy knob). Detachable.
+
 ### 3.8 Step 7 — Validate Propagation (LLM #4)
 
 [pipeline/traversal_validator.py](impactracer/pipeline/traversal_validator.py)::`validate_propagation()`.
@@ -704,12 +721,16 @@ Verdict: `semantically_impacted: bool` + `justification: str (≤400 chars)`.
 Same fail-closed contract: missing verdict → DROP, batch error → DROP batch
 + set `degraded_run = True`.
 
-**Step 7.5 — Sibling promotion**: a separate LLM #4 invocation specifically
-targets *missed* GT entities that live in the same file as a confirmed seed
-but were not retrieved. The runner enumerates every CONTAINS-sibling of each
-LLM-#2-confirmed seed; LLM #4 admits/rejects each sibling using the anchor's
-`mechanism_of_impact` as context. Capped at `sibling_admit_max_per_file=4`.
-Admitted siblings enter the CIS at depth 1 with `causal_chain=["CONTAINS"]`.
+**Step 7.5 — Sibling validation** (the in-file arm of LLM #4, parallel to the
+outward-BFS validation in Step 7): a **distinct** LLM #4 invocation that
+admits/rejects the raw `sibling_candidate` nodes injected at Step 6.7, using
+each file's anchors' `mechanism_of_impact` as context. **Rejected candidates are
+dropped** from the CIS; admitted ones are relabelled `llm4_sibling`. Caps
+(`sibling_admit_max_per_file=4`, `sibling_admit_max_per_cr`) apply here,
+post-validation. Splitting expansion (6.7, V6) from validation (7.5, V7) makes
+the V6→V7 boundary prune **both** propagation arms (outward + in-file) via two
+parallel LLM #4 calls, instead of bundling sibling collection-and-validation
+into one monolithic V6 step.
 
 **Step 7.5 Anchor Gate**: only seeds where LLM #2 produced a non-empty
 `mechanism_of_impact` qualify as sibling-promotion anchors. Prevents

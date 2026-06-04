@@ -179,12 +179,6 @@ def _build_propagation_prompt(
             f"Causal chain (factual context, NOT impact evidence): {chain_display}",
             f"Reached from SIS seed: {trace.source_seed}",
         ]
-        if trace.collapsed_children:
-            lines.append(
-                f"Contains {len(trace.collapsed_children)} collapsed child field(s): "
-                + ", ".join(trace.collapsed_children[:20])
-                + (" ..." if len(trace.collapsed_children) > 20 else "")
-            )
         if abstraction:
             lines += [
                 "Node Abstraction / Signature:",
@@ -229,7 +223,13 @@ def validate_propagation(
     auto_kept_justifications: dict[str, str] = {}
 
     for node_id, trace in cis.propagated_nodes.items():
-        if (
+        if trace.justification_source == "sibling_candidate":
+            # Raw file-local sibling candidates (the in-file arm of
+            # propagation) are validated by the dedicated sibling validator
+            # (Step 7.5), NOT this outward-BFS validator. Pass them through
+            # untouched so the sibling pass can admit/reject them.
+            auto_kept[node_id] = trace
+        elif (
             trace.depth == 1
             and trace.causal_chain
             and trace.causal_chain[-1] in PROPAGATION_VALIDATION_EXEMPT_EDGES
@@ -307,85 +307,12 @@ def validate_propagation(
                     node_id, justification,
                 )
 
-    # Per-child collapse validation.
-    _CHILD_SYSTEM = (
-        "You are a software impact analysis expert. "
-        "Given a parent code node that IS impacted by a Change Request, "
-        "determine whether each of its named child fields/members is "
-        "INDIVIDUALLY impacted (i.e. its value/type/behaviour must change). "
-        "A child field that is unrelated to the CR's domain is NOT impacted. "
-        "Return a justification citing the specific structural reason. "
-        'Return: {"verdicts": [{"node_id": "<child_name>", '
-        '"semantically_impacted": true/false, "justification": "..."}]}'
-    )
-
-    final_propagated: dict[str, NodeTrace] = {}
-    for node_id, trace in kept_propagated.items():
-        if not trace.collapsed_children:
-            final_propagated[node_id] = trace
-            continue
-
-        children = trace.collapsed_children
-        kept_children: list[str] = []
-
-        for child_batch_start in range(0, len(children), _BATCH_SIZE):
-            child_batch = children[child_batch_start: child_batch_start + _BATCH_SIZE]
-            child_prompt_lines = [
-                f"Change Request Intent: {cr_interp.primary_intent}",
-                f"Change Type: {cr_interp.change_type}",
-                f"Parent node: {node_id} (confirmed impacted)",
-                "",
-                "For each child field below, determine if it is individually impacted:",
-                "",
-            ]
-            for j, child_name in enumerate(child_batch, start=1):
-                child_prompt_lines.append(
-                    f"[{j}] NODE ID: <<NODE_ID_START>>{child_name}<<NODE_ID_END>>"
-                )
-            child_prompt_lines.append(
-                'Return: {"verdicts": [{"node_id": ..., '
-                '"semantically_impacted": true/false, "justification": "..."}]}'
-            )
-            child_prompt = "\n".join(child_prompt_lines)
-
-            try:
-                child_result: PropagationValidationResult = client.call(
-                    system=_CHILD_SYSTEM,
-                    user=child_prompt,
-                    response_schema=PropagationValidationResult,
-                    call_name="validate_collapsed_children",
-                )
-            except Exception as exc:
-                logger.error(
-                    "[traversal_validator] Child validation failed for {} children "
-                    "of {}: {} - DROPPING child batch (fail-closed)",
-                    len(child_batch), node_id, exc,
-                )
-                degraded = True
-                continue
-
-            child_verdict_map: dict[str, tuple[bool, str]] = {}
-            for v in child_result.verdicts:
-                clean_id = _strip_delimiters(v.node_id)
-                child_verdict_map[clean_id] = (v.semantically_impacted, v.justification or "")
-
-            for child_name in child_batch:
-                child_verdict = child_verdict_map.get(child_name)
-                if child_verdict is None:
-                    logger.warning(
-                        "[traversal_validator] No child verdict for '{}' of '{}' - "
-                        "DROPPING (fail-closed)",
-                        child_name, node_id,
-                    )
-                    continue
-                impacted, child_just = child_verdict
-                if impacted:
-                    kept_children.append(child_name)
-                    # Store under "<parent>::<child>" key for distributed-justification audit.
-                    justifications[f"{node_id}::{child_name}"] = child_just
-
-        from dataclasses import replace as _dc_replace
-        final_propagated[node_id] = _dc_replace(trace, collapsed_children=kept_children)
+    # Per-child collapse validation REMOVED 2026-06 with Step 6.5: it
+    # re-validated each NodeTrace.collapsed_children entry, but graph-collapse
+    # (the only producer of collapsed_children) is gone, so that list is always
+    # empty and this loop was dead. LLM #4 now validates only the propagated
+    # nodes themselves.
+    final_propagated = kept_propagated
 
     logger.info(
         "[traversal_validator] After LLM #4: {} propagated nodes kept (was {}, degraded={})",

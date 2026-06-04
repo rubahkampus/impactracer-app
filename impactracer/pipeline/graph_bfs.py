@@ -294,147 +294,14 @@ def bfs_propagate(
     return CISResult(sis_nodes=sis_nodes, propagated_nodes=propagated_nodes)
 
 
-#: Node types that can act as CONTAINS parents (aggregation candidates).
-_CONTAINS_PARENT_TYPES: frozenset[str] = frozenset({
-    "Interface", "Enum", "Class", "File",
-})
-
-#: Node types that are collapsed into their parent (leaf children).
-_CONTAINS_CHILD_TYPES: frozenset[str] = frozenset({
-    "InterfaceField",
-})
+# NOTE: Step 6.5 graph-collapse (collapse_contains_subtrees) was REMOVED
+# 2026-06. It folded leaf InterfaceField children into their parent, but
+# InterfaceField is a retired node type (absent from the index), so the
+# function folded 0 nodes on every CR — structurally dead. Removed along with
+# its _CONTAINS_PARENT/CHILD type tables and the validate_collapsed_children
+# downstream LLM #4 sub-call.
 
 
-def collapse_contains_subtrees(
-    cis: CISResult,
-    graph: nx.MultiDiGraph,
-    node_meta_by_id: dict[str, dict],
-) -> CISResult:
-    """Collapse CONTAINS-only children into their parent's NodeTrace.
-
-    Dense CONTAINS edges (File→InterfaceField, Interface→InterfaceField) cause
-    BFS to visit hundreds of leaf nodes, generating thousands of LLM #4 prompt
-    tokens. This function identifies propagated parent nodes whose CONTAINS
-    children are pure leaves (no non-CONTAINS edges), removes those children
-    from propagated_nodes, and records their IDs in the parent's
-    ``collapsed_children`` list.
-
-    Collapse conditions for a child node C relative to parent P:
-    1. P is in ``propagated_nodes`` (or ``sis_nodes``) and is a
-       CONTAINS-parent type.
-    2. C is in ``propagated_nodes`` and is a CONTAINS-child type.
-    3. There exists a CONTAINS edge between P and C (either direction).
-    4. C has **no other** incoming or outgoing edges in the graph *except*
-       CONTAINS edges (i.e. C is purely a leaf).  This prevents collapsing
-       a node that is also reachable via CALLS/IMPORTS etc.
-
-    The modified CISResult preserves the BFS invariant for downstream
-    consumers: the combined() view now contains parent records instead of
-    the removed child records.
-
-    Blueprint reference: master_blueprint.md §4 Step 6.5.
-    """
-    if not cis.propagated_nodes:
-        return cis
-
-    # Build the set of all nodes currently in the CIS (SIS + propagated).
-    all_cis_ids: set[str] = set(cis.sis_nodes) | set(cis.propagated_nodes)
-
-    # Build the collapsed set incrementally.
-    children_to_remove: set[str] = set()
-    # Map parent_id → list[child_id]
-    parent_to_children: dict[str, list[str]] = {}
-
-    # Candidate parents = any CIS node (SIS or propagated) that is a parent type.
-    candidate_parents: list[str] = [
-        nid for nid in all_cis_ids
-        if node_meta_by_id.get(nid, {}).get("node_type", "") in _CONTAINS_PARENT_TYPES
-    ]
-
-    for parent_id in candidate_parents:
-        if parent_id not in graph:
-            continue
-
-        # Collect CONTAINS neighbors of this parent in the graph.
-        contains_neighbors: set[str] = set()
-
-        # Forward: parent → child
-        for nbr in graph.successors(parent_id):
-            for ed in graph.get_edge_data(parent_id, nbr, default={}).values():
-                if ed.get("edge_type") == "CONTAINS":
-                    contains_neighbors.add(nbr)
-                    break
-
-        # Reverse: child → parent (edge stored as child→parent or parent→child)
-        for nbr in graph.predecessors(parent_id):
-            for ed in graph.get_edge_data(nbr, parent_id, default={}).values():
-                if ed.get("edge_type") == "CONTAINS":
-                    contains_neighbors.add(nbr)
-                    break
-
-        # Filter: keep only those in CIS propagated_nodes of a child type.
-        collapsible: list[str] = []
-        for nbr_id in contains_neighbors:
-            if nbr_id not in cis.propagated_nodes:
-                continue
-            if node_meta_by_id.get(nbr_id, {}).get("node_type", "") not in _CONTAINS_CHILD_TYPES:
-                continue
-            # Condition 4: the child must have ONLY CONTAINS edges in the full graph.
-            nbr_edge_types: set[str] = set()
-            if nbr_id in graph:
-                for _, _, ed in graph.in_edges(nbr_id, data=True):
-                    nbr_edge_types.add(ed.get("edge_type", ""))
-                for _, _, ed in graph.out_edges(nbr_id, data=True):
-                    nbr_edge_types.add(ed.get("edge_type", ""))
-            # Allow collapse only if CONTAINS is the sole edge type.
-            if nbr_edge_types and nbr_edge_types != {"CONTAINS"}:
-                continue
-            collapsible.append(nbr_id)
-
-        if not collapsible:
-            continue
-
-        children_to_remove.update(collapsible)
-        parent_to_children.setdefault(parent_id, []).extend(collapsible)
-
-    if not children_to_remove:
-        logger.info("[graph_bfs] collapse_contains_subtrees: nothing to collapse")
-        return cis
-
-    # Build new propagated_nodes: remove collapsed children, annotate parents.
-    new_propagated: dict[str, NodeTrace] = {}
-    for node_id, trace in cis.propagated_nodes.items():
-        if node_id in children_to_remove:
-            continue
-        new_trace = trace
-        if node_id in parent_to_children:
-            # Attach collapsed children list (create a new dataclass instance).
-            from dataclasses import replace as _dc_replace
-            new_trace = _dc_replace(
-                trace,
-                collapsed_children=list(parent_to_children[node_id]),
-            )
-        new_propagated[node_id] = new_trace
-
-    # Also annotate SIS parents if any (rare but possible).
-    new_sis: dict[str, NodeTrace] = {}
-    for node_id, trace in cis.sis_nodes.items():
-        new_trace = trace
-        if node_id in parent_to_children:
-            from dataclasses import replace as _dc_replace
-            new_trace = _dc_replace(
-                trace,
-                collapsed_children=list(parent_to_children[node_id]),
-            )
-        new_sis[node_id] = new_trace
-
-    total_collapsed = len(children_to_remove)
-    logger.info(
-        "[graph_bfs] collapse_contains_subtrees: collapsed {} child nodes into {} parents",
-        total_collapsed,
-        len(parent_to_children),
-    )
-    return CISResult(sis_nodes=new_sis, propagated_nodes=new_propagated)
 
 
 # =========================================================================
@@ -449,9 +316,8 @@ _SIBLING_ANCHOR_EXCLUDED_NODE_TYPES: frozenset[str] = frozenset({
 })
 
 #: Node types eligible as sibling candidates within an anchor's file.
-#: InterfaceField is excluded — Step 6.5 already collapses these into their
-#: parent Interface, so promoting them again would re-introduce token bloat
-#: and InterfaceFields are never in GT.
+#: InterfaceField is not listed — it is a retired node type (absent from the
+#: index) and never appears in GT.
 _SIBLING_CANDIDATE_ALLOWED_NODE_TYPES: frozenset[str] = frozenset({
     "Function", "Method", "Interface", "TypeAlias",
     "Enum", "Class", "Variable",

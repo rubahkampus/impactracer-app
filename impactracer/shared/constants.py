@@ -234,6 +234,57 @@ INTO the package node and treating it as a unit-of-impact is incorrect.
 
 
 # =========================================================================
+# Weight-decay propagation prune (Step 6.8) — deterministic flood control.
+# =========================================================================
+#
+# 3. PROPAGATION_DECAY_WEIGHTS — the third flood-defence mechanism. After BFS
+#    + sibling expansion, every propagated node is scored by an edge-weight-
+#    aware decay along its causal chain, then only the top-K are kept (SIS
+#    seeds are never scored or cut). Score:
+#
+#        decay(node) = prod(PROPAGATION_DECAY_WEIGHTS[e] for e in chain)
+#                      / (1 + depth)
+#
+#    Weights encode MEASURED edge productivity on the GT (BFS true-positive
+#    audit): RENDERS is the workhorse (13/17 BFS TPs) -> 1.0; CALLS strong;
+#    IMPORTS the dominant flood source (long dead-reference fan-out) -> low.
+#    Selected over PPR and semantic-cosine by an offline sweep on the V6 pool
+#    (eval results, 2026-06): at equal K it removed ~68% of propagated false
+#    positives while retaining ~70% of propagated true positives — strictly
+#    more surgical than PPR (40% TP kept) or semantic (55%) at the same FP cut.
+#    Distinct from graph_rerank._EDGE_WEIGHTS (the default-OFF PPR rerank);
+#    these are the authoritative decay weights for the always-on Step 6.8.
+
+PROPAGATION_DECAY_WEIGHTS: dict[str, float] = {
+    "RENDERS": 1.0,          # workhorse: 13/17 BFS true positives
+    "CALLS": 0.8,
+    "TYPED_BY": 0.6,
+    "CONTAINS": 0.5,         # in-file sibling arm
+    "DEFINES_METHOD": 0.5,
+    "IMPLEMENTS": 0.5,
+    "INHERITS": 0.5,
+    "DYNAMIC_IMPORT": 0.3,
+    "IMPORTS": 0.3,          # dominant flood source: dead-reference fan-out
+}
+"""Per-edge weights for the Step 6.8 weight-decay propagation prune."""
+
+
+def propagation_decay_score(causal_chain: list[str], depth: int | None = None) -> float:
+    """Edge-weight-aware decay score for a propagated node's causal chain.
+
+    score = prod(weight[edge]) / (1 + depth). Unknown edges default to the
+    IMPORTS weight (0.3) — conservative (treated as weak). Empty chain (a
+    direct/depth-0 admit) scores 1.0. Higher = more likely genuine impact.
+    """
+    if depth is None:
+        depth = len(causal_chain)
+    w = 1.0
+    for et in causal_chain:
+        w *= PROPAGATION_DECAY_WEIGHTS.get(et, 0.3)
+    return w / (1.0 + depth)
+
+
+# =========================================================================
 # Severity mapping
 # =========================================================================
 

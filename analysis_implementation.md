@@ -124,10 +124,28 @@ The online pipeline transforms an Indonesian / English Change Request (CR) into 
                        │
                        ▼
    Step 6.5 ─── CONTAINS Sub-Tree Collapse ──────────────────────────
-                       InterfaceField nodes that reach the CIS via
-                       CONTAINS-only paths are collapsed into their
-                       parent Interface's NodeTrace.collapsed_children.
-                       Reduces token cost without losing information.
+                       Leaf nodes reaching the CIS via CONTAINS-only
+                       paths are collapsed into their parent's
+                       NodeTrace.collapsed_children. Reduces token cost
+                       without losing information.
+                       │
+                       ▼
+   Step 6.7 ─── Sibling EXPANSION (V6+, deterministic) ──────────────
+                       In-file arm of propagation, parallel to BFS.
+                       collect_file_local_siblings injects RAW siblings
+                       of each mechanism-carrying seed as propagated
+                       nodes tagged justification_source=
+                       "sibling_candidate". NO LLM, NO caps. Validated
+                       later at Step 7.5.
+                       │
+                       ▼
+   Step 6.8 ─── Weight-Decay Prune (V6+, deterministic, default-ON) ─
+                       Rank propagated pool (BFS + raw siblings) by
+                       prod(edge_weight)/(1+depth) (RENDERS=1.0 …
+                       IMPORTS=0.3) and keep top-K
+                       (propagation_prune_top_k=20). SIS seeds never
+                       cut. Recall-safe flood control (100% TP kept,
+                       ~32% FP cut at K=20). Detachable.
                        │
                        ▼
    Step 7   ─── LLM #4  validate_propagation (V7) ───────────────────
@@ -146,16 +164,15 @@ The online pipeline transforms an Indonesian / English Change Request (CR) into 
                        re-validated by an LLM-#4-style call.
                        │
                        ▼
-   Step 7.5 ─── Sibling Promotion ────────────────────────────────────
-                       One LLM-#4-style call per file with a qualifying
-                       anchor. Anchor = node with non-empty LLM #2
-                       mechanism_of_impact.
-                       For each anchor's file, enumerate qualified
-                       same-file siblings via CONTAINS and admit up to
-                       4 per file by LLM-#4 sibling-batch verdict.
-                       Admitted siblings become propagated_nodes with
-                       causal_chain=["CONTAINS"] and
-                       justification_source="llm4_sibling".
+   Step 7.5 ─── Sibling VALIDATION (V7, in-file arm of LLM #4) ────────
+                       Distinct LLM-#4 call (parallel to Step 7's
+                       outward-BFS validation) that admits/rejects the
+                       RAW siblings injected at Step 6.7. One call per
+                       file with a qualifying anchor (anchor = node with
+                       non-empty mechanism_of_impact). REJECTED siblings
+                       are DROPPED; admitted ones relabelled
+                       justification_source="llm4_sibling". Caps
+                       (per_file=4, per_cr) apply here, post-validation.
                        │
                        ▼
    Step 8   ─── Context Build ─────────────────────────────────────────
@@ -358,13 +375,15 @@ After BFS, parent nodes whose CONTAINS-only children are in the CIS receive thos
 
 `bfs_propagate` does NOT mutate the shared graph. Sequential ablation runs (V0 → V7 over the same CR) produce identical CIS results given identical inputs. Seeds absent from the graph are recorded as SIS-only terminal nodes (no expansion) but never inserted into the graph.
 
-### 3.10 Step 7.5 — File-local sibling promotion via CONTAINS
+### 3.10 File-local siblings via CONTAINS — split across V6 (expand) / V7 (validate)
 
-After LLM #4 validates the propagated set, `runner.py` invokes `collect_file_local_siblings` (defined in `graph_bfs.py`) to enumerate qualified siblings of every qualifying anchor. **Anchor qualification:** anchor must be in `sis_justifications` AND have a non-empty LLM #2 `mechanism_of_impact`. The function fetches each anchor's `file_path`, then queries `code_nodes` for every qualified (`::`-bearing) symbol in the same files with `node_type ∈ {Function, Method, Interface, TypeAlias, Enum, Class, Variable}`. `InterfaceField` is excluded (already collapsed in Step 6.5 and never appears in GT).
+Sibling promotion is the **in-file arm of propagation** and is split into two halves, mirroring outward BFS (expand at V6, prune at V7):
 
-Per-file candidate cap `settings.sibling_promotion_max_per_file = 12`. The list of `(sibling_id, node_type)` tuples per file is then submitted to `validate_siblings_for_file` (LLM #4 sibling-batch). Per-file admission cap `settings.sibling_admit_max_per_file = 4`; per-CR global cap is disabled (`sibling_admit_max_per_cr = 0`). Admitted siblings are injected into `cis.propagated_nodes` with `causal_chain=["CONTAINS"]`, `depth=1`, `source_seed=<primary anchor>`, `justification_source="llm4_sibling"`.
+**Step 6.7 — Sibling EXPANSION (V6+, gated `enable_bfs`, deterministic, no LLM).** `runner.py` invokes `collect_file_local_siblings` (in `graph_bfs.py`) to enumerate qualified siblings of every qualifying anchor. **Anchor qualification:** in `sis_justifications` OR `trace_mechanisms` (LLM #2 *or* CONFIRMED LLM #3) AND a non-empty `mechanism_of_impact`. Fetches each anchor's `file_path`, queries `code_nodes` for every qualified (`::`-bearing) same-file symbol with `node_type ∈ {Function, Method, Interface, TypeAlias, Enum, Class, Variable}` (`InterfaceField` excluded — retired node type, never in GT). Per-file candidate cap `settings.sibling_promotion_max_per_file = 12`. The candidates are injected **raw, unvalidated** into `cis.propagated_nodes` (`causal_chain=["CONTAINS"]`, `depth=1`, `justification_source="sibling_candidate"`); a candidate→context map (file, anchor, anchor mechanism) is cached for the validator. **No admission caps here.**
 
-Step 7.5 fires only for V7 (`enable_propagation_validation=True`) AND `settings.enable_sibling_promotion=True`. Variants V4–V6 retain the unmodified post-LLM-#4 CIS.
+**Step 7.5 — Sibling VALIDATION (V7, gated `enable_propagation_validation`).** A **distinct** LLM #4 call from Step 7's `validate_propagation` (which prunes outward-BFS nodes and passes `sibling_candidate` nodes through untouched). `validate_siblings_for_file` (LLM #4 sibling-batch) admits/rejects the raw siblings per file using the file's anchors' mechanisms as context. **Rejected candidates are DROPPED** from the CIS; admitted ones are relabelled `justification_source="llm4_sibling"`. Caps apply **here, post-validation**: per-file `settings.sibling_admit_max_per_file = 4`, per-CR `sibling_admit_max_per_cr` (0 = disabled).
+
+Net boundary: V4–V5 have no siblings; V6 carries **raw** siblings (recall↑, precision↓); V7 prunes them. Both gated additionally on `settings.enable_sibling_promotion=True`.
 
 ---
 

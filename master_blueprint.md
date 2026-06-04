@@ -481,7 +481,15 @@ Outputs `CISResult(sis_nodes, propagated_nodes)`. Each `NodeTrace` records `dept
 
 ### Step 6.5 — CONTAINS sub-tree collapse
 
-InterfaceField nodes that reach the CIS via CONTAINS-only paths are collapsed into their parent Interface's `NodeTrace.collapsed_children`. Reduces token cost for LLM #4 and LLM #5 without losing information; each collapsed child is individually re-validated in Step 7.
+Leaf nodes that reach the CIS via CONTAINS-only paths are collapsed into their parent's `NodeTrace.collapsed_children`. Reduces token cost for LLM #4 and LLM #5 without losing information; each collapsed child is individually re-validated in Step 7.
+
+### Step 6.7 — Sibling expansion (V6+, deterministic)
+
+The **in-file arm of propagation**, parallel to outward BFS. `collect_file_local_siblings` injects the CONTAINS-siblings of every mechanism-carrying confirmed seed as **raw, unvalidated** propagated nodes (`justification_source="sibling_candidate"`). No LLM, no admission caps. Pruned by the dedicated LLM #4 sibling validator at Step 7.5. Gated `enable_bfs` AND `settings.enable_sibling_promotion`.
+
+### Step 6.8 — Weight-decay propagation prune (V6+, deterministic, default-on)
+
+Deterministic flood control. Ranks the propagated pool (BFS nodes + raw siblings) by `constants.propagation_decay_score` = `prod(edge_weight)/(1+depth)` (weights encode measured edge productivity — `RENDERS`=1.0 workhorse, `IMPORTS`=0.3 flood source) and keeps only the top-`settings.propagation_prune_top_k` (default **20**). SIS seeds are never scored or cut. Chosen over PPR / semantic-cosine by an offline V6 sweep: at K=20 it retains 100% of propagated true positives while cutting ~32% of propagated false positives — a **recall-safe efficiency layer** that shrinks the pool LLM #4 validates at Step 7, not an accuracy knob. Detachable via `settings.enable_propagation_weight_prune`.
 
 ### Step 7 — Validate propagation (LLM #4, FR-D2)
 
@@ -499,13 +507,13 @@ The prompt shows the causal chain as factual context but forbids edge-type-as-ev
 
 **Fail-CLOSED** at per-node, per-batch, and per-child-batch levels.
 
-### Step 7.5 — Sibling Promotion
+### Step 7.5 — Sibling Validation (V7, in-file arm of LLM #4)
 
-`pipeline/traversal_validator.py::validate_siblings_for_file` driven by `runner.py`. Runs only when `variant_flags.enable_propagation_validation` is True (V7) AND `settings.enable_sibling_promotion = True` (default True).
+`pipeline/traversal_validator.py::validate_siblings_for_file` driven by `runner.py`. A **distinct** LLM #4 call from Step 7's `validate_propagation`: Step 7 prunes outward-BFS nodes, Step 7.5 prunes the raw `sibling_candidate` nodes injected at Step 6.7. Both gate on `variant_flags.enable_propagation_validation` (V7) AND `settings.enable_sibling_promotion = True`. **Rejected siblings are DROPPED**; admitted ones relabelled `justification_source="llm4_sibling"`. Caps apply here, post-validation (per-file `sibling_admit_max_per_file = 4`).
 
 **Purpose:** recover GT entities that live in files where another entity is already in the validated CIS — a documented failure mode where many missed entities lived in files the pipeline had already partially named.
 
-**Anchor selection:** an anchor qualifies for sibling promotion only if it is in `sis_justifications` AND its LLM #2 verdict has a non-empty `mechanism_of_impact` string. The rationale is that an articulate LLM #2 mechanism gives the sibling-batch prompt a real contract surface to reason from; an empty mechanism causes the sibling LLM to generalise by domain analogy and over-admit. Propagated nodes (justified by LLM #4) and trace-resolved nodes (justified by LLM #3) are deliberately excluded — they go through Step 7's existing validation gates but do not anchor lateral expansion.
+**Anchor selection (at Step 6.7 expansion):** an anchor qualifies only if it carries a non-empty `mechanism_of_impact` from **either** LLM #2 (`sis_justifications`) **or** a CONFIRMED LLM #3 trace resolution (`trace_mechanisms`). An articulate mechanism gives the sibling-batch prompt a real contract surface to reason from; an empty mechanism (e.g. a PARTIAL/low-confidence verdict, or CRUD funcs of unrelated domain entities) causes over-admission, so those seeds do not anchor lateral expansion.
 
 **File-local sibling collection** (`graph_bfs.py::collect_file_local_siblings`): for each qualifying anchor, query `code_nodes` for all qualified (`::`-bearing) symbols in the same file with `node_type ∈ {Function, Method, Interface, TypeAlias, Enum, Class, Variable}`. `InterfaceField` is excluded (already collapsed in Step 6.5; never in GT). Per-file candidate cap `settings.sibling_promotion_max_per_file = 12`.
 

@@ -582,7 +582,11 @@ def evaluate(
     # ------------------------------------------------------------------
     # Data-Scientist analysis (Task 6).
     # ------------------------------------------------------------------
-    analysis_md = _calibration_analysis(summary_df, long_df, stat_result)
+    _gt_by_cr = {g.cr_id: g.entity_node_ids() for g in cr_dataset}
+    analysis_md = _calibration_analysis(
+        summary_df, long_df, stat_result,
+        output_dir=output_dir, gt_by_cr=_gt_by_cr,
+    )
     (output_dir / "calibration_analysis.md").write_text(analysis_md, encoding="utf-8")
 
     # ------------------------------------------------------------------
@@ -659,11 +663,20 @@ def _write_mock_gt(target_dir: Path) -> None:
     (target_dir / "cr02_mock.json").write_text(_json.dumps(mock2, indent=2), encoding="utf-8")
 
 
-def _calibration_analysis(summary_df, long_df, stat_result: dict) -> str:
+def _calibration_analysis(
+    summary_df,
+    long_df,
+    stat_result: dict,
+    output_dir=None,
+    gt_by_cr: dict | None = None,
+) -> str:
     """Generate the written Data-Scientist analysis (evaluation deliverable).
 
     Reads the actual numbers from summary_df / long_df / stat_result and
-    answers the three pre-registered questions from the brief.
+    answers the three pre-registered questions from the brief. When
+    ``output_dir`` + ``gt_by_cr`` are supplied, appends a per-PATH propagation
+    contribution section (outward-BFS vs in-file-sibling funnel + attribution)
+    read from the V6/V7 traces.
     """
     import numpy as np
 
@@ -833,6 +846,14 @@ def _calibration_analysis(summary_df, long_df, stat_result: dict) -> str:
     else:
         lines.append(f"- Test status: {stat_result.get('status')}.")
     lines.append("")
+
+    # Per-path propagation contribution (outward-BFS vs in-file-sibling),
+    # read from the V6/V7 traces. No-op for retrieval-only runs (no traces).
+    if output_dir is not None and gt_by_cr:
+        from impactracer.evaluation.report_builder import path_contribution_section
+        section = path_contribution_section(Path(output_dir), gt_by_cr)
+        if section:
+            lines.append(section)
 
     return "\n".join(lines)
 
