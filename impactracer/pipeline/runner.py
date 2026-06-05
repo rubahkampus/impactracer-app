@@ -435,9 +435,7 @@ def run_analysis(
     if (
         variant_cache is not None
         and variant_flags.enable_cross_encoder
-        and variant_flags.enable_score_floor
         and variant_flags.enable_dedup_gate
-        and variant_flags.enable_plausibility_gate
     ):
         _cached_rerank_gated = variant_cache.get_rerank_gated()
         if _cached_rerank_gated is not None:
@@ -458,8 +456,7 @@ def run_analysis(
             ])
 
     # Step 3.6 — Semantic dedup on the full RRF pool, BEFORE rerank + top-K cut
-    # (so doc/code twins don't each consume a seat). enable_score_floor /
-    # enable_plausibility are dead flags (retired gates). Skipped on cache hit.
+    # (so doc/code twins don't each consume a seat). Skipped on cache hit.
     if not _rerank_gated_cache_hit and variant_flags.enable_dedup_gate:
         _pre_dedup = len(candidates)
         candidates = apply_prevalidation_gates(
@@ -467,9 +464,7 @@ def run_analysis(
             cr_interp,
             settings,
             ctx.conn,
-            enable_score_floor=variant_flags.enable_score_floor,
             enable_dedup=variant_flags.enable_dedup_gate,
-            enable_plausibility=variant_flags.enable_plausibility_gate,
         )
         logger.info(
             "[runner] Step 3.6 dedup (pre-rerank, full pool): {} -> {} candidates",
@@ -480,18 +475,10 @@ def run_analysis(
         pass  # Skip the rerank + gates block entirely.
     elif variant_flags.enable_cross_encoder:
         logger.info("[runner] Step 3: Cross-encoder rerank (multi-query max scoring)")
-        # Cross-encoder ALWAYS scores the full pool (not just top_k=
-        # max_admitted_seeds). Three reasons:
-        #   1. step_3_reranked_full trace needs the rank of every candidate,
-        #      not just the top-K. The K-widening diagnostic
-        #      (tools/diagnose_k_widening.py) reads this trace.
-        #   2. The traceability bonus and negative filter (lines below) then
-        #      operate on the full ranked pool; the final truncation at
-        #      candidates[:max_admitted_seeds] is mathematically equivalent
-        #      at the final SIS — the top-15 after sort is the same set
-        #      whether you sort 15 or 200.
-        #   3. Symmetry with the graph-rerank path (default-disabled) which
-        #      already required full-pool scoring.
+        # Cross-encoder ALWAYS scores the full pool (not just top_k): the
+        # step_3_reranked_full trace needs every candidate's rank, and it keeps
+        # symmetry with the (default-off) graph-rerank path that requires it.
+        # Truncating to top-K after a full sort yields the same SIS set.
         # Performance cost: ~1s additional cross-encoder wall time per CR
         # (200 vs 15 candidates on bge-reranker-v2-m3); negligible vs LLM cost.
         _graph_rerank_on = getattr(settings, "enable_graph_rerank", False)
@@ -510,12 +497,6 @@ def run_analysis(
         # context-priority; the score floor that also consumed it is retired).
         for c in candidates:
             c.raw_reranker_score = c.reranker_score
-
-        # RETIRED: traceability bonus (3·b) and negative filter (3·c). The
-        # Stage-3 contribution study found both inert on entity F1
-        # (apply_traceability_bonus / apply_negative_filter remain in
-        # retriever.py for archival only and are no longer called here).
-        # Candidates keep their raw cross-encoder scores unmodified.
 
         candidates.sort(key=lambda c: c.raw_reranker_score, reverse=True)
 
@@ -577,11 +558,7 @@ def run_analysis(
             for c in candidates
         ])
 
-        # RETIRED: named-entry-point pinning (3·e). The Stage-3 contribution
-        # study found it inert on entity F1, so truncation is now a plain
-        # top-K by cross-encoder score with no pin partition and no
-        # named-entry exemptions. (candidates are already sorted desc by
-        # raw_reranker_score above.)
+        # Plain top-K by cross-encoder score (already sorted desc).
         seat_cap = settings.max_admitted_seeds
         candidates = candidates[:seat_cap]
 
@@ -609,23 +586,13 @@ def run_analysis(
                 min_s, max_s,
             )
     else:
-        # V0-V2: no reranker — plain cap at max_admitted_seeds from the RRF
-        # pool order. (Named-entry pinning retired; see 3·e retirement.)
+        # V0-V2: no reranker — plain cap at max_admitted_seeds from RRF order.
         seat_cap = settings.max_admitted_seeds
         candidates = candidates[:seat_cap]
         logger.info("[runner] Step 3: Cross-encoder DISABLED ({})", variant_flags.variant_id)
 
-    # ------------------------------------------------------------------
-    # Post-truncation snapshot (dedup already ran pre-rerank above).
-    #
-    # Step 3.6 dedup now runs ONCE, on the full RRF pool before rerank+cut
-    # (see the Step 3.6 block earlier). Step 3.5 score floor and 3.7
-    # plausibility are RETIRED (dead flags). This block only emits the
-    # admission summary + step_3_gates_survivors trace for the final top-K
-    # and caches it; it no longer re-runs any gate.
-    #
-    # Skipped on cache hit for the post-gate candidate list.
-    # ------------------------------------------------------------------
+    # Post-truncation snapshot: emit the step_3_gates_survivors trace for the
+    # final top-K and cache it (dedup already ran pre-rerank). Skipped on cache hit.
     if not _rerank_gated_cache_hit:
         logger.info(
             "[runner] admission_summary variant={} admitted={} (dedup ran pre-rerank)",
@@ -644,9 +611,7 @@ def run_analysis(
         if (
             variant_cache is not None
             and variant_flags.enable_cross_encoder
-            and variant_flags.enable_score_floor
             and variant_flags.enable_dedup_gate
-            and variant_flags.enable_plausibility_gate
         ):
             variant_cache.put_rerank_gated(candidates)
 

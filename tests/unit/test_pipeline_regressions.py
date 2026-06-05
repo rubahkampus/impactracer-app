@@ -17,7 +17,6 @@ from impactracer.evaluation.metrics import (
 from impactracer.pipeline.retriever import (
     _BM25_STOPWORDS,
     _tokenize_for_bm25,
-    apply_negative_filter,
 )
 from impactracer.shared.constants import (
     EDGE_CONFIG,
@@ -155,66 +154,6 @@ def _candidate(node_id: str, name: str, snippet: str, raw_score: float) -> Candi
         name=name,
         text_snippet=snippet,
     )
-
-
-def test_negative_filter_demotes_substring_match():
-    a = _candidate("a", "loginUser", "user login flow", 4.0)
-    b = _candidate("b", "logoutUser", "user logout flow", 3.0)
-    apply_negative_filter(
-        [a, b], out_of_scope_operations=["logout"], penalty=5.0
-    )
-    assert a.raw_reranker_score == 4.0   # untouched
-    assert b.raw_reranker_score == 3.0 - 5.0  # additive penalty
-    # Sanity: positive logit became negative, demonstrating the demotion is
-    # actually monotonic across sign changes.
-    assert b.raw_reranker_score < a.raw_reranker_score
-
-
-def test_negative_filter_handles_negative_logits_correctly():
-    """Mathematical-correctness check: a multiplicative penalty
-    on a negative logit would PROMOTE; the additive penalty must DEMOTE
-    across the entire real line.
-    """
-    c = _candidate("c", "logout", "user logout", -4.0)
-    apply_negative_filter([c], out_of_scope_operations=["logout"], penalty=5.0)
-    # -4.0 * 0.5 = -2.0 (BUG: promotion). -4.0 - 5.0 = -9.0 (correct: demotion).
-    assert c.raw_reranker_score == -9.0
-
-
-def test_negative_filter_default_penalty_is_softer():
-    """Default penalty hardened from -5.0 to -1.0
-    after CR-02 forensics showed -5.0 obliterated legitimate domain
-    candidates whose names contain a generic OOS substring like 'grace
-    period'.
-    """
-    c = _candidate("c", "logoutHandler", "user logout flow", 3.0)
-    apply_negative_filter([c], out_of_scope_operations=["logout"])
-    assert c.raw_reranker_score == 2.0  # 3.0 - 1.0 default
-
-
-def test_negative_filter_ignores_short_phrases():
-    """Needles shorter than 6 chars are dropped to avoid
-    matching tokens like 'log' or 'add' that appear in many legitimate
-    identifiers.
-    """
-    c = _candidate("c", "loggerHelper", "logger module", 3.0)
-    apply_negative_filter([c], out_of_scope_operations=["log"], penalty=5.0)
-    assert c.raw_reranker_score == 3.0  # untouched — needle "log" is < 6 chars
-
-
-def test_negative_filter_matches_name_only_not_snippet():
-    """Substring matching on text_snippet caused too many
-    false positives. Only the candidate's name is considered.
-    """
-    c = _candidate("c", "loginUser", "user logout subsystem", 3.0)
-    apply_negative_filter([c], out_of_scope_operations=["logout"], penalty=5.0)
-    assert c.raw_reranker_score == 3.0  # name doesn't contain "logout"
-
-
-def test_negative_filter_no_op_when_empty():
-    a = _candidate("a", "loginUser", "user login flow", 4.0)
-    apply_negative_filter([a], out_of_scope_operations=[])
-    assert a.raw_reranker_score == 4.0
 
 
 # ---------------------------------------------------------------------------
