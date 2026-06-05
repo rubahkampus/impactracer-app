@@ -1,6 +1,6 @@
 """SQLite connection factory and schema initialization.
 
-Schema reference: 04_database_schema.md §1.
+Schema reference: index_implementation.md §1 §1.
 """
 
 from __future__ import annotations

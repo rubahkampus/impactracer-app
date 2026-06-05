@@ -1,7 +1,7 @@
 """BGE-Reranker-v2-M3 cross-encoder wrapper (FR-C3).
 
 Returns sigmoid-normalized scores in [0, 1]. Used by the online pipeline
-at Step 3 (after RRF, before pre-validation gates).
+at Step 2.3 (after RRF + semantic dedup, before the top-K cut).
 
 Reference: master_blueprint.md §3.6.
 """

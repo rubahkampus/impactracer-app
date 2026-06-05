@@ -8,8 +8,8 @@ Schemas here are passed as ``response_schema`` to :class:`LLMClient.call`,
 which enforces JSON mode via the OpenRouter API.
 
 References:
-    03_data_models.md - authoritative schema specification
-    07_online_pipeline.md - how each schema is consumed
+    master_blueprint.md §5 (ImpactReport schema) - authoritative schema specification
+    analysis_implementation.md - how each schema is consumed
 """
 
 from __future__ import annotations
@@ -189,8 +189,8 @@ class CRInterpretation(TruncatingModel):
         default_factory=list,
         description=(
             "1 to 4 specific function or component name patterns the CR "
-            "explicitly describes. Used by the plausibility gate to exempt "
-            "named elements from file-density limits."
+            "explicitly describes. Surfaced to the LLM #2 validator prompt "
+            "as named entry points the change targets."
         ),
         max_length=30,
     )
@@ -801,8 +801,8 @@ class Candidate:
     rrf_score: float
     reranker_score: float = 0.0
     # raw_reranker_score: the cross-encoder score BEFORE min-max normalization.
-    # Preserved so the score floor gate operates on absolute quality, not rank
-    # position within the top-15 window (B4).
+    # Preserved as the absolute-quality signal (independent of rank position
+    # within the top-15 window); also drives the anchor-RRF sibling prune.
     raw_reranker_score: float = 0.0
     file_path: str = ""
     file_classification: str | None = None
@@ -820,11 +820,10 @@ class Candidate:
     merged_doc_contexts: list[tuple[str, str]] = field(default_factory=list)
     bm25_score: float = 0.0
     cosine_score: float = 0.0
-    # pinned_by_named_entry: True if this candidate was matched to a token in
-    # cr_interp.named_entry_points during the cross-encoder admission step.
-    # Pinned candidates bypass max_admitted_seeds truncation and all pre-
-    # validation gates (score floor, semantic dedup, plausibility). They
-    # still face LLM #2 validation as the source-of-truth gate.
+    # pinned_by_named_entry: when True, the candidate survives Step 2.2
+    # semantic dedup (a pinned doc chunk is not merged away). Named-entry
+    # pinning at the top-K cut was retired, so this is effectively always
+    # False now; the dedup-survival check is kept for the flag's semantics.
     pinned_by_named_entry: bool = False
     # anchor_boost_applied: True if this candidate matched a substring of any
     # cr_interp.anchor_candidates token during the score-floor admission step.

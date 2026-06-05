@@ -1,6 +1,6 @@
 """ChromaDB persistent client wrapper.
 
-Schema reference: 04_database_schema.md §2. Both collections MUST use
+Schema reference: index_implementation.md §1 §2. Both collections MUST use
 cosine space; the default L2 metric produces incorrect rankings on
 un-normalized BGE-M3 vectors.
 """

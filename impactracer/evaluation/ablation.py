@@ -13,7 +13,7 @@ boundaries (LLM #1, retrieval, rerank+gates, LLM #2, LLM #3, BFS+collapse,
 LLM #4) are then memoised so V_{n+1} resumes from V_n's cached output
 instead of recomputing.
 
-Reference: 09_ablation_harness.md; docs/evaluation_protocol.md.
+Reference: master_blueprint.md §6 (Ablation Harness); master_blueprint.md §7.
 """
 
 from __future__ import annotations

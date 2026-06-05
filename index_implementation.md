@@ -52,7 +52,7 @@ CHUNK_TYPE_RULES = {
 
 **File:** `indexer/code_indexer.py::extract_nodes`
 
-Two-pass TypeScript/TSX parser via `tree-sitter-languages`. Pass 1 defines **10 node types** (`ExternalPackage` + `InterfaceField` retired from the index 2026-06 — see notes below — so **8 are emitted by default**):
+Two-pass TypeScript/TSX parser via `tree-sitter-languages`. Pass 1 emits these node types:
 
 | Node Type | Key details |
 |---|---|
@@ -61,11 +61,11 @@ Two-pass TypeScript/TSX parser via `tree-sitter-languages`. Pass 1 defines **10 
 | `Function` | `function_declaration` OR `lexical_declaration → variable_declarator → arrow_function` |
 | `Method` | `method_definition` inside a class body; qualified id `ClassName.methodName` |
 | `Interface` | `interface_declaration` with optional extends clause |
-| `InterfaceField` | One synthetic child per `property_signature` of an `Interface` or object-shape `TypeAlias`; always degenerate (`embed_text=""`). **Retired 2026-06** — field-level granularity (46% of citrakara nodes, 0% of GT, 0% propagated); not emitted by default. Extraction logic intact; re-enable with `settings.enable_retired_edges`. |
-| `TypeAlias` | `type_alias_declaration`; object-shape aliases also produce InterfaceField children |
+| `TypeAlias` | `type_alias_declaration` |
 | `Enum` | `enum_declaration`; name only |
-| `ExternalPackage` | Synthetic node per unique non-relative, non-`@/` import specifier. **Retired 2026-06** — orphaned once `DEPENDS_ON_EXTERNAL` (its only inbound edge) was retired; no longer emitted by default. Extraction logic intact; re-enable with `settings.enable_retired_edges`. |
 | `Variable` | `lexical_declaration → variable_declarator` whose value is `new_expression`, `object`, `array`, or `call_expression` AND whose name passes the canonical-name heuristic |
+
+The index operates at **file and named-declaration granularity** — the granularity the ground truth and the CIA literature use. Field-level and external-package nodes are deliberately not indexed.
 
 ### 3.1 The `Variable` node type
 
@@ -106,7 +106,7 @@ These tokens directly match the vocabulary that appears in CR descriptions ("exp
 | `src/types/**` | `TYPE_DEFINITION` |
 | else | `None` |
 
-**Degenerate-node rule:** nodes with `len(embed_text) < 50` go to SQLite but NOT ChromaDB. (`InterfaceField` and `ExternalPackage` were both always-degenerate but are retired 2026-06 — no longer indexed by default; non-degenerate short Functions remain the live degenerate case.)
+**Degenerate-node rule:** nodes with `len(embed_text) < 50` go to SQLite but NOT ChromaDB (they remain BFS-reachable via `CONTAINS`). Short Functions are the typical degenerate case.
 
 ### 3.3 Skeletonizer (FR-A6)
 
@@ -130,19 +130,17 @@ A position-tracking cursor preserves inter-token whitespace so the output stays 
 
 ### 3.4 citrakara node breakdown (live)
 
-3,150 total `code_nodes` — distribution:
+1,606 total `code_nodes` — distribution:
 
 | Node type | Count |
 |---|---:|
-| InterfaceField | 1,452 |
 | Function | 771 |
 | File | 331 |
 | Interface | 313 |
 | Variable | 148 |
-| ExternalPackage | 92 |
 | TypeAlias | 39 |
-| Method | 2 |
 | Class | 2 |
+| Method | 2 |
 
 The Variable count (148) is dominated by Mongoose sub-schemas and frozen lookup tables. The Class/Method counts are low because citrakara is a functional/React codebase; the few classes are Mongoose-derived helpers.
 
@@ -165,33 +163,24 @@ Target envelope ~1500 tokens (~6000 chars). A missing skeleton file is tolerated
 
 **File:** `indexer/code_indexer.py::extract_edges`
 
-Emits **14 edge types** (all stored for provenance). Pass 2 runs after Pass 1 has populated `code_nodes` for ALL files in the work set, so cross-file resolution works.
-
-> **Propagation status:** four of these — `PASSES_CALLBACK`, `HOOK_DEPENDS_ON`, `DEPENDS_ON_EXTERNAL`, `CLIENT_API_CALLS` — were **retired from BFS propagation in 2026-06** (found inert across citrakara+nova; see `analysis_implementation.md` §3.1). They are still extracted and stored as shown below, but the online traversal no longer walks them. The indexer is unchanged.
+The schema **defines 9 propagation edge types**; Pass 2 runs after Pass 1 has populated `code_nodes` for ALL files in the work set, so cross-file resolution works.
 
 | Edge type | Source → Target | Mechanism |
 |---|---|---|
 | `IMPORTS` | File → File | Relative + `@/` alias imports |
-| `DEPENDS_ON_EXTERNAL` | File → ExternalPackage | Non-relative, non-alias imports |
 | `CALLS` | Function/Method → Function/Method | Call expressions; resolved via import_map then same-file lookup |
 | `INHERITS` | Class → Class | `extends` clause |
 | `IMPLEMENTS` | Class → Interface | `implements` clause |
 | `DEFINES_METHOD` | Class → Method | Class body walk |
 | `TYPED_BY` | Function/Method → Interface/TypeAlias | Parameter + variable type annotations + Mongoose `model<IFoo>()` generics + repository `ref: 'ModelName'` literals |
 | `RENDERS` | Function → Function | JSX uppercase tag names |
-| `PASSES_CALLBACK` | Function → Function | JSX `onX={importedFn}` (imported named function only) |
-| `HOOK_DEPENDS_ON` | Function → Function/Interface | Hook dep array elements (`useEffect`, `useCallback`, `useMemo`, `useLayoutEffect`) |
-| `FIELDS_ACCESSED` | Function → InterfaceField | `obj.field` where `obj` is import-map resolvable to an Interface |
-| `CLIENT_API_CALLS` | Function → API_ROUTE Function | `fetch('/api/...')` or `axiosClient.<verb>(...)`; positional wildcard route matching |
 | `DYNAMIC_IMPORT` | File/Function → File | `dynamic(() => import('./X'))`, `React.lazy(() => import('./X'))` |
-| `CONTAINS` | File → {Function, Method, Interface, TypeAlias, Class, Enum, InterfaceField, Variable} **and** Interface → InterfaceField | Structural membership |
+| `CONTAINS` | File → {Function, Method, Interface, TypeAlias, Class, Enum, Variable} | Structural membership (the File ↔ named-declaration backbone for BFS) |
 
 ### 4.1 Key implementation choices
 
-- **`@/` path aliases as IMPORTS, not ExternalPackage.** TypeScript's `tsconfig.json` paths map `@/` to `src/`. Treating aliases as `ExternalPackage` created hundreds of ghost edges terminating at dead-end `ext::@/...` nodes and severed the API_ROUTE → service CALLS chain.
-- **`CLIENT_API_CALLS` precedes the builtins guard.** `fetch` is on the builtin blacklist (it would otherwise be silently skipped) but must still trigger this rule.
-- **`resolve_api_route` uses positional wildcard matching.** Disk segment `[paramName]` matches any single URL segment regardless of param name (`[id]`, `[proposalId]`, `[listingId]` all match the same wildcard slot). The most-specific match (fewest wildcards) wins. Without this, routes with non-`[id]` param names produced 0 CLIENT_API_CALLS edges.
-- **Inline JSX handlers walk their body.** `onX={() => doFn()}` triggers `_walk_body` on the arrow-function body, emitting transitive CALLS to imported functions called within. Preserves reachability even when PASSES_CALLBACK = 0.
+- **`@/` path aliases resolve to IMPORTS.** TypeScript's `tsconfig.json` paths map `@/` to `src/`. Resolving aliases to their real `src/` File targets (rather than treating them as opaque external specifiers) keeps the API_ROUTE → service CALLS chain intact.
+- **Inline JSX handlers walk their body.** `onX={() => doFn()}` triggers `_walk_body` on the arrow-function body, emitting transitive CALLS to imported functions called within, preserving reachability through event handlers.
 - **Middleware synthetic CALLS.** `middleware.ts` has no static imports to route handlers; `_emit_middleware_edges` parses `export const config = { matcher: [...] }` and emits CALLS from the middleware function to every matched API_ROUTE node.
 - **Mongoose TYPED_BY.** `_emit_mongoose_edges` extracts `model<IFoo>()` generic arguments (model → interface) and repository-side `ref: 'ModelName'` literals (repo → schema variable).
 - **File → Variable CONTAINS.** Added when Variable became a node_type. Without it, `Variable` nodes are BFS-unreachable.
@@ -220,21 +209,19 @@ null, undefined, never, object, symbol, bigint
 
 ### 4.4 citrakara edge breakdown (live)
 
-8,179 total `structural_edges`:
+4,318 total `structural_edges`:
 
 | Edge type | Count |
 |---|---:|
-| CONTAINS | 4,179 |
 | CALLS | 1,382 |
+| CONTAINS | 1,275 |
 | IMPORTS | 926 |
-| DEPENDS_ON_EXTERNAL | 847 |
 | TYPED_BY | 532 |
 | RENDERS | 194 |
-| CLIENT_API_CALLS | 110 |
 | DYNAMIC_IMPORT | 7 |
 | DEFINES_METHOD | 2 |
 
-`INHERITS`, `IMPLEMENTS`, `FIELDS_ACCESSED`, `PASSES_CALLBACK`, `HOOK_DEPENDS_ON` count 0 on the current citrakara corpus (consistent with a functional/React codebase without class hierarchies and with most callbacks defined inline). Retirement status (2026-06): `PASSES_CALLBACK`/`HOOK_DEPENDS_ON` retired (empty + framework-specific); `FIELDS_ACCESSED` retired because its only target — the `InterfaceField` node type — is retired (so it can never fire); `INHERITS`/`IMPLEMENTS` are **retained** as TypeScript-general class/interface-granularity contract edges that simply have no instances in this corpus.
+`INHERITS` and `IMPLEMENTS` count 0 on this corpus — they are TypeScript-general class/interface-granularity contract edges that simply have no instances in a functional/React codebase without class hierarchies. They remain defined for generality.
 
 ---
 
@@ -244,7 +231,7 @@ null, undefined, never, object, symbol, bigint
 
 - **Embedder.** `BGEM3FlagModel("BAAI/bge-m3", use_fp16=True)`. Output dim 1024. Batch size 32, max length 512. Returns dense vectors only (`return_dense=True`; sparse and ColBERT off). FlagEmbedding is imported lazily inside `__init__` so unit tests can monkeypatch the model.
 - **Degenerate exclusion.** Nodes with `len(embed_text) < 50` are not embedded and not sent to ChromaDB. They remain BFS-reachable via `CONTAINS` edges.
-- **Reranker.** `FlagReranker("BAAI/bge-reranker-v2-m3", use_fp16=True)`. Sigmoid-normalised scores in `[0, 1]`. Used in the **online pipeline Step 3 only**, never invoked by the offline indexer. Supports multi-query MAX aggregation: each candidate is scored against every LLM #1 `search_query` and the max is kept.
+- **Reranker.** `FlagReranker("BAAI/bge-reranker-v2-m3", use_fp16=True)`. Sigmoid-normalised scores in `[0, 1]`. Used in the **online pipeline Step 2.3 only**, never invoked by the offline indexer. Supports multi-query MAX aggregation: each candidate is scored against every LLM #1 `search_query` and the max is kept.
 
 GPU acceleration: when CUDA is available, both models run FP16 on the GPU; on CPU-only systems they fall back to FP32 transparently.
 
@@ -290,7 +277,7 @@ The reverse pass is the critical defence against squeeze-out: forward-only top-K
 
 ### 6.4 citrakara result (live)
 
-5,890 doc → code candidate pairs persisted. Score distribution typical: min = 0.40, mean ≈ 0.54, max ≈ 0.75, std ≈ 0.06. Roughly 84 % of doc chunks (79 of 94 embedded) end up with at least one above-threshold code neighbour.
+5,890 doc → code candidate pairs persisted. Score distribution typical: min = 0.40, mean ≈ 0.54, max ≈ 0.75, std ≈ 0.06. 93 of 94 embedded doc chunks (98.9 %) end up with at least one above-threshold code neighbour.
 
 ---
 
@@ -338,9 +325,9 @@ The blueprint specifies the design contract; the indexer needed targeted operati
 
 | # | Delta | Location | Rationale |
 |---|---|---|---|
-| D1 | **CONTAINS is the 14th edge type** | `sqlite_client.py` CHECK, `constants.py::EDGE_CONFIG`, `code_indexer.py::_emit_contains_edges` | File ↔ symbol membrane was opaque to BFS. Without CONTAINS, BFS from a seed file could not reach its child symbols and vice versa. Schema change was the only defensible fix. |
-| D2 | **`Variable` is the 10th node type** | `models.py::NodeType`, `sqlite_client.py` CHECK, `code_indexer.py::_build_variable_node`, `constants.py::NODE_TYPE_MAX_FAN_IN` | `const FOO = new Schema(...)` / `const TEMPLATES = [...]` / `const config = { ... }` were invisible. Mongoose schemas alone are a primary CR target on this codebase; without Variable, three of every five calibration GT entities in those files were unreachable. |
-| D3 | **`@/` path alias resolution as IMPORTS** | `code_indexer.py::_build_import_map` | TypeScript `@/` maps to `src/` via `tsconfig.json`. Treating aliases as ExternalPackage created ~744 ghost edges and severed the full API_ROUTE → service CALLS chain. |
+| D1 | **CONTAINS edge type** | `sqlite_client.py` CHECK, `constants.py::EDGE_CONFIG`, `code_indexer.py::_emit_contains_edges` | File ↔ symbol membrane was opaque to BFS. Without CONTAINS, BFS from a seed file could not reach its child symbols and vice versa. Schema change was the only defensible fix. |
+| D2 | **`Variable` node type** | `models.py::NodeType`, `sqlite_client.py` CHECK, `code_indexer.py::_build_variable_node`, `constants.py::NODE_TYPE_MAX_FAN_IN` | `const FOO = new Schema(...)` / `const TEMPLATES = [...]` / `const config = { ... }` were invisible. Mongoose schemas alone are a primary CR target on this codebase; without Variable, three of every five calibration GT entities in those files were unreachable. |
+| D3 | **`@/` path alias resolution as IMPORTS** | `code_indexer.py::_build_import_map` | TypeScript `@/` maps to `src/` via `tsconfig.json`. Resolving aliases to their real `src/` File targets (rather than as opaque external specifiers) avoids hundreds of dead-end ghost edges and keeps the API_ROUTE → service CALLS chain intact. |
 | D4 | **`CHUNK_TYPE_RULES` evaluation order: NFR before FR** | `doc_indexer.py` | "non-functional requirement" contains "functional requirement" as substring. FR evaluated first misclassified NFR titles. |
 | D5 | **File classification: `src/hooks/` → UI_COMPONENT** | `code_indexer.py::_make_classifier` | React hooks are client-side UI logic. Classifying as UTILITY would misroute them in LAYER_COMPAT (FR / Design layers should resolve hooks). |
 | D6 | **File classification: `src/lib/stores/` → UI_COMPONENT** | `code_indexer.py::_make_classifier` | Zustand stores manage client-side session state. Not backend logic. |
@@ -348,11 +335,9 @@ The blueprint specifies the design contract; the indexer needed targeted operati
 | D8 | **`min_traceability_similarity = 0.40`** | `shared/config.py` | BGE-M3 cross-lingual cosine distribution peaks at 0.75 with mean ≈ 0.45. Any threshold above 0.50 retains < 2 % of all pairs. 0.40 is calibrated to the actual distribution. |
 | D9 | **LAYER_COMPAT recalibrated** | `shared/constants.py` | Initial matrix assigned `UTILITY × General = 0.50`, suppressing the most traceable business-logic nodes. Recalibrated to `UTILITY × FR = 1.0`, `UTILITY × Design = 1.0`, `TYPE_DEFINITION × Design = 1.0`. |
 | D10 | **Dual-direction top-K in traceability** | `indexer/traceability.py` | Forward-only top-K silently stranded NFR / General chunks. Reverse pass guarantees every chunk with a weighted score ≥ threshold gets at least K candidates. |
-| D11 | **Positional wildcard route matching** | `code_indexer.py::resolve_api_route` | Blueprint assumed normalised `[id]` segments. citrakara uses named params (`[proposalId]`, `[listingId]`). String equality on normalised paths left those routes with 0 `CLIENT_API_CALLS` edges. |
-| D12 | **InterfaceField CONTAINS edges** | `code_indexer.py::_emit_contains_edges` | InterfaceField nodes had 0 incoming edges, making them BFS dead-ends. `File → InterfaceField` plus `Interface → InterfaceField` CONTAINS edges added. |
-| D13 | **Middleware synthetic CALLS edges** | `code_indexer.py::_emit_middleware_edges` | `middleware.ts` has no static imports to route handlers. Without synthetic edges, BFS from middleware reached only 2 nodes. |
-| D14 | **Mongoose TYPED_BY edges** | `code_indexer.py::_emit_mongoose_edges` | `model<IFoo>()` calls and `ref: 'ModelName'` literals establish schema-to-interface relationships invisible in normal TYPED_BY extraction. |
-| D15 | **Project skeleton write step + two-stage anchor-primed LLM #1** | `indexer/project_skeleton.py`, `indexer/runner.py` (write step), `pipeline/interpreter.py` (`CRIntent`/`CRAnchors`), `models.py::CRInterpretation.anchor_candidates`, `config.py` (`project_skeleton_path`, `anchor_priming_boost`, `anchor_priming_bm25_boost`) | The original blueprint specified a single-call LLM #1 with no project grounding. Default behaviour is now two-stage: a context-free intent call, then an anchor call grounded in the cached skeleton, which lets the model propose real host/sibling symbols (`anchor_candidates`) used as soft retrieval boosts. The indexer must emit the skeleton for this to work. Toggled off via `with_two_stage_interpret` / `with_anchor_priming` for the methodology ablation. |
+| D11 | **Middleware synthetic CALLS edges** | `code_indexer.py::_emit_middleware_edges` | `middleware.ts` has no static imports to route handlers. Without synthetic edges, BFS from middleware reached only 2 nodes. |
+| D12 | **Mongoose TYPED_BY edges** | `code_indexer.py::_emit_mongoose_edges` | `model<IFoo>()` calls and `ref: 'ModelName'` literals establish schema-to-interface relationships invisible in normal TYPED_BY extraction. |
+| D13 | **Project skeleton write step + two-stage anchor-primed LLM #1** | `indexer/project_skeleton.py`, `indexer/runner.py` (write step), `pipeline/interpreter.py` (`CRIntent`/`CRAnchors`), `models.py::CRInterpretation.anchor_candidates`, `config.py` (`project_skeleton_path`, `anchor_priming_bm25_boost`) | The original blueprint specified a single-call LLM #1 with no project grounding. Default behaviour is now two-stage: a context-free intent call, then an anchor call grounded in the cached skeleton, which lets the model propose real host/sibling symbols (`anchor_candidates`) used as a soft BM25 retrieval boost. The indexer must emit the skeleton for this to work. Toggled off via `with_two_stage_interpret` / `with_anchor_priming` for the methodology ablation. |
 
 ---
 
@@ -367,9 +352,8 @@ UTILITY ≈ 1 / TYPE_DEFINITION = 0 and a larger unclassified set as a result.
 
 | Metric | Value |
 |---|---:|
-| `code_nodes` (total) | 3,150 |
-| non-degenerate (embedded) | ~1,150 |
-| `structural_edges` (total) | 8,179 |
+| `code_nodes` (total) | 1,606 |
+| `structural_edges` (total) | 4,318 |
 | `doc_chunks` (embedded) | 94 |
 | `doc_code_candidates` (pairs) | 5,890 |
 | `project_skeleton.txt` | ~1,500 tokens (4 sections) |

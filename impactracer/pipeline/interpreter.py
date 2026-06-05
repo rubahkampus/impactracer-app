@@ -17,7 +17,7 @@ agnostic. The two-stage mode requires a non-empty ``project_skeleton``
 argument; the runner passes ``None`` when no skeleton was found on
 disk, in which case this module degrades gracefully to single-stage.
 
-Reference: 07_online_pipeline.md §3, evaluation_protocol.md
+Reference: analysis_implementation.md §3, master_blueprint.md §7
 Amendments 1 and 3.
 """
 

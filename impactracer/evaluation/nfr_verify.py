@@ -1,6 +1,6 @@
 """NFR-01..NFR-05 verification procedures.
 
-Reference: 10_evaluation_protocol.md §5.
+Reference: master_blueprint.md §7 (Evaluation Protocol) §5.
 """
 
 from __future__ import annotations

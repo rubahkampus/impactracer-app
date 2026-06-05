@@ -38,7 +38,7 @@ Pydantic ``model_validate_json``. Pipeline code can mutate the
 returned candidates in place (rerank score normalisation, pinning)
 without corrupting the cache for later variants.
 
-Reference: ``docs/evaluation_protocol.md``.
+Reference: ``master_blueprint.md §7``.
 """
 
 from __future__ import annotations

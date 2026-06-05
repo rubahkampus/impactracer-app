@@ -1,35 +1,27 @@
-"""V0..V7 variant definitions (authoritative; supersedes legacy B0-S2).
+"""V0..V7 variant definitions (authoritative).
 
 Canonical 8-variant additive chain:
 
-    V0   BM25 only          + dedup + plausibility  + blind resolution
-    V1   Dense only         + dedup + plausibility  + blind resolution
-    V2   V1 + RRF fusion    + dedup + plausibility  + blind resolution
-    V3   V2 + cross-encoder rerank + score floor    + blind resolution.
-         V3 is the deterministic-filtering peak (no LLM gating). Only V3
-         enables the score floor because that gate consumes a cross-encoder
-         raw_reranker_score that V0-V2 do not produce.
-    V4   V3 + LLM #2 SIS validation         + blind resolution
-    V5   V4 + LLM #3 trace validation       + validated SIS
-    V6   V5 + BFS propagation               + blind propagation
-    V7   V6 + LLM #4 propagation validation + full system
+    V0   BM25-only retrieval                 + blind resolution
+    V1   + dense retrieval                   + blind resolution
+    V2   + RRF fusion                        + blind resolution
+    V3   + cross-encoder rerank              + blind resolution
+         V3 is the deterministic-filtering peak (no LLM gating).
+    V4   + LLM #2 SIS validation             + blind resolution
+    V5   + LLM #3 trace validation           + validated SIS
+    V6   + deterministic propagation (both arms, pruned, unvalidated)
+    V7   + LLM #4 propagation validation (both arms) + full system
 
-Universal-gates convention: 3.6 dedup and 3.7 plausibility run on every
-variant V0-V7. The V0->V2 -> V3 boundary used to be "no gates" -> "all
-gates"; it is now "no score floor" -> "score floor". The dedup and
-plausibility filters are unconditional retrieval-level hygiene, not a
-deterministic-vs-LLM ablation distinction.
-
-The diagnostic-only V3.5 (gates without LLM #2) is folded into V3, and
-V6.5 (BFS + LLM #4, no LLM #5 synthesis) is folded into V7 since LLM #5
-has been demoted to an always-on aggregator with no selection role.
+Semantic dedup (Step 2.2) runs on every variant V0-V7 as the single
+pre-validation gate; it is unconditional retrieval-level hygiene, not an
+ablation boundary. No score floor or plausibility gate exists (both retired).
 
 The dataclass keeps its full boolean flag surface so ad-hoc isolation
 variants can still be hand-constructed for diagnostic purposes; only the
 canonical 8 enumerated in ``ALL_VARIANTS`` are exercised by the ablation
 matrix.
 
-Reference: 09_ablation_harness.md.
+Reference: master_blueprint.md §6 (Ablation Harness).
 """
 
 from __future__ import annotations
@@ -50,14 +42,14 @@ class VariantFlags:
     enable_rrf: bool
     enable_cross_encoder: bool
 
-    # Deterministic gates (FR-C4)
-    enable_dedup_gate: bool
+    # Deterministic gate (FR-C4)
+    enable_dedup_gate: bool               # Step 2.2 semantic dedup
 
     # Validation LLMs
-    enable_sis_validation: bool           # LLM #2
-    enable_trace_validation: bool         # LLM #3
-    enable_bfs: bool                      # Step 6
-    enable_propagation_validation: bool   # LLM #4
+    enable_sis_validation: bool           # LLM #2 (Step 3.1)
+    enable_trace_validation: bool         # LLM #3 (Step 4.2)
+    enable_bfs: bool                      # Phase 5 deterministic (both arms)
+    enable_propagation_validation: bool   # LLM #4 (Steps 5.3a / 5.3b)
 
     # Always-on
     run_llm_1: bool = True                # Interpret

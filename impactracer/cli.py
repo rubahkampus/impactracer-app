@@ -168,7 +168,7 @@ def analyze(
     """Analyze a CR against the indexed repository and emit an ImpactReport.
 
     Invokes the nine-step online pipeline. V7 runs all five LLM invocations;
-    lower variants disable subsets as specified in 09_ablation_harness.md.
+    lower variants disable subsets as specified in master_blueprint.md §6 (Ablation Harness).
 
     Implementation entry point:
         impactracer.pipeline.runner.run_analysis(cr_text, settings, flags)

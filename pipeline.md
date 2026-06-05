@@ -140,28 +140,21 @@ has a single responsibility.
 [shared/constants.py](impactracer/shared/constants.py) — system-wide constants. The
 canonical numbers live here:
 
-- `RRF_PATH_WEIGHTS` — **RETIRED 2026-06, archival.** Formerly per `ChangeType`
-  (ADDITION/MODIFICATION/DELETION) relative weights of the four retrieval paths;
-  ablation found it inert (moves only V2, pooled Δ−0.0019, inside noise). RRF now
-  fuses unweighted; table kept for reversibility (`settings.uniform_rrf_weights`).
 - `LAYER_COMPAT` — a `FileClassification × ChunkType` matrix used by the
   traceability matrix to weight doc↔code similarity (e.g. an `API_ROUTE` file
   weighted highly against an `FR` doc chunk, less against a `Design` chunk).
-- `EDGE_CONFIG` — **the 9 propagated edge types** with their BFS direction and
+- `EDGE_CONFIG` — **the 9 propagation edge types** with their BFS direction and
   depth: `CALLS` (reverse, depth 2), `INHERITS`/`IMPLEMENTS`/`TYPED_BY` (reverse,
   depth 3), `DEFINES_METHOD` (forward, depth 1),
-  `IMPORTS`/`RENDERS`/`DYNAMIC_IMPORT`/`CONTAINS` (reverse, depth 1).
-  (14 edge types are extracted/stored; **5** are retired 2026-06 and live in
-  `RETIRED_PROPAGATION_EDGES`: `PASSES_CALLBACK`, `HOOK_DEPENDS_ON`,
-  `DEPENDS_ON_EXTERNAL`, `CLIENT_API_CALLS` (inert), and `FIELDS_ACCESSED`
-  (its only target, the `InterfaceField` node type, is itself retired —
-  `RETIRED_NODE_TYPES`). Re-admittable via `settings.enable_retired_edges`.)
+  `IMPORTS`/`RENDERS`/`DYNAMIC_IMPORT`/`CONTAINS` (reverse, depth 1). RRF fuses
+  the retrieval paths unweighted.
 - `NODE_TYPE_MAX_FAN_IN` — per node-type in-degree caps used to drop hub
   nodes from BFS (e.g. a `Function` with > 50 callers is excluded as noise).
-- `SEVERITY_BY_EDGE_CHAIN_TYPE` — the rules that map a causal chain to one of
-  three Indonesian severity labels (`Tinggi`, `Menengah`, `Rendah`).
-- `BUILTIN_PATTERNS`, `PRIMITIVE_TYPES`, `HOOK_NAMES` — blacklists / whitelists
-  used by the AST passes.
+- `propagation_decay_score` — the `prod(edge_weight)/(1+depth)` ranking used by
+  the outward-arm weight-decay prune (Step 5.2a).
+- `severity_for_chain` — maps a causal chain to one of three Indonesian
+  severity labels (`Tinggi`, `Menengah`, `Rendah`) by its last edge.
+- `BUILTIN_PATTERNS`, `PRIMITIVE_TYPES` — blacklists used by the AST passes.
 
 [shared/config.py](impactracer/shared/config.py) — the `Settings` class
 (pydantic-settings, reads `.env`). The most thesis-relevant fields:
@@ -174,22 +167,19 @@ canonical numbers live here:
 - `enable_raw_cr_dense_pass=True`, `raw_cr_dense_top_k=60` — the multilingual
   bridge that lets an Indonesian CR retrieve English-identifier code without
   going through LLM #1's English search queries (NFR-04).
-- `enable_traceability_pool_seeding=True` — promotes the offline doc↔code
-  similarity matrix from a +0.1 rerank bonus into an actual pool-seeding signal.
-- `enable_sibling_promotion=True`, `sibling_admit_max_per_file=4` — recovers
-  GT entities that share a file with a confirmed seed but were not retrieved
-  themselves (Step 7.5).
+- `enable_traceability_pool_seeding=True` — seeds the offline doc↔code
+  similarity matrix into the retrieval pool as a pool-membership signal.
+- `enable_sibling_promotion=True`, `propagation_prune_top_k=20`,
+  `sibling_prune_top_k=10`, `sibling_admit_max_per_file=4` — the two propagation
+  arms' deterministic prune ceilings (5.2a / 5.2b) and the in-file LLM admission
+  cap (5.3b). Sibling promotion recovers GT entities that share a file with a
+  confirmed seed but were not retrieved themselves.
 - `anchor_priming_bm25_boost=1.5` — the soft retrieval signal applied to
   LLM #1's `anchor_candidates` (multiplicative on the synthetic BM25 anchor
-  query). Gated by `VariantFlags.anchor_priming` (default on). (Note:
-  `anchor_priming_boost=0.10` formerly fed the additive score-floor comparison;
-  with the score floor retired that additive path is inert — only the BM25
-  multiplicative boost remains active.)
+  query). Gated by `VariantFlags.anchor_priming` (default on).
 - `project_skeleton_path="./data/project_skeleton.txt"` — the cached codebase
-  summary the two-stage interpreter's `interpret_anchors` stage consumes; a
+  summary the two-stage interpreter's `interpret_anchors` (Step 1.2) consumes; a
   missing file silently degrades LLM #1 to single-stage.
-- `enable_graph_rerank=False` — ships off by default because it cannot win
-  both file F1 and entity F1 on the target codebase's calibration set.
 - `bfs_global_max_depth=3`, `bfs_high_conf_top_n=5` — BFS knobs.
 - `alpha=0.05` — the single pre-registered Wilcoxon threshold.
 
@@ -231,8 +221,8 @@ Eight steps end-to-end:
 3. **Pass 1** ([indexer/code_indexer.py](impactracer/indexer/code_indexer.py)::`extract_nodes()`):
    Tree-Sitter AST walk emits the node types
    (File, Class, Function, Method, Interface, TypeAlias, Enum, Variable;
-   `ExternalPackage` and `InterfaceField` are defined but retired from the
-   index 2026-06 — `RETIRED_NODE_TYPES` — so **8 are emitted by default**).
+   the schema defines **8 node types** at file and named-declaration
+   granularity; the live citrakara index emits 7 of them).
    Function/Method bodies are passed through
    [indexer/skeletonizer.py](impactracer/indexer/skeletonizer.py)::`skeletonize_node()`
    to produce a token-budgeted abstraction (preserves calls/returns/throws,
@@ -244,11 +234,10 @@ Eight steps end-to-end:
    "non-functional requirement".
 5. **Pass 2** ([indexer/code_indexer.py](impactracer/indexer/code_indexer.py)::`extract_edges()`):
    second AST walk, this time with the global `known_node_ids` set in hand,
-   emits the 14 edge types (CALLS, INHERITS, IMPLEMENTS, TYPED_BY,
-   FIELDS_ACCESSED, DEFINES_METHOD, HOOK_DEPENDS_ON, PASSES_CALLBACK, IMPORTS,
-   RENDERS, DEPENDS_ON_EXTERNAL, CLIENT_API_CALLS, DYNAMIC_IMPORT, CONTAINS).
-   Special handling for Mongoose `model<T>(...)`, React hooks, JSX callback
-   handlers, and `middleware.ts` config.matcher.
+   emits the 9 edge types (CALLS, INHERITS, IMPLEMENTS, TYPED_BY,
+   DEFINES_METHOD, IMPORTS, RENDERS, DYNAMIC_IMPORT, CONTAINS).
+   Special handling for Mongoose `model<T>(...)`, JSX, and `middleware.ts`
+   config.matcher.
 6. Embedding ([indexer/embedder.py](impactracer/indexer/embedder.py)::`Embedder.embed_batch()`):
    BGE-M3 in FP16 on CUDA when available; emits 1024-dim float32 vectors.
 7. Traceability ([indexer/traceability.py](impactracer/indexer/traceability.py)::`compute_and_store()`):
@@ -269,13 +258,13 @@ human-readable quality report: orphan analysis, degree
 distribution, traceability score distribution, semantic benchmark sanity
 checks, FK integrity checks, ChromaDB↔SQLite alignment.
 
-On the current `citrakara` index: **333 files, 3,150 nodes, 8,179 edges.**
+On the current `citrakara` index: **333 files, 1,606 nodes, 4,318 edges.**
 
 ### 2.4 `pipeline/` — online analysis
 
 Entrypoint: [pipeline/runner.py](impactracer/pipeline/runner.py)::`run_analysis()`.
-Steps 0–9 (5 LLM calls in V7). Layer 3 walks each step in detail; this
-section just inventories the modules.
+Step 0 bootstrap + Phases 1–6 (5 LLM calls in V7). Layer 3 walks each phase in
+detail; this section just inventories the modules.
 
 - [pipeline/llm_client.py](impactracer/pipeline/llm_client.py) — **the only file that
   imports `httpx` or `openai`**. All five LLM calls go through
@@ -286,48 +275,48 @@ section just inventories the modules.
   `config_hash` = SHA-256 of (model + temperature + seed). The
   audit log is the artefact the thesis cites for reproducibility.
 - [pipeline/interpreter.py](impactracer/pipeline/interpreter.py) — LLM #1
-  (Step 1). Returns `CRInterpretation`. Two execution modes sharing one return
+  (Phase 1). Returns `CRInterpretation`. Two execution modes sharing one return
   shape: `interpret_cr_two_stage` (default — `interpret_intent` + skeleton-
   grounded `interpret_anchors`) and `interpret_cr_single_stage` (fallback).
   Anchor priming and two-stage are toggled by `VariantFlags.anchor_priming` /
   `.two_stage_interpret` (both default True).
-- [pipeline/retriever.py](impactracer/pipeline/retriever.py) — Step 2 hybrid
+- [pipeline/retriever.py](impactracer/pipeline/retriever.py) — Step 2.1 hybrid
   search. Four RRF paths × N queries, plus the raw-CR multilingual pass and
   traceability-matrix pool seeding. Also hosts
-  `rerank_multi_query` which is invoked at Step 3 with `top_k=len(candidates)`
+  `rerank_multi_query` which is invoked at Step 2.3 with `top_k=len(candidates)`
   — the cross-encoder scores the entire 200-candidate pool, not a
   15-pre-truncated subset.
 - [pipeline/prevalidation_filter.py](impactracer/pipeline/prevalidation_filter.py) —
-  pre-validation gates: 3.5 score floor + 3.7 plausibility RETIRED (inert /
-  net-negative); 3.6 semantic dedup RETAINED (see §3.4).
+  Step 2.2 semantic dedup is the only pre-validation gate (see §3.4).
 - [pipeline/validator.py](impactracer/pipeline/validator.py) — LLM #2
-  (Step 4). Per-batch fail-closed: if a batch's structured-output validation
+  (Step 3.1). Per-batch fail-closed: if a batch's structured-output validation
   fails after retries, the entire batch is dropped and `degraded_run` flips
   to `True`.
-- [pipeline/seed_resolver.py](impactracer/pipeline/seed_resolver.py) — Step 5.
+- [pipeline/seed_resolver.py](impactracer/pipeline/seed_resolver.py) — Step 4.1.
   Deterministic SQLite lookup: each doc-chunk SIS entry is resolved to its
   top-K code candidates via `doc_code_candidates`.
 - [pipeline/traceability_validator.py](impactracer/pipeline/traceability_validator.py) —
-  LLM #3 (Step 5b). Same fail-closed contract as LLM #2; rejected pairs are
+  LLM #3 (Step 4.2). Same fail-closed contract as LLM #2; rejected pairs are
   marked low-confidence (which then caps their BFS reverse-CALLS depth to 1).
-- [pipeline/graph_bfs.py](impactracer/pipeline/graph_bfs.py) — Step 6 BFS over
-  the `networkx.MultiDiGraph` built from `structural_edges`. Honours
-  `EDGE_CONFIG` direction/depth, applies `NODE_TYPE_MAX_FAN_IN` caps, hub-node
-  depth-1 cap (degree > 20), `UTILITY_FILE_CALLS_DEPTH_CAP=1`, and excludes
-  `ExternalPackage` from the propagated set. Step 6.5 collapses CONTAINS-only
-  subtrees into their parents to keep the LLM #4 prompt token-budgeted.
+- [pipeline/graph_bfs.py](impactracer/pipeline/graph_bfs.py) — the **Propagator**
+  (Phase 5): outward BFS (Step 5.1a) over the `networkx.MultiDiGraph` built from
+  `structural_edges`, honouring `EDGE_CONFIG` direction/depth, `NODE_TYPE_MAX_FAN_IN`
+  caps, the hub-node depth-1 cap (degree > 20), and `UTILITY_FILE_CALLS_DEPTH_CAP=1`;
+  plus the in-file sibling expansion (Step 5.1b). Each arm is then deterministically
+  pruned (5.2a weight-decay / 5.2b anchor-RRF) before validation.
 - [pipeline/traversal_validator.py](impactracer/pipeline/traversal_validator.py) —
-  LLM #4 (Step 7). De-blinded: the prompt shows the causal chain as
-  "factual context only" and explicitly tells the LLM that edge presence is
-  not impact. Also hosts the Step 7.5 sibling-promotion batch mode.
-- [pipeline/context_builder.py](impactracer/pipeline/context_builder.py) — Step 8.
+  LLM #4. De-blinded: the prompt shows the causal chain as "factual context only"
+  and explicitly tells the LLM that edge presence is not impact. Runs as two
+  distinct calls: `validate_propagation` (Step 5.3a, outward arm) and
+  `validate_siblings_for_file` (Step 5.3b, in-file arm).
+- [pipeline/context_builder.py](impactracer/pipeline/context_builder.py) — Step 6.1.
   Fetches backlinks (doc chunks that specify each code node, via
   `doc_code_candidates` in reverse), source snippets (preferring
   `internal_logic_abstraction` for Function/Method), and assembles a
   token-budgeted Markdown prompt within `llm_max_context_tokens` (default
   100k).
 - [pipeline/synthesizer.py](impactracer/pipeline/synthesizer.py) — LLM #5
-  (Step 9) **as an aggregator only**. Produces `executive_summary`,
+  (Step 6.2) **as an aggregator only**. Produces `executive_summary`,
   `documentation_conflicts`, and per-file `file_justifications`. The entity
   array is built deterministically *outside* the LLM call by
   `build_deterministic_impacted_entities()` from the CIS and the validator
@@ -411,8 +400,8 @@ but not yet shipped.")
 
 When `impactracer index <repo>` finished, the following exist on disk:
 
-- **SQLite**: 3,150 rows in `code_nodes` (one per File / Function / Class /
-  ...), 8,179 rows in `structural_edges`, ~10,000 rows in
+- **SQLite**: 1,606 rows in `code_nodes` (one per File / Function / Class /
+  ...), 4,318 rows in `structural_edges`, ~10,000 rows in
   `doc_code_candidates` (precomputed doc↔code similarity pairs), plus
   metadata tables.
 - **ChromaDB**: `code_units` has BGE-M3 embeddings for every non-degenerate
@@ -429,7 +418,7 @@ A `trace_sink: dict` is passed through so each step writes its intermediate
 result for `impact_report_full.json` — every claim in the final report can be
 traced back to its origin step.
 
-### 3.1 Step 1 — Interpret CR (LLM #1)
+### 3.1 Phase 1 — Interpret CR (LLM #1)
 
 [pipeline/interpreter.py](impactracer/pipeline/interpreter.py)::`interpret_cr(cr_text, llm_client, variant_flags, project_skeleton)`
 returns a `CRInterpretation`:
@@ -479,20 +468,17 @@ is identical, so the rest of the pipeline is mode-agnostic.
 symbols the CR does *not* name. They are grounded in the project skeleton's
 naming conventions so they match the real index (camelCase vs PascalCase).
 Crucially they are a **soft** signal — a synthetic BM25 boost
-(`anchor_priming_bm25_boost=1.5`) at step 2 (the additive score-floor boost
-`anchor_priming_boost=0.10` is now inert, score floor retired) — *not* a hard
-pin. A hallucinated anchor cannot force a candidate through. (Named-entry
-pinning, which formerly hard-pinned, is also retired.)
+(`anchor_priming_bm25_boost=1.5`) at retrieval — *not* a hard pin. A
+hallucinated anchor cannot force a candidate through; it still faces LLM #2.
 
 **Fail-closed**: if `is_actionable=False`, the runner returns a minimal
 rejection `ImpactReport` immediately (no retrieval, no LLM #2-5).
 
 **Why this step matters for retrieval**: the `search_queries` are
 **always English**, even for Indonesian CRs, because the cross-encoder is
-strongest on English identifiers. (`out_of_scope_operations` was formerly
-applied as a negative filter at step 2, but that filter is now retired/inert.)
+strongest on English identifiers.
 
-### 3.2 Step 2 — RRF Hybrid Search
+### 3.2 Step 2.1 — RRF Hybrid Search
 
 [pipeline/retriever.py](impactracer/pipeline/retriever.py)::`hybrid_search(cr_interp, ctx, settings, cr_text)`.
 
@@ -516,78 +502,45 @@ Each list has `top_k_per_query = 30` entries. Plus:
 - **Traceability-matrix pool seeding**: for every doc chunk that survived
   `dense_doc`, look up the top-K linked code nodes in
   `doc_code_candidates` (above `traceability_seed_min_score=0.40`) and inject
-  them into the RRF pool with a synthetic rank of 5. Promotes the offline
-  similarity precomputation from a rerank +0.1 bonus to a true seeding signal.
+  them into the RRF pool with a synthetic rank of 5. Lets the offline
+  similarity precomputation introduce GT-correct candidates no search query names.
 
 All ranked lists fuse via **Reciprocal Rank Fusion**, unweighted. RRF score
 per candidate per path: `1 / (rrf_k + rank)` (default `rrf_k=60`), summed across
-paths with equal weight. (The change-type-adaptive `RRF_PATH_WEIGHTS[change_type]`
-table was retired 2026-06 — ablation found it inert; kept archival, restore via
-`settings.uniform_rrf_weights=False`.)
-
-Post-fusion bonuses / penalties — **RETIRED** (traceability bonus 3·b and
-negative filter 3·c found inert in the Stage-3 contribution study; functions
-kept archival-only, no longer applied):
-
-- ~~**+0.1** for any code candidate linked via `doc_code_candidates` to a doc
-  chunk that survived `dense_doc` (traceability bonus).~~
-- ~~**−1.0** ("hard demotion") for any candidate whose `name` or `text_snippet`
-  contains a phrase from `out_of_scope_operations` (≥ 6 chars).~~
+paths with equal weight.
 
 Output: `list[Candidate]` with up to **200** entries (`top_k_rrf_pool=200`).
 Each `Candidate` carries `rrf_score`, `collection`, `node_type`, `file_path`,
 `file_classification`, `text_snippet`, and `merged_doc_ids`/`merged_doc_contexts`
-populated later by the dedup gate.
+populated by the dedup step.
 
-### 3.3 Step 3 — Cross-Encoder Rerank (Full-Pool)
+### 3.3 Step 2.2 — Semantic Dedup (the only pre-validation gate)
+
+[pipeline/prevalidation_filter.py](impactracer/pipeline/prevalidation_filter.py)::`semantic_dedup`.
+Runs **post-retrieval, on the full pool, before the cross-encoder rerank and the
+top-K cut** (ordering: RRF → dedup → rerank → cut). For every doc-chunk candidate
+whose top-1 code resolution is already in the pool, **merge** the doc into the
+code candidate (append `merged_doc_ids` / `merged_doc_contexts`) and **drop** the
+doc. Running on the full pool before truncation frees top-K seats a doc/code
+duplicate pair would otherwise both occupy: **+1/+2/+2 GT on V0/V1/V2** over 24
+CRs, inert on V3. The LLM #2 validator (V4+) then sees the code node plus the
+business-context paragraphs that justify it, in one prompt.
+
+> A 42-CR two-repo contribution study ([stage3_contribution_study.md](stage3_contribution_study.md)) found a former score floor, plausibility/density gate, traceability bonus, and out-of-scope negative filter all inert or net-negative on entity F1; they were removed. Semantic dedup is the one pre-validation mechanism that survives.
+
+### 3.4 Step 2.3 — Cross-Encoder Rerank (Full-Pool)
 
 [pipeline/retriever.py](impactracer/pipeline/retriever.py)::`rerank_multi_query()` is
-invoked with `top_k=len(candidates)` — **every one of the 200 candidates is
+invoked with `top_k=len(candidates)` — **every candidate in the deduped pool is
 scored by the BGE cross-encoder against every search query**, max-pooled per
-candidate. Cost: ~1 s extra wall-time. Benefit: V4/V5/V6 entity F1 lifts on
-the calibration set.
+candidate. Each candidate gets `raw_reranker_score` (absolute logit) and
+`reranker_score` (min-max normalised to [0, 1] for sorting). Diagnostic traces:
+`step_3_reranked_full` (the full ranked pool) and `step_3_reranked` (the top-15
+after the Step 2.4 cut).
 
-Each candidate gets:
+> The cross-encoder is a pre-registered ablation stage (V2→V3) and is **net-negative** on entity F1 (−0.038 citrakara, −0.003 nova) — see the Q&A in Appendix A. It is reported as a finding and retained in the ladder, not removed post-hoc.
 
-- `raw_reranker_score` — absolute logit, preserved for the score-floor gate.
-- `reranker_score` — min-max normalised to [0, 1], used for relative sorting.
-
-Two diagnostic traces are emitted:
-
-- `step_3_reranked_full` — the entire 200-candidate ranked list.
-- `step_3_reranked` — the top-15 after `max_admitted_seeds` truncation.
-
-Optional **graph-aware label-propagation rerank** (default off,
-`enable_graph_rerank=False`) blends a structural-graph-walk score into
-the rerank. Shipped off because the calibration trade-off doesn't
-generalise on the target codebase.
-
-### 3.4 Step 3.6 — Pre-Validation Dedup (3.5 + 3.7 retired)
-
-[pipeline/prevalidation_filter.py](impactracer/pipeline/prevalidation_filter.py).
-A 42-CR two-repo contribution study
-([stage3_contribution_study.md](stage3_contribution_study.md)) found none of the
-three gates improves entity F1: 3.5 score floor strictly inert, 3.7
-plausibility/density **net-negative**, and 3.6 dedup F1-inert **when run after the
-top-K cut** — but reordering 3.6 to run BEFORE the cut (2026-06) makes it
-recover wasted seats (see below).
-
-- **3.5 score floor + 3.7 plausibility — RETIRED.** `step_3_5_score_filter` /
-  `step_3_7_plausibility_and_affinity` archival-only, never invoked;
-  `enable_score_floor` / `enable_plausibility_gate` are dead flags.
-- **3.6 semantic dedup — RETAINED and REORDERED** (`enable_dedup_gate`) to run
-  **post-retrieval, before the cross-encoder rerank and the top-K cut**
-  (ordering: RRF → dedup → rerank → cut). For every doc-chunk candidate whose
-  top-1 code resolution is already in the pool, **merge** the doc into the code
-  candidate (append `merged_doc_ids` / `merged_doc_contexts`) and **drop** the doc.
-  Running on the full pool before truncation frees top-K seats a doc/code
-  duplicate pair would otherwise both occupy: **+1/+2/+2 GT on V0/V1/V2** over 24
-  CRs, **inert on V3** (live A/B around the reranker: identical 40/85). The LLM #2
-  validator (V4+) then sees the code node plus the business-context paragraphs
-  that justify it, in one prompt; also prevents the same impact being
-  double-counted as both a doc and a code candidate.
-
-### 3.5 Step 4 — Validate SIS (LLM #2, fail-closed)
+### 3.5 Step 3.1 — Validate SIS (LLM #2, fail-closed)
 
 [pipeline/validator.py](impactracer/pipeline/validator.py)::`validate_sis_candidates_batched(cr_interp, candidates, llm_client)`.
 
@@ -620,7 +573,7 @@ The `mechanism_of_impact` and `justification` strings are saved in the
 runner's `justifications` map, keyed by `node_id`. **These strings become the
 entity-level justification in the final report, verbatim.**
 
-### 3.6 Step 5 + 5b — Resolve and Validate Traces
+### 3.6 Steps 4.1 + 4.2 — Resolve and Validate Traces
 
 [pipeline/seed_resolver.py](impactracer/pipeline/seed_resolver.py)::`resolve_doc_to_code()`
 walks the confirmed SIS:
@@ -641,8 +594,8 @@ neighbour clouds), or `REJECTED` (no structural change relationship; dropped
 **even if the doc link is valid**).
 
 A CONFIRMED seed's mechanism is what makes a doc-resolved seed anchor-eligible
-for Step 7.5 sibling promotion, on par with a direct LLM-#2 code seed; PARTIAL
-seeds are not anchor-eligible. The function returns
+for in-file sibling expansion (Step 5.1b), on par with a direct LLM-#2 code seed;
+PARTIAL seeds are not anchor-eligible. The function returns
 `(seeds, low_conf, justifications, mechanisms, degraded)`.
 
 Same fail-closed contract: missing verdicts → REJECTED; batch errors → drop
@@ -651,12 +604,11 @@ batch and set `degraded_run = True`.
 The validated code seeds are merged with `direct_code_seeds` to form the
 final code-seed set that enters BFS.
 
-### 3.7 Step 6 — BFS Propagation
+### 3.7 Phase 5 — Propagation (the Propagator, two parallel arms)
 
-[pipeline/graph_bfs.py](impactracer/pipeline/graph_bfs.py)::`bfs_propagate()`.
+[pipeline/graph_bfs.py](impactracer/pipeline/graph_bfs.py)::`propagate()`. Two arms — outward dependency BFS and in-file siblings — each expand → deterministic-prune → LLM-validate.
 
-Starting from each code seed (depth 0), traverse the NetworkX MultiDiGraph
-edge by edge, with five separate gating rules:
+**Step 5.1a — Outward BFS expansion.** Starting from each code seed (depth 0), traverse the NetworkX MultiDiGraph edge by edge, with five gating rules:
 
 1. **Per-edge-type direction and depth** from `EDGE_CONFIG`. Example:
    `CALLS` is reverse, max-depth 2 — given seed `cancelOrder`, walk callers
@@ -665,80 +617,33 @@ edge by edge, with five separate gating rules:
    traversal capped to depth 1.
 3. **Low-confidence-seed cap**: if the seed was a PARTIAL trace verdict from
    LLM #3, all `LOW_CONF_CAPPED_EDGES` (= `{CALLS}`) are capped to depth 1.
-4. **Utility-file cap**: if the seed lives in a `UTILITY` file
-   (`lib/format-date.ts`, etc.), reverse-CALLS is capped to `UTILITY_FILE_CALLS_DEPTH_CAP=1`.
-   Utility functions are called from everywhere; deeper reverse-CALLS produces
-   a guaranteed flood across unrelated features.
+4. **Utility-file cap**: if the seed lives in a `UTILITY` file, reverse-CALLS is
+   capped to `UTILITY_FILE_CALLS_DEPTH_CAP=1`. Utility functions are called from
+   everywhere; deeper reverse-CALLS produces a flood across unrelated features.
 5. **Per-node-type fan-in cap**: any node whose in-degree exceeds
    `NODE_TYPE_MAX_FAN_IN[node_type]` is dropped from propagation (not from
    seeds). Default caps: 50 for Function/Method/Class; 100 for type
-   definitions; 200 for files; **0 for `ExternalPackage`** (never propagate
-   *into* third-party packages).
+   definitions; 200 for files; 80 for Variable.
 
-Output: a `CISResult` (Change Impact Set) with two dicts:
+Output: a `CISResult` (Change Impact Set) with `sis_nodes` (depth-0 seeds, `NodeTrace(depth=0, causal_chain=[])`) and `propagated_nodes` (every BFS-discovered node, `NodeTrace(depth, causal_chain, path, source_seed)`).
 
-- `sis_nodes` — the depth-0 seeds, with `NodeTrace(depth=0, causal_chain=[])`.
-- `propagated_nodes` — every BFS-discovered node, with
-  `NodeTrace(depth, causal_chain, path, source_seed)`.
+**Step 5.1b — In-file sibling expansion** (V6+, deterministic, no LLM): the in-file arm. `collect_file_local_siblings()` injects the CONTAINS-siblings of every mechanism-carrying confirmed seed as **raw, unvalidated** propagated nodes tagged `justification_source="sibling_candidate"`. **Anchor gate:** only seeds with a non-empty `mechanism_of_impact` (from LLM #2 *or* a CONFIRMED LLM #3 resolution) qualify, preventing over-admission from weakly-justified seeds.
 
-**Step 6.5 — Graph collapse**: `collapse_contains_subtrees()` walks
-`propagated_nodes` and merges any node whose only inbound edge is `CONTAINS`
-into its parent's `collapsed_children` list. Reduces the prompt token count
-for LLM #4 without losing information.
+**Step 5.2a — Weight-decay prune** (outward arm, V6+, deterministic, default-on): ranks the BFS pool by `constants.propagation_decay_score` (`prod(edge_weight)/(1+depth)`, weights = measured edge productivity — `RENDERS`=1.0 workhorse, `IMPORTS`=0.3 flood source) and keeps the top-`propagation_prune_top_k` (default **20**). SIS seeds are never scored or cut. Chosen over PPR / semantic-cosine by an offline V6 sweep (retains 100% of propagated true positives at K=20 while cutting ~32% of false positives — a recall-safe efficiency layer, not an accuracy knob).
 
-**Step 6.7 — Sibling expansion** (V6+, deterministic, no LLM): the in-file arm
-of propagation, parallel to outward BFS. `collect_file_local_siblings()` injects
-the CONTAINS-siblings of every mechanism-carrying confirmed seed as **raw,
-unvalidated** propagated nodes tagged `justification_source="sibling_candidate"`.
-They are pruned later by the dedicated LLM #4 sibling validator at Step 7.5.
+**Step 5.2b — Anchor-RRF prune** (in-file arm, V6+, deterministic): ranks the raw siblings by anchor-RRF and keeps the top-`sibling_prune_top_k`. The anchor-RRF scorer beat PPR / semantic / flat in an offline bake-off.
 
-**Step 6.8 — Weight-decay propagation prune** (V6+, deterministic, no LLM,
-default-on via `settings.enable_propagation_weight_prune`): ranks the propagated
-pool (BFS nodes + raw siblings) by an edge-weight-aware decay
-(`constants.propagation_decay_score`: `prod(edge_weight)/(1+depth)`, weights =
-measured edge productivity — `RENDERS`=1.0 workhorse, `IMPORTS`=0.3 flood source)
-and keeps only the top-`propagation_prune_top_k` (default **20**). SIS seeds are
-never scored or cut. Chosen over PPR / semantic-cosine by an offline V6 sweep
-(retains 100% of propagated true positives at K=20 while cutting ~32% of
-propagated false positives — a recall-safe efficiency layer that shrinks the
-pool LLM #4 must validate at Step 7, not an accuracy knob). Detachable.
+### 3.8 Steps 5.3a / 5.3b — Validate Propagation (LLM #4, two calls)
 
-### 3.8 Step 7 — Validate Propagation (LLM #4)
+[pipeline/traversal_validator.py](impactracer/pipeline/traversal_validator.py). LLM #4 runs as two distinct calls — one per arm.
 
-[pipeline/traversal_validator.py](impactracer/pipeline/traversal_validator.py)::`validate_propagation()`.
+**Step 5.3a — `validate_propagation()`** (outward arm). For each BFS-propagated node (in batches of 5), the prompt shows the CR intent + `change_type`, the node's source / skeletonized abstraction, and the **causal chain** — the ordered edge types from seed to node — **explicitly framed as "factual context only"**: edge presence is not impact; the LLM must justify on contract breakage, behavioural anomaly, or downstream type-mismatch. Verdict: `semantically_impacted: bool` + `justification: str (≤400 chars)`. Depth-1 IMPLEMENTS / DEFINES_METHOD are auto-exempt; sibling candidates pass through to 5.3b. Fail-closed: missing verdict → DROP, batch error → DROP batch + `degraded_run = True`.
 
-For each propagated node (in batches of 5), the prompt shows:
+**Step 5.3b — `validate_siblings_for_file()`** (in-file arm). A **distinct** LLM #4 call that admits/rejects the pruned `sibling_candidate` nodes, using each file's anchors' `mechanism_of_impact` as context. **Rejected candidates are dropped**; admitted ones are relabelled `llm4_sibling`. Cap `sibling_admit_max_per_file=4`. Splitting expansion (5.1b, V6) from validation (5.3b, V7) makes the V6→V7 boundary prune **both** arms via two parallel LLM #4 calls.
 
-- The CR intent and `change_type`.
-- The propagated node's source code or skeletonized abstraction.
-- The **causal chain** — the ordered list of edge types from seed to this
-  node — **explicitly framed as "factual context only"**. The prompt states
-  that edge presence is not impact; the LLM must justify the node on contract
-  breakage, behavioural anomaly, or downstream type-mismatch.
+### 3.9 Phase 6 — Assemble (Context build + LLM #5, aggregator only)
 
-Verdict: `semantically_impacted: bool` + `justification: str (≤400 chars)`.
-
-Same fail-closed contract: missing verdict → DROP, batch error → DROP batch
-+ set `degraded_run = True`.
-
-**Step 7.5 — Sibling validation** (the in-file arm of LLM #4, parallel to the
-outward-BFS validation in Step 7): a **distinct** LLM #4 invocation that
-admits/rejects the raw `sibling_candidate` nodes injected at Step 6.7, using
-each file's anchors' `mechanism_of_impact` as context. **Rejected candidates are
-dropped** from the CIS; admitted ones are relabelled `llm4_sibling`. Caps
-(`sibling_admit_max_per_file=4`, `sibling_admit_max_per_cr`) apply here,
-post-validation. Splitting expansion (6.7, V6) from validation (7.5, V7) makes
-the V6→V7 boundary prune **both** propagation arms (outward + in-file) via two
-parallel LLM #4 calls, instead of bundling sibling collection-and-validation
-into one monolithic V6 step.
-
-**Step 7.5 Anchor Gate**: only seeds where LLM #2 produced a non-empty
-`mechanism_of_impact` qualify as sibling-promotion anchors. Prevents
-over-confident propagation from weakly-justified seeds.
-
-### 3.9 Step 8 + 9 — Synthesize (LLM #5, aggregator only)
-
-**Step 8** ([pipeline/context_builder.py](impactracer/pipeline/context_builder.py)::`build_context()`):
+**Step 6.1** ([pipeline/context_builder.py](impactracer/pipeline/context_builder.py)::`build_context()`):
 
 - Fetch **backlinks** — for each CIS code node, the doc chunks that specify it
   (top-K from `doc_code_candidates` in reverse).
@@ -748,7 +653,7 @@ over-confident propagation from weakly-justified seeds.
   with causal chains and validator justifications + backlinks + snippets,
   truncated to fit `llm_max_context_tokens=100000`.
 
-**Step 9** ([pipeline/synthesizer.py](impactracer/pipeline/synthesizer.py)::`synthesize_summary()`):
+**Step 6.2** ([pipeline/synthesizer.py](impactracer/pipeline/synthesizer.py)::`synthesize_summary()`):
 LLM #5 returns an `LLMSynthesisOutput`:
 
 ```python
@@ -792,9 +697,6 @@ this function pulls the justification from the right source:
 - Behavioural chains (CALLS, INHERITS, DEFINES_METHOD) → **Menengah**.
 - Module-composition chains (IMPORTS, RENDERS, DYNAMIC_IMPORT, CONTAINS)
   → **Rendah**.
-  (The retired edges PASSES_CALLBACK/HOOK_DEPENDS_ON/DEPENDS_ON_EXTERNAL/
-  CLIENT_API_CALLS no longer appear in chains; if re-enabled they default to
-  Rendah.)
 - Empty chain (SIS seed at depth 0) → **Tinggi** (the change site itself).
 
 The `impacted_files` array is built deterministically from the distinct
@@ -916,27 +818,29 @@ fails for the documented LLM-stochasticity reason.
 
 ## Appendix A — Defence Q&A (Likely Committee Questions)
 
-**Q: Why is the headline F1 only ~0.25 — that's pretty low.**
-A: Two reasons. (1) The metric is **unbounded set-level F1** computed against
-the *full unpruned CIS*. There is no top-K truncation that would artificially
-boost precision. F1@10 would report higher numbers but would not be
-defensible — a 372-node graph flood and a focused 50-node result both
-truncate to the same top-10. (2) Pool-attrition diagnostics showed that
-**55.9% of GT entities are not in the RRF pool at any rank** on the
-calibration set;
-this is a retrieval-recall ceiling, not a validator failure. The validators
-have correctly identified what's there to identify. The thesis claims an
-architecture for CIA over full-stack TypeScript codebases; the *delta*
-between variants is the thesis contribution, not an absolute F1 number.
+**Q: The headline F1 (V7 ≈ 0.41) isn't high — isn't that a weak result?**
+A: Two reasons it's the honest number, and why it isn't the point. (1) The metric
+is **unbounded set-level F1** computed against the *full unpruned CIS*. There is
+no top-K truncation that would artificially boost precision. F1@10 would report
+higher numbers but would not be defensible — a 372-node graph flood and a focused
+50-node result both truncate to the same top-10. (2) Structural recall is capped
+≈0.62 by graph reach — some GT lives behind edges the static graph cannot follow
+(e.g. UI components that fetch via API + Zod parse rather than importing schemas);
+this is a retrieval/structural ceiling, not a validator failure. The thesis is an
+**honest negative result**: the contribution is the pre-registered ablation and
+its findings (LLM validation drives the gains; the deterministic apparatus has a
+ceiling), not an absolute F1 number.
 
-**Q: Why does V5 beat V7 on entity F1 in the calibration draw?**
-A: n=5 is below the pre-registered `MIN_PAIRED_N=15` for the Wilcoxon test,
-so any V5/V7 ordering is descriptive only. The observed
-δ ≈ 0.04 is within the documented LLM-stochasticity band: two runs of the
-same V7 cell can differ by similar magnitudes because Gemini Flash Lite at
-temperature 0 is not bit-deterministic on structured outputs. The
-pre-registered hypothesis test runs on the 20-CR evaluation set and reports
-its own decision.
+**Q: V7 only edges V5 (0.411 vs 0.404) — is that difference real?**
+A: The margin is small and within the documented LLM-stochasticity band: two
+runs of the same V7 cell can differ by ±0.01–0.02 because Gemini Flash Lite at
+temperature 0 is not bit-deterministic on structured outputs. That is exactly
+why we do not lean on the point estimate — the **pre-registered** one-sided
+paired Wilcoxon test (V7 vs V5, entity `f1_set`, `MIN_PAIRED_N=15`) is the
+decision procedure, and the honest-negative posture holds regardless of which
+side of the noise the point estimate lands on. The propagation round is reported
+as having paid off directionally (V7 > V5 at zero recall cost), not as a
+significant win.
 
 **Q: Why not use F1@K, MAP, MRR — standard IR metrics?**
 A: This is not an IR problem; it is a *set-prediction* problem. The output is
@@ -946,14 +850,26 @@ the user never sees. R-Precision is reported as a *descriptive*
 cross-comparison with prior CIA literature, but the hypothesis test runs on
 set-F1.
 
-**Q: Why was CONTAINS added as the 14th edge type after the blueprint specified
-13?**
+**Q: Why was CONTAINS added as an edge type after the blueprint's initial design?**
 A: The File↔symbol membrane was breaking full-stack BFS — code seeds could
 not reach their containing file or vice versa. Adding `CONTAINS` (forward
-File→symbol, reverse for BFS) was the minimum-bloat fix. The canonical
-edge-type count rose from 13 to 14, and both source-of-truth documents
-(`master_blueprint.md`, `analysis_implementation.md`) reflect the new
-edge type.
+File→symbol, reverse for BFS) was the minimum-bloat fix. It is now one of the
+9 canonical propagation edge types and is the most structurally load-bearing
+(it carries the file↔declaration backbone).
+
+**Q: The cross-encoder reranker is RAG best practice — why does it hurt here (V3 net-negative)?**
+A: It IS standard practice for topical-QA retrieval, where "relevance" means
+topical aboutness. Change-impact's target is different — *structural necessity*
+(which entities must I edit), not topicality. The ablation finds the
+cross-encoder net-negative on entity F1 (−0.038 citrakara, −0.003 nova). The
+mechanism is corpus-specific: `text_snippet` is `docstring + signature`, and
+this corpus is JSDoc-sparse (≈26% overall, 34% on GT-relevant types), so for
+the majority of candidates the reranker scores a bare signature and ranks on
+documentation-*presence* rather than structural necessity — and, running before
+the top-K cut, it can evict structurally-required-but-topically-dull seeds. We
+report this as a pre-registered ablation finding and **keep V3 in the ladder**
+(removing it post-hoc would compromise the pre-registration); we do **not**
+generalize it to "cross-encoders are bad."
 
 **Q: Why is LLM #5 not allowed to write entity-level justifications? Isn't that
 under-using a powerful model?**

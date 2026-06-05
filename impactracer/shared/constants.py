@@ -1,8 +1,8 @@
 """System-wide constants: edge config, weight tables, builtin blacklists.
 
 References:
-    03_data_models.md §10-15
-    05_ast_edge_catalog.md for edge rationale
+    master_blueprint.md §5 (ImpactReport schema) §10-15
+    index_implementation.md §4 (edge rationale) for edge rationale
 """
 
 from __future__ import annotations

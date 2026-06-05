@@ -3,7 +3,7 @@
 All parameters are locked pre-evaluation; values here represent the
 defaults. Overrides come from environment variables (see .env.template).
 
-Reference: 11_configuration_and_cli.md §1.
+Reference: master_blueprint.md §8 (Configuration) §1.
 """
 
 from __future__ import annotations
