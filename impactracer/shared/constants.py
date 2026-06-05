@@ -11,7 +11,7 @@ from impactracer.shared.models import ChangeType, Severity
 
 
 # =========================================================================
-# RRF path weights (indexed by change_type) — RETIRED 2026-06, ARCHIVAL.
+# RRF path weights (indexed by change_type) — RETIRED, ARCHIVAL.
 # =========================================================================
 # Ablated over all 24 citrakara CRs (variance-free, V0-V3) and found inert:
 # moves only V2 on 8/24 CRs, pooled delta -0.0019 (inside noise), washed out
@@ -96,7 +96,7 @@ EDGE_CONFIG: dict[str, dict] = {
     "INHERITS":            {"direction": "reverse", "max_depth": 3},
     "IMPLEMENTS":          {"direction": "reverse", "max_depth": 3},
     "TYPED_BY":            {"direction": "reverse", "max_depth": 3},
-    # FIELDS_ACCESSED retired 2026-06 together with the InterfaceField node type
+    # FIELDS_ACCESSED retired together with the InterfaceField node type
     # (its only possible target). See RETIRED_PROPAGATION_EDGES / RETIRED_NODE_TYPES.
     # Structural ownership (forward direction)
     # Containment relation, not a semantic propagation pathway. Depth-1 only.
@@ -106,7 +106,7 @@ EDGE_CONFIG: dict[str, dict] = {
     "RENDERS":             {"direction": "reverse", "max_depth": 1},
     "DYNAMIC_IMPORT":      {"direction": "reverse", "max_depth": 1},
     # --- RETIRED EDGES (propagation-inert; see RETIRED_PROPAGATION_EDGES) -----
-    # Empirically retired 2026-06 as methodological deadweight: across the
+    # Empirically retired as methodological deadweight: across the
     # citrakara+nova corpora these contributed ZERO true positives to BFS.
     # Two are empty in every index (PASSES_CALLBACK, HOOK_DEPENDS_ON); two are
     # populated but structurally propagation-dead (CLIENT_API_CALLS never sat on
@@ -125,7 +125,7 @@ EDGE_CONFIG: dict[str, dict] = {
     "CONTAINS":            {"direction": "reverse", "max_depth": 1},
 }
 
-#: Edge types retired from BFS propagation (2026-06). Inert by construction —
+#: Edge types retired from BFS propagation. Inert by construction —
 #: zero true-positive contribution on citrakara+nova. Kept here so the
 #: extractor/schema stay honest and the decision is reversible: passing
 #: ``settings.enable_retired_edges=True`` merges these back into the active
@@ -144,7 +144,7 @@ RETIRED_PROPAGATION_EDGES: dict[str, dict] = {
     "FIELDS_ACCESSED":     {"direction": "reverse", "max_depth": 2},
 }
 
-#: Node types retired from the index (2026-06). Defined in the schema/enum for
+#: Node types retired from the index. Defined in the schema/enum for
 #: reversibility but NOT emitted by default. ``ExternalPackage`` was orphaned
 #: once DEPENDS_ON_EXTERNAL (its only inbound edge) was retired. ``InterfaceField``
 #: is field-level granularity: 46% of indexed nodes on citrakara yet 0% of
@@ -214,9 +214,9 @@ NODE_TYPE_MAX_FAN_IN: dict[str, int] = {
     "Interface": 100,        # Type definitions are referenced widely; allow more.
     "TypeAlias": 100,
     "Enum": 100,
-    "InterfaceField": 200,   # RETIRED node type (2026-06); retained for reversibility.
+    "InterfaceField": 200,   # RETIRED node type; retained for reversibility.
     "File": 200,             # File nodes act as containers; high fan-in is expected.
-    "ExternalPackage": 0,    # RETIRED node type (2026-06); never propagated regardless.
+    "ExternalPackage": 0,    # RETIRED node type; never propagated regardless.
     "Variable": 80,          # Top-level const declarations (schemas, constant data).
 }
 """Max in-degree before a node is excluded from BFS propagation (not seeds)."""
@@ -249,7 +249,7 @@ INTO the package node and treating it as a unit-of-impact is incorrect.
 #    audit): RENDERS is the workhorse (13/17 BFS TPs) -> 1.0; CALLS strong;
 #    IMPORTS the dominant flood source (long dead-reference fan-out) -> low.
 #    Selected over PPR and semantic-cosine by an offline sweep on the V6 pool
-#    (eval results, 2026-06): at equal K it removed ~68% of propagated false
+#    (eval results,): at equal K it removed ~68% of propagated false
 #    positives while retaining ~70% of propagated true positives — strictly
 #    more surgical than PPR (40% TP kept) or semantic (55%) at the same FP cut.
 #    Distinct from graph_rerank._EDGE_WEIGHTS (the default-OFF PPR rerank);
@@ -292,7 +292,7 @@ SEVERITY_BY_EDGE_CHAIN_TYPE: dict[str, Severity] = {
     # Contract dependency chain -> HIGH
     "IMPLEMENTS": "Tinggi",
     "TYPED_BY": "Tinggi",
-    # FIELDS_ACCESSED retired 2026-06 (InterfaceField target retired); if
+    # FIELDS_ACCESSED retired (InterfaceField target retired); if
     # re-enabled, severity_for_chain falls back to "Rendah".
     # Behavioral dependency chain -> MEDIUM
     "CALLS": "Menengah",

@@ -344,7 +344,7 @@ def run_indexing(
         # Clear file_hashes so every file re-enters the work set, AND wipe the
         # derived SQLite tables. Pass 1 uses INSERT OR REPLACE and Pass 2 uses
         # INSERT OR IGNORE — both keyed on identity — so a node/edge TYPE that
-        # was REMOVED from the extractor (e.g. the 2026-06 edge/ExternalPackage
+        # was REMOVED from the extractor (e.g. the edge/ExternalPackage
         # retirements) is never re-written and its stale rows would SURVIVE a
         # --force reindex. Wiping code_nodes + structural_edges +
         # doc_code_candidates + file_dependencies guarantees a clean rebuild.

@@ -323,7 +323,7 @@ def run_full_evaluation(
         "anchor_priming",
         # Code-only sensitivity-analysis flag per cell.
         "code_only_mode",
-        # Sprint 25: per-CR change_type from LLM-1, for stratified reporting.
+        # per-CR change_type from LLM-1, for stratified reporting.
         "change_type",
         # Entity-level
         "entity_precision_set", "entity_recall_set", "entity_f1_set",

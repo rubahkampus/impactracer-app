@@ -73,3 +73,4 @@ Thumbs.db
 /11_configuration_and_cli.md
 /12_project_structure_and_sprints.md
 .refactor_golden/
+.indexer_golden/

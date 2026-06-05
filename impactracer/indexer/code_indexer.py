@@ -37,7 +37,7 @@ from impactracer.shared.constants import RETIRED_NODE_TYPES, RETIRED_PROPAGATION
 def _resolve_emit_retired_edges() -> bool:
     """Whether the indexer writes the four retired edge types.
 
-    Default False (retired 2026-06; index stays clean). Re-enable by setting
+    Default False (index stays clean). Re-enable by setting
     Settings.enable_retired_edges (env IMPACTRACER_ENABLE_RETIRED_EDGES=1) and
     re-indexing. Falls back to the raw env var if Settings cannot be built.
     """
@@ -1245,7 +1245,7 @@ def _insert_nodes(nodes: list[dict[str, Any]], conn: sqlite3.Connection) -> None
     """INSERT OR REPLACE all node dicts into code_nodes.
 
     Node types in ``RETIRED_NODE_TYPES`` (ExternalPackage, InterfaceField) are
-    NOT written by default (retired 2026-06). The extraction logic that builds
+    NOT written by default (retired as inert). The extraction logic that builds
     them is left intact for reversibility; this is the single write chokepoint
     where the gate is applied. Set ``IMPACTRACER_ENABLE_RETIRED_EDGES=1`` (env)
     or ``settings.enable_retired_edges`` and re-index to restore them.
@@ -1476,7 +1476,7 @@ def _emit_edge(
     """INSERT OR IGNORE one structural edge. Increments counter[0].
 
     Edge types in ``RETIRED_PROPAGATION_EDGES`` are NOT written to the index
-    (retired 2026-06 as propagation-inert; see constants). The extraction logic
+    (retired as propagation-inert; see constants). The extraction logic
     that calls this for those types is left intact for reversibility — set
     ``IMPACTRACER_ENABLE_RETIRED_EDGES=1`` (env) to re-enable emission and then
     re-index. Default: dropped at the write chokepoint so the index stays clean.
@@ -2363,7 +2363,7 @@ def _emit_contains_edges(
          (+ InterfaceField only when retired nodes are enabled)
       2. Interface → InterfaceField  (only when retired nodes are enabled)
 
-    The InterfaceField CONTAINS sub-branch is gated 2026-06: InterfaceField is a
+    The InterfaceField CONTAINS sub-branch is gated: InterfaceField is a
     retired node type (see RETIRED_NODE_TYPES), so by default no such nodes exist
     and both the IN-list entry and Pass 2 are skipped. The File→{named
     declaration} backbone is unaffected. Re-enabled via settings.enable_retired_edges.

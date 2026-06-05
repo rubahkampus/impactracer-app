@@ -41,7 +41,7 @@ Two operating modes:
 Edge weights come from a curated subset of EDGE_CONFIG semantics:
 TYPED_BY (0.8), CALLS (0.9), RENDERS (0.8), CONTAINS (0.6), IMPORTS (0.5),
 INHERITS (0.7), IMPLEMENTS (0.7), DEFINES_METHOD (0.6), DYNAMIC_IMPORT (0.4),
-FIELDS_ACCESSED (0.7). The four edges retired from propagation 2026-06
+FIELDS_ACCESSED (0.7). The four edges retired from propagation
 (PASSES_CALLBACK, HOOK_DEPENDS_ON, CLIENT_API_CALLS, DEPENDS_ON_EXTERNAL) are
 omitted here too.
 
@@ -65,7 +65,7 @@ from impactracer.shared.models import Candidate
 #     bind callers to the changed contract.
 #   - Behavioural edges (CALLS) are high.
 #   - Composition edges (IMPORTS, CONTAINS) are medium — co-location only.
-#   - The four edges retired from propagation 2026-06 (PASSES_CALLBACK,
+#   - The four edges retired from propagation (PASSES_CALLBACK,
 #     HOOK_DEPENDS_ON, CLIENT_API_CALLS, DEPENDS_ON_EXTERNAL) are omitted —
 #     propagation-inert, so they carry no label-propagation weight either.
 _EDGE_WEIGHTS: dict[str, float] = {

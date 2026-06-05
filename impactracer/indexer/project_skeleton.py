@@ -75,8 +75,8 @@ def write_project_skeleton(conn: sqlite3.Connection, path: Path) -> int:
 def read_project_skeleton(path: Path) -> str | None:
     """Read a previously written skeleton, or return None on miss.
 
-    Callers MUST tolerate a missing file (pre-Amendment-3 indexes do
-    not have one). The online pipeline degrades gracefully by falling
+    Callers MUST tolerate a missing file (older indexes may
+    lack one). The online pipeline degrades gracefully by falling
     back to the prior single-stage interpreter.
     """
     if not path.exists():

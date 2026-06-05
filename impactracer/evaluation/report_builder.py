@@ -306,7 +306,7 @@ def build_summary_artifacts(
     md_path.write_text(_render_markdown(summary_df), encoding="utf-8")
 
     # ------------------------------------------------------------------
-    # Sprint 25: per-change-type stratified summary.
+    # per-change-type stratified summary.
     # Macro F1 hides that the eval set mixes MODIFICATION (easy), ADDITION
     # (hard — anchor inference required), and DELETION (graph-flood prone).
     # Stratification gives the committee a per-change-type read on where

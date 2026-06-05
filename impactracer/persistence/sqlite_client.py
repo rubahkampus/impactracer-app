@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS structural_edges (
     edge_type   TEXT    NOT NULL
         -- Schema retains all extracted edge types for provenance. NOTE: four
         -- of these (HOOK_DEPENDS_ON, PASSES_CALLBACK, DEPENDS_ON_EXTERNAL,
-        -- CLIENT_API_CALLS) were retired from BFS propagation 2026-06 as
+        -- CLIENT_API_CALLS) were retired from BFS propagation as
         -- inert (see constants.RETIRED_PROPAGATION_EDGES). They are still
         -- emitted and stored, but the traversal no longer walks them.
         CHECK (edge_type IN (

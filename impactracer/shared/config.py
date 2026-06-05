@@ -118,7 +118,7 @@ class Settings(BaseSettings):
 
     # Re-admit the four retired propagation edges (PASSES_CALLBACK,
     # HOOK_DEPENDS_ON, CLIENT_API_CALLS, DEPENDS_ON_EXTERNAL) into the BFS
-    # traversal config. Default False: they were retired 2026-06 as
+    # traversal config. Default False: they were retired as
     # propagation-inert (zero TP on citrakara+nova). True is diagnostic-only —
     # see constants.active_edge_config / RETIRED_PROPAGATION_EDGES.
     enable_retired_edges: bool = False
@@ -141,8 +141,8 @@ class Settings(BaseSettings):
     # propagated FPs retaining ~70% of TPs, more surgically than either).
     # Detachable: set enable_propagation_weight_prune=False to restore the raw
     # unpruned flood. 0 disables the cut (scores only).
-    # K=10 is the RECALL-SAFE floor found by a live K-sweep on the V6 BFS pool
-    # (2026-06): BFS-GT recall is 100% at K>=10 and drops below it (the binding
+    # K=10 is the RECALL-SAFE floor found by a live K-sweep on the V6 BFS pool:
+    # BFS-GT recall is 100% at K>=10 and drops below it (the binding
     # CR, ADD-2, has its last BFS-GT at rank 9). Earlier K=20 was the safe
     # choice; K=10 is the tight choice — recall-identical on this corpus, with
     # marginally better precision and ~half the BFS budget on flood CRs. NOTE
@@ -161,7 +161,7 @@ class Settings(BaseSettings):
     # Deterministic precision step for the in-file arm, mirroring how Step 6.8
     # prunes the outward-BFS arm. Siblings are EXEMPT from 6.8 (they tie under
     # decay scoring); instead they are ranked here by their ANCHOR's rrf_score
-    # and cut to the top-K. A sibling-pool bake-off (2026-06) found anchor-rrf
+    # and cut to the top-K. A sibling-pool bake-off found anchor-rrf
     # the best deterministic sibling ranker — 83% sibling-GT @ top-5 vs 0%
     # semantic (GT siblings are mostly unembeddable type defs), 33% PPR, 50%
     # flat-tie, 17% random; combining signals only hurt. K=10 is the recall-
@@ -243,7 +243,7 @@ class Settings(BaseSettings):
     # the SRS / SDD did not exist". Default False = production behaviour.
     code_only_mode: bool = False
 
-    # ---- RETIRED (2026-06): uniform RRF path weights ----------------
+    # ---- RETIRED: uniform RRF path weights ----------------
     # The change-type-adaptive RRF_PATH_WEIGHTS table was ablated over all
     # 24 citrakara CRs (V0-V3, variance-free) and found INERT: it moves only
     # V2, on 8/24 CRs, magnitude <=0.125, pooled delta -0.0019 — inside the

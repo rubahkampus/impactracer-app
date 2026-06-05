@@ -264,7 +264,7 @@ class VariantCache:
 
     # ----------------------------------------------------------------
     # Step 7.5 — LLM #4 sibling promotion (V6-V7 shared after the
-    # 2026-05-26 ablation-boundary fix; sibling promotion moved from
+    # Ablation-boundary fix: sibling promotion moved from
     # V7-only gating to V6+ gating to isolate the LLM #4 propagation
     # validation contribution at the V6->V7 boundary).
     #

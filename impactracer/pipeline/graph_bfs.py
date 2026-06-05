@@ -431,8 +431,8 @@ _DELETION_SUBSTANTIVE_EDGES: frozenset[str] = frozenset({
     "RENDERS",
     "CONTAINS",
     # Retired edges (PASSES_CALLBACK, HOOK_DEPENDS_ON, CLIENT_API_CALLS,
-    # DEPENDS_ON_EXTERNAL) removed 2026-06 — propagation-inert, so they can
-    # never appear in a causal_chain reaching the filter anyway.
+    # DEPENDS_ON_EXTERNAL) are propagation-inert, so they can never appear
+    # in a causal_chain reaching the filter anyway.
 })
 
 
