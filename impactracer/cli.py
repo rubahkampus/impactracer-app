@@ -297,18 +297,6 @@ def evaluate(
             "test."
         ),
     ),
-    graph_rerank: bool = typer.Option(
-        False,
-        "--graph-rerank/--no-graph-rerank",
-        help=(
-            "Graph-aware rerank (default off): blend cross-encoder scores "
-            "with personalised PageRank over the structural graph between "
-            "Step 3 and Step 3.5. Preserved for future codebases where the "
-            "structural graph more densely connects CR-described seeds to "
-            "GT files. Code path lives in "
-            "impactracer/pipeline/graph_rerank.py."
-        ),
-    ),
 ) -> None:
     """Run the full evaluation protocol on a GT dataset directory.
 
@@ -349,8 +337,6 @@ def evaluate(
         # Compose with the existing traceability toggle so the retriever sees
         # the right value via the standard read site.
         settings.enable_traceability_pool_seeding = False
-    if graph_rerank:
-        settings.enable_graph_rerank = True
 
     # Profile-namespace the output dir so citrakara/nova eval artefacts never
     # collide. An explicit --output still wins.
@@ -389,7 +375,6 @@ def evaluate(
         f"Variants: {_VF.ALL_VARIANTS}\n"
         f"Anchor priming: {anchor_priming}\n"
         f"Code-only mode: {code_only}\n"
-        f"Graph rerank : {graph_rerank}\n"
         f"Output  : {output_dir}\n",
         err=True,
     )

@@ -476,74 +476,23 @@ def run_analysis(
     elif variant_flags.enable_cross_encoder:
         logger.info("[runner] Step 3: Cross-encoder rerank (multi-query max scoring)")
         # Cross-encoder ALWAYS scores the full pool (not just top_k): the
-        # step_3_reranked_full trace needs every candidate's rank, and it keeps
-        # symmetry with the (default-off) graph-rerank path that requires it.
-        # Truncating to top-K after a full sort yields the same SIS set.
-        # Performance cost: ~1s additional cross-encoder wall time per CR
-        # (200 vs 15 candidates on bge-reranker-v2-m3); negligible vs LLM cost.
-        _graph_rerank_on = getattr(settings, "enable_graph_rerank", False)
+        # step_3_reranked_full trace needs every candidate's rank. Truncating to
+        # top-K after a full sort yields the same SIS set. Cost: ~1s extra
+        # cross-encoder wall time per CR; negligible vs LLM cost.
         candidates = ctx.reranker.rerank_multi_query(
             cr_interp.search_queries,
             cr_interp.primary_intent,
             candidates,
             len(candidates),
         )
-        logger.info(
-            "[runner] Post-rerank (full_pool={}): {} candidates",
-            _graph_rerank_on, len(candidates),
-        )
+        logger.info("[runner] Post-rerank: {} candidates", len(candidates))
 
-        # Snapshot raw cross-encoder logits (used by Top-K truncation + Step 8
-        # context-priority; the score floor that also consumed it is retired).
+        # Snapshot raw cross-encoder logits for Top-K truncation + Step 8
+        # context-priority.
         for c in candidates:
             c.raw_reranker_score = c.reranker_score
 
         candidates.sort(key=lambda c: c.raw_reranker_score, reverse=True)
-
-        # ----- Optional graph-aware label-propagation rerank (default off)
-        # Default-disabled post-Sprint-15. The full-pool cross-encoder pass
-        # above only fires when this flag is on, so the V4-canonical regime
-        # has IDENTICAL behaviour to pre-Sprint-15 code.
-        if _graph_rerank_on:
-            from impactracer.pipeline.graph_rerank import graph_rerank
-
-            # Mode B needs metadata for any node that could be graph-added.
-            # Bulk-fetch all code_nodes once (fast on 3,150-node citrakara).
-            code_meta_by_id: dict[str, dict] = {}
-            for row in ctx.conn.execute(
-                "SELECT node_id, node_type, file_path, file_classification, "
-                "internal_logic_abstraction, source_code FROM code_nodes"
-            ).fetchall():
-                code_meta_by_id[row[0]] = {
-                    "node_type": row[1],
-                    "file_path": row[2],
-                    "file_classification": row[3],
-                    "internal_logic_abstraction": row[4],
-                    "source_code": row[5],
-                }
-
-            pre_count = len(candidates)
-            candidates = graph_rerank(
-                candidates,
-                ctx.graph,
-                alpha=getattr(settings, "graph_rerank_alpha", 0.7),
-                iterations=getattr(settings, "graph_rerank_iterations", 2),
-                personalization_top_n=getattr(
-                    settings, "graph_rerank_personalization_top_n", 5
-                ),
-                add_top_n=getattr(settings, "graph_rerank_add_top_n", 10),
-                add_min_score=getattr(settings, "graph_rerank_add_min_score", 0.10),
-                code_meta_by_id=code_meta_by_id,
-            )
-            logger.info(
-                "[runner] Step 3 (Apex C): graph rerank produced {} candidates "
-                "(was {}, added {})",
-                len(candidates), pre_count, len(candidates) - pre_count,
-            )
-
-            # graph_rerank already wrote blended values to raw_reranker_score /
-            # reranker_score. Re-sort by blended score.
-            candidates.sort(key=lambda c: c.raw_reranker_score, reverse=True)
 
         # Step 3 trace: snapshot the FULL post-rerank
         # pool BEFORE the max_admitted_seeds truncation. Captures up to 200

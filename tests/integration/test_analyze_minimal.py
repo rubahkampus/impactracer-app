@@ -14,7 +14,7 @@ import os
 import pytest
 
 from impactracer.evaluation.variant_flags import VariantFlags
-from impactracer.pipeline.retriever import reciprocal_rank_fusion_adaptive
+from impactracer.pipeline.retriever import reciprocal_rank_fusion
 from impactracer.shared.config import Settings
 
 
@@ -23,52 +23,28 @@ from impactracer.shared.config import Settings
 # ---------------------------------------------------------------------------
 
 
-def test_arrf_formula_weights():
-    """Adaptive RRF applies per-change_type path weights correctly."""
-    # Three-list fusion for ADDITION change_type
-    # dense_doc weight=1.2, bm25_doc=1.0, dense_code=1.0
+def test_rrf_formula_unweighted():
+    """Unweighted RRF: each path contributes 1/(k+rank+1) equally."""
     ranked_lists = [
         ("dense_doc", ["A", "B", "C"]),
         ("bm25_doc", ["B", "A", "D"]),
         ("dense_code", ["C", "A"]),
     ]
-    scores = reciprocal_rank_fusion_adaptive(ranked_lists, "ADDITION", k=60)
+    scores = reciprocal_rank_fusion(ranked_lists, k=60)
 
-    # A appears in all three lists: rank 0 in dense_doc, rank 1 in bm25_doc, rank 1 in dense_code
-    # = 1.2/(60+0+1) + 1.0/(60+1+1) + 1.0/(60+1+1)
-    expected_A = 1.2 / 61 + 1.0 / 62 + 1.0 / 62
-    assert abs(scores["A"] - expected_A) < 1e-9
-
-    # B appears in dense_doc rank 1 and bm25_doc rank 0
-    expected_B = 1.2 / 62 + 1.0 / 61
-    assert abs(scores["B"] - expected_B) < 1e-9
-
-    # D appears only in bm25_doc rank 2
-    expected_D = 1.0 / (60 + 2 + 1)
-    assert abs(scores["D"] - expected_D) < 1e-9
-
-    # Higher ARRF score should be ranked first
+    # A: rank 0 in dense_doc, rank 1 in bm25_doc, rank 1 in dense_code.
+    assert abs(scores["A"] - (1 / 61 + 1 / 62 + 1 / 62)) < 1e-9
+    # B: rank 1 in dense_doc, rank 0 in bm25_doc.
+    assert abs(scores["B"] - (1 / 62 + 1 / 61)) < 1e-9
+    # D: rank 2 in bm25_doc only.
+    assert abs(scores["D"] - (1 / 63)) < 1e-9
     assert scores["A"] > scores["B"] > scores["D"]
 
 
-def test_arrf_single_list_degenerates():
+def test_rrf_single_list_degenerates():
     """With one list, RRF reduces to that list's order."""
-    ranked_lists = [("bm25_doc", ["X", "Y", "Z"])]
-    scores = reciprocal_rank_fusion_adaptive(ranked_lists, "MODIFICATION", k=60)
+    scores = reciprocal_rank_fusion([("bm25_doc", ["X", "Y", "Z"])], k=60)
     assert scores["X"] > scores["Y"] > scores["Z"]
-
-
-def test_arrf_modification_weights():
-    """MODIFICATION gives higher weight to dense_code than dense_doc."""
-    ranked_lists = [
-        ("dense_doc", ["D"]),
-        ("dense_code", ["D"]),
-    ]
-    # Both at rank 0 for node D
-    scores = reciprocal_rank_fusion_adaptive(ranked_lists, "MODIFICATION", k=60)
-    # dense_code weight=1.2, dense_doc weight=1.0 → both contribute
-    expected = 1.0 / 61 + 1.2 / 61
-    assert abs(scores["D"] - expected) < 1e-9
 
 
 # ---------------------------------------------------------------------------

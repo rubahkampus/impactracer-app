@@ -76,25 +76,6 @@ class Settings(BaseSettings):
     # are biased toward one architectural plane.
     per_layer_top_k: int = 12
 
-    # ---- Step 3: Graph-aware label-propagation rerank (off by default)
-    # After cross-encoder rerank scores the full RRF pool, a 2-iteration label
-    # propagation over the structural graph blends a per-node "graph_score"
-    # with the cross-encoder score before the top-K truncation. Personalization
-    # is the top-N cross-encoder candidates (no extra LLM call).
-    #
-    # Disabled by default. Calibrations on the target repo showed this
-    # mechanism trades file-level F1 for entity-level F1 with no configuration
-    # that wins both metrics. The code path is kept for codebases where the
-    # structural graph more densely connects CR-described seeds to GT files
-    # (e.g. monorepos where forms directly import schemas). Re-enable by
-    # setting enable_graph_rerank=True or via GRAPH_RERANK_ALPHA env var.
-    enable_graph_rerank: bool = False
-    graph_rerank_alpha: float = 0.7              # weight on cross-encoder; (1-alpha) on graph
-    graph_rerank_iterations: int = 2             # number of label-propagation rounds
-    graph_rerank_personalization_top_n: int = 5  # seeds for PPR (top-N by cross-encoder)
-    graph_rerank_add_top_n: int = 10             # mode B: add this many graph-discovered candidates
-    graph_rerank_add_min_score: float = 0.10     # mode B: minimum normalized graph_score to admit
-
     # ---- Step 7.5: File-local sibling promotion ---------------------
     # After LLM #4 validation, the runner enumerates every qualified sibling
     # of each validated node within the same file (via CONTAINS) and lets
@@ -242,21 +223,6 @@ class Settings(BaseSettings):
     # Together these three toggles isolate "what would ImpacTracer score if
     # the SRS / SDD did not exist". Default False = production behaviour.
     code_only_mode: bool = False
-
-    # ---- RETIRED: uniform RRF path weights ----------------
-    # The change-type-adaptive RRF_PATH_WEIGHTS table was ablated over all
-    # 24 citrakara CRs (V0-V3, variance-free) and found INERT: it moves only
-    # V2, on 8/24 CRs, magnitude <=0.125, pooled delta -0.0019 — inside the
-    # ~0.01-0.02 noise floor and washed out by V3's cross-encoder and every
-    # LLM stage (eval/rrf_weight_ablation/). So uniform is now the DEFAULT:
-    # all four paths (dense_doc, bm25_doc, dense_code, bm25_code) fuse with
-    # weight 1.0 regardless of change_type (plain unweighted RRF). The
-    # RRF_PATH_WEIGHTS table is kept archival (constants.py) and this flag is
-    # retained for reversibility — set False to restore adaptive weighting.
-    # Mirrors the score-floor/plausibility retirement (neutralized, not deleted).
-    # NOTE: change_type itself stays load-bearing elsewhere (LLM #2 ADDITION
-    # framing, V4+); only retrieval fusion drops it.
-    uniform_rrf_weights: bool = True
 
 
 # =========================================================================

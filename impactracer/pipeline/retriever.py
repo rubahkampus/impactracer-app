@@ -1,8 +1,7 @@
 """Dual-path hybrid search with Reciprocal Rank Fusion (FR-C1, FR-C2).
 
 Four ranked lists per query: dense-doc, bm25-doc, dense-code, bm25-code,
-fused via unweighted RRF (the change-type path weights were retired as inert;
-RRF_PATH_WEIGHTS is kept archival behind settings.uniform_rrf_weights).
+fused via unweighted Reciprocal Rank Fusion.
 
 Reference: master_blueprint.md §4 Step 2.
 """
@@ -15,7 +14,6 @@ import sqlite3
 from loguru import logger
 from rank_bm25 import BM25Okapi
 
-from impactracer.shared.constants import RRF_PATH_WEIGHTS
 from impactracer.shared.models import Candidate, CRInterpretation
 
 
@@ -118,33 +116,19 @@ def build_metadata_cache(collection: object) -> dict[str, dict]:
 # ---------------------------------------------------------------------------
 
 
-def reciprocal_rank_fusion_adaptive(
+def reciprocal_rank_fusion(
     ranked_lists: list[tuple[str, list[str]]],
-    change_type: str,
     k: int = 60,
-    uniform_weights: bool = False,
 ) -> dict[str, float]:
-    """Weighted RRF fusion.
+    """Unweighted Reciprocal Rank Fusion.
 
-    Each entry is ``(path_label, ranked_ids)``.
-    Weights come from :data:`impactracer.shared.constants.RRF_PATH_WEIGHTS`.
-
-    Blueprint §4 Step 2:
-        ARRF(d) = Σ_{p ∈ paths_present} W[change_type][p] / (rrf_k + rank_p(d) + 1)
-
-    When ``uniform_weights`` is True, every path weight is forced to 1.0
-    (plain unweighted RRF), neutralising the change-type-adaptive table.
-    Ablation hook for measuring the contribution of the path weighting.
+    Each entry is ``(path_label, ranked_ids)``; every path contributes equally.
+        RRF(d) = Σ_{p ∈ paths_present} 1 / (rrf_k + rank_p(d) + 1)
     """
-    if uniform_weights:
-        weights: dict[str, float] = {}
-    else:
-        weights = RRF_PATH_WEIGHTS.get(change_type, RRF_PATH_WEIGHTS["MODIFICATION"])
     scores: dict[str, float] = {}
-    for path_label, ranked_ids in ranked_lists:
-        w = weights.get(path_label, 1.0)
+    for _path_label, ranked_ids in ranked_lists:
         for rank, doc_id in enumerate(ranked_ids):
-            scores[doc_id] = scores.get(doc_id, 0.0) + w / (k + rank + 1)
+            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank + 1)
     return scores
 
 
@@ -690,10 +674,7 @@ def hybrid_search(
     # RRF fusion (or pass-through when only one list)
     # -------------------------------------------------------------------
     if flags.enable_rrf and len(ranked_lists) > 1:
-        scores = reciprocal_rank_fusion_adaptive(
-            ranked_lists, cr_interp.change_type, k=rrf_k,
-            uniform_weights=getattr(settings, "uniform_rrf_weights", False),
-        )
+        scores = reciprocal_rank_fusion(ranked_lists, k=rrf_k)
     else:
         scores = {}
         for _label, ids_list in ranked_lists:

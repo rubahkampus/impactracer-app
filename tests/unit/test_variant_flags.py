@@ -41,16 +41,13 @@ def test_v0_has_minimal_components() -> None:
     assert not v0.enable_propagation_validation
 
 
-def test_v3_includes_cross_encoder_and_all_three_gates() -> None:
-    """V3 absorbs the former V3.5 — cross-encoder rerank plus all three
-    deterministic gates, still no LLM #2. V3 is the deterministic-filtering peak.
-    """
+def test_v3_includes_cross_encoder_and_dedup() -> None:
+    """V3 is the deterministic-filtering peak: cross-encoder rerank + semantic
+    dedup, still no LLM #2."""
     v = VariantFlags.v3()
     assert v.variant_id == "V3"
     assert v.enable_cross_encoder
-    assert v.enable_score_floor
     assert v.enable_dedup_gate
-    assert v.enable_plausibility_gate
     # No LLM gating yet — that is V4.
     assert not v.enable_sis_validation
     assert not v.enable_trace_validation
@@ -62,9 +59,7 @@ def test_v4_adds_llm2_on_top_of_v3() -> None:
     """V4 has everything V3 has, plus SIS validation (LLM #2)."""
     v3 = VariantFlags.v3()
     v4 = VariantFlags.v4()
-    assert v4.enable_score_floor == v3.enable_score_floor
     assert v4.enable_dedup_gate == v3.enable_dedup_gate
-    assert v4.enable_plausibility_gate == v3.enable_plausibility_gate
     assert v4.enable_cross_encoder == v3.enable_cross_encoder
     # V4 alone adds SIS validation.
     assert v4.enable_sis_validation and not v3.enable_sis_validation

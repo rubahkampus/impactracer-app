@@ -51,9 +51,7 @@ class VariantFlags:
     enable_cross_encoder: bool
 
     # Deterministic gates (FR-C4)
-    enable_score_floor: bool           # calibrated min reranker score
     enable_dedup_gate: bool
-    enable_plausibility_gate: bool
 
     # Validation LLMs
     enable_sis_validation: bool           # LLM #2
@@ -120,16 +118,11 @@ class VariantFlags:
 
     @classmethod
     def v0(cls) -> "VariantFlags":
-        # 3.6 dedup and 3.7 plausibility run universally on
-        # every variant. 3.5 score floor stays gated on the cross-encoder
-        # (V3+) because it depends on a meaningful raw_reranker_score that
-        # V0-V2 do not produce.
         return cls(
             variant_id="V0",
             enable_bm25=True, enable_dense=False, enable_rrf=False,
             enable_cross_encoder=False,
-            enable_score_floor=False,
-            enable_dedup_gate=True, enable_plausibility_gate=True,
+            enable_dedup_gate=True,
             enable_sis_validation=False, enable_trace_validation=False,
             enable_bfs=False, enable_propagation_validation=False,
         )
@@ -140,8 +133,7 @@ class VariantFlags:
             variant_id="V1",
             enable_bm25=False, enable_dense=True, enable_rrf=False,
             enable_cross_encoder=False,
-            enable_score_floor=False,
-            enable_dedup_gate=True, enable_plausibility_gate=True,
+            enable_dedup_gate=True,
             enable_sis_validation=False, enable_trace_validation=False,
             enable_bfs=False, enable_propagation_validation=False,
         )
@@ -152,26 +144,20 @@ class VariantFlags:
             variant_id="V2",
             enable_bm25=True, enable_dense=True, enable_rrf=True,
             enable_cross_encoder=False,
-            enable_score_floor=False,
-            enable_dedup_gate=True, enable_plausibility_gate=True,
+            enable_dedup_gate=True,
             enable_sis_validation=False, enable_trace_validation=False,
             enable_bfs=False, enable_propagation_validation=False,
         )
 
     @classmethod
     def v3(cls) -> "VariantFlags":
-        """V3: cross-encoder rerank + all three deterministic gates.
-
-        Represents the peak of deterministic, pre-LLM filtering. Includes
-        the score floor, semantic dedup, and plausibility+affinity gate so
-        the V3->V4 delta isolates the contribution of LLM #2 alone.
-        """
+        """V3: cross-encoder rerank + semantic dedup - the deterministic
+        pre-LLM filtering peak. The V3->V4 delta isolates LLM #2."""
         return cls(
             variant_id="V3",
             enable_bm25=True, enable_dense=True, enable_rrf=True,
             enable_cross_encoder=True,
-            enable_score_floor=True,
-            enable_dedup_gate=True, enable_plausibility_gate=True,
+            enable_dedup_gate=True,
             enable_sis_validation=False, enable_trace_validation=False,
             enable_bfs=False, enable_propagation_validation=False,
         )
@@ -182,8 +168,7 @@ class VariantFlags:
             variant_id="V4",
             enable_bm25=True, enable_dense=True, enable_rrf=True,
             enable_cross_encoder=True,
-            enable_score_floor=True,
-            enable_dedup_gate=True, enable_plausibility_gate=True,
+            enable_dedup_gate=True,
             enable_sis_validation=True, enable_trace_validation=False,
             enable_bfs=False, enable_propagation_validation=False,
         )
@@ -194,8 +179,7 @@ class VariantFlags:
             variant_id="V5",
             enable_bm25=True, enable_dense=True, enable_rrf=True,
             enable_cross_encoder=True,
-            enable_score_floor=True,
-            enable_dedup_gate=True, enable_plausibility_gate=True,
+            enable_dedup_gate=True,
             enable_sis_validation=True, enable_trace_validation=True,
             enable_bfs=False, enable_propagation_validation=False,
         )
@@ -206,8 +190,7 @@ class VariantFlags:
             variant_id="V6",
             enable_bm25=True, enable_dense=True, enable_rrf=True,
             enable_cross_encoder=True,
-            enable_score_floor=True,
-            enable_dedup_gate=True, enable_plausibility_gate=True,
+            enable_dedup_gate=True,
             enable_sis_validation=True, enable_trace_validation=True,
             enable_bfs=True, enable_propagation_validation=False,
         )
@@ -218,8 +201,7 @@ class VariantFlags:
             variant_id="V7",
             enable_bm25=True, enable_dense=True, enable_rrf=True,
             enable_cross_encoder=True,
-            enable_score_floor=True,
-            enable_dedup_gate=True, enable_plausibility_gate=True,
+            enable_dedup_gate=True,
             enable_sis_validation=True, enable_trace_validation=True,
             enable_bfs=True, enable_propagation_validation=True,
         )

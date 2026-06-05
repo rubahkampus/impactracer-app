@@ -28,7 +28,6 @@ from impactracer.shared.models import (
     Candidate,
 )
 from impactracer.shared.constants import (
-    RRF_PATH_WEIGHTS,
     LAYER_COMPAT,
     layer_compat,
     EDGE_CONFIG,
@@ -63,7 +62,6 @@ __all__ = [
     "NodeTrace",
     "CISResult",
     "Candidate",
-    "RRF_PATH_WEIGHTS",
     "LAYER_COMPAT",
     "layer_compat",
     "EDGE_CONFIG",

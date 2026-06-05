@@ -7,40 +7,7 @@ References:
 
 from __future__ import annotations
 
-from impactracer.shared.models import ChangeType, Severity
-
-
-# =========================================================================
-# RRF path weights (indexed by change_type) — RETIRED, ARCHIVAL.
-# =========================================================================
-# Ablated over all 24 citrakara CRs (variance-free, V0-V3) and found inert:
-# moves only V2 on 8/24 CRs, pooled delta -0.0019 (inside noise), washed out
-# by V3's cross-encoder + every LLM stage. Production now fuses with uniform
-# weight 1.0 (Settings.uniform_rrf_weights defaults True). This table is no
-# longer consulted unless that flag is set False; kept for reversibility.
-# Evidence: eval/rrf_weight_ablation/. NOTE change_type stays load-bearing
-# elsewhere (LLM #2 ADDITION framing) — only retrieval fusion drops it.
-
-RRF_PATH_WEIGHTS: dict[ChangeType, dict[str, float]] = {
-    "ADDITION": {
-        "dense_doc": 1.2,
-        "bm25_doc": 1.0,
-        "dense_code": 1.0,
-        "bm25_code": 0.8,
-    },
-    "MODIFICATION": {
-        "dense_doc": 1.0,
-        "bm25_doc": 1.0,
-        "dense_code": 1.2,
-        "bm25_code": 1.0,
-    },
-    "DELETION": {
-        "dense_doc": 1.0,
-        "bm25_doc": 0.8,
-        "dense_code": 1.2,
-        "bm25_code": 1.0,
-    },
-}
+from impactracer.shared.models import Severity
 
 
 # =========================================================================
@@ -252,8 +219,7 @@ INTO the package node and treating it as a unit-of-impact is incorrect.
 #    (eval results,): at equal K it removed ~68% of propagated false
 #    positives while retaining ~70% of propagated true positives — strictly
 #    more surgical than PPR (40% TP kept) or semantic (55%) at the same FP cut.
-#    Distinct from graph_rerank._EDGE_WEIGHTS (the default-OFF PPR rerank);
-#    these are the authoritative decay weights for the always-on Step 6.8.
+#    These are the authoritative decay weights for the always-on Step 6.8.
 
 PROPAGATION_DECAY_WEIGHTS: dict[str, float] = {
     "RENDERS": 1.0,          # workhorse: 13/17 BFS true positives
