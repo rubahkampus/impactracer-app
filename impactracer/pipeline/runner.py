@@ -284,9 +284,9 @@ def run_analysis(
         shared_llm_client=shared_llm_client,
     )
 
-    # Step 1 — Interpret CR (LLM #1, always-on). Two-stage (intent + project-
-    # grounded anchors) when a skeleton exists; cached so V1-V7 share it.
-    logger.info("[runner] Step 1: Interpret CR")
+    # Phase 1 — Interpret CR (LLM #1, always-on). Two-stage (1.1 intent + 1.2
+    # project-grounded anchors) when a skeleton exists; cached so V1-V7 share it.
+    logger.info("[runner] Phase 1: Interpret CR")
     if variant_cache is not None:
         cached_interp = variant_cache.get_interp()
     else:
@@ -321,7 +321,7 @@ def run_analysis(
 
     # Eval-only change_type override. When settings.force_change_type is set
     # (e.g. from the GT label), overwrite LLM #1's classification BEFORE it
-    # drives the change_type-dependent treatments (RRF path weights at Step 2,
+    # drives the change_type-dependent treatments (RRF path weights at Step 2.1,
     # LLM #2/#3 ADDITION framing). Applied after both the cache-miss and
     # cache-HIT paths so it takes effect regardless of cache state; the value
     # is also written back to the cache so resumed variants see the same type.
@@ -388,9 +388,9 @@ def run_analysis(
     # Aggregate degraded flag across all LLM batches in this run.
     degraded_run: bool = False
 
-    # Step 2 — RRF hybrid search (FR-C1/C2). Cached per retrieval shape:
+    # Step 2.1 — RRF hybrid search (FR-C1/C2). Cached per retrieval shape:
     # V0 (bm25-only), V1 (dense-only), V2+ (bm25+dense+RRF) each key separately.
-    logger.info("[runner] Step 2: Hybrid search (variant={})", variant_flags.variant_id)
+    logger.info("[runner] Step 2.1: Hybrid search (variant={})", variant_flags.variant_id)
     if variant_cache is not None:
         if variant_flags.variant_id == "V0":
             _retr_key = "retrieval_v0"
@@ -428,8 +428,8 @@ def run_analysis(
         logger.warning("[runner] Zero candidates — returning empty report")
         return _minimal_rejection_report("No candidates retrieved — check index and affected_layers")
 
-    # Step 3 — Cross-encoder rerank (FR-C3) + optional graph-aware rerank, then
-    # top-K. The post-rerank+gates pool (V3-V7) is cached under `rerank_gated`;
+    # Step 2.3 — Cross-encoder rerank (FR-C3) + optional graph-aware rerank, then
+    # top-K (Step 2.4). The post-rerank+gates pool (V3-V7) is cached under `rerank_gated`;
     # on hit, rerank/pinning/normalisation/gates are all skipped.
     _rerank_gated_cache_hit = False
     if (
@@ -455,26 +455,25 @@ def run_analysis(
                 for c in candidates
             ])
 
-    # Step 3.6 — Semantic dedup on the full RRF pool, BEFORE rerank + top-K cut
+    # Step 2.2 — Semantic dedup on the full RRF pool, BEFORE rerank + top-K cut
     # (so doc/code twins don't each consume a seat). Skipped on cache hit.
     if not _rerank_gated_cache_hit and variant_flags.enable_dedup_gate:
         _pre_dedup = len(candidates)
         candidates = apply_prevalidation_gates(
             candidates,
-            cr_interp,
             settings,
             ctx.conn,
             enable_dedup=variant_flags.enable_dedup_gate,
         )
         logger.info(
-            "[runner] Step 3.6 dedup (pre-rerank, full pool): {} -> {} candidates",
+            "[runner] Step 2.2 dedup (pre-rerank, full pool): {} -> {} candidates",
             _pre_dedup, len(candidates),
         )
 
     if _rerank_gated_cache_hit:
         pass  # Skip the rerank + gates block entirely.
     elif variant_flags.enable_cross_encoder:
-        logger.info("[runner] Step 3: Cross-encoder rerank (multi-query max scoring)")
+        logger.info("[runner] Step 2.3: Cross-encoder rerank (multi-query max scoring)")
         # Cross-encoder ALWAYS scores the full pool (not just top_k): the
         # step_3_reranked_full trace needs every candidate's rank. Truncating to
         # top-K after a full sort yields the same SIS set. Cost: ~1s extra
@@ -487,14 +486,14 @@ def run_analysis(
         )
         logger.info("[runner] Post-rerank: {} candidates", len(candidates))
 
-        # Snapshot raw cross-encoder logits for Top-K truncation + Step 8
+        # Snapshot raw cross-encoder logits for Top-K truncation + Step 6.1
         # context-priority.
         for c in candidates:
             c.raw_reranker_score = c.reranker_score
 
         candidates.sort(key=lambda c: c.raw_reranker_score, reverse=True)
 
-        # Step 3 trace: snapshot the FULL post-rerank
+        # Step 2.3 trace: snapshot the FULL post-rerank
         # pool BEFORE the max_admitted_seeds truncation. Captures up to 200
         # candidates (or ~210 when graph-rerank mode B adds extras), letting
         # tools/diagnose_k_widening.py count GT entities at ranks 16-30 from
@@ -507,7 +506,7 @@ def run_analysis(
             for c in candidates
         ])
 
-        # Plain top-K by cross-encoder score (already sorted desc).
+        # Step 2.4 — Plain top-K by cross-encoder score (already sorted desc).
         seat_cap = settings.max_admitted_seeds
         candidates = candidates[:seat_cap]
 
@@ -535,10 +534,10 @@ def run_analysis(
                 min_s, max_s,
             )
     else:
-        # V0-V2: no reranker — plain cap at max_admitted_seeds from RRF order.
+        # V0-V2: no reranker — plain cap (Step 2.4) at max_admitted_seeds from RRF order.
         seat_cap = settings.max_admitted_seeds
         candidates = candidates[:seat_cap]
-        logger.info("[runner] Step 3: Cross-encoder DISABLED ({})", variant_flags.variant_id)
+        logger.info("[runner] Step 2.3: Cross-encoder DISABLED ({})", variant_flags.variant_id)
 
     # Post-truncation snapshot: emit the step_3_gates_survivors trace for the
     # final top-K and cache it (dedup already ran pre-rerank). Skipped on cache hit.
@@ -568,11 +567,11 @@ def run_analysis(
         logger.warning("[runner] Zero candidates after gates — returning empty report")
         return _minimal_rejection_report("All candidates rejected by pre-validation gates")
 
-    # Step 4 — SIS validation (LLM #2, FR-C5). Batched max 5, fail-closed.
+    # Step 3.1 — SIS validation (LLM #2, FR-C5). Batched max 5, fail-closed.
     # Verdicts cached across V4-V7 (pure function of post-gate candidates + interp).
     sis_justifications: dict[str, dict[str, str]] = {}
     if variant_flags.enable_sis_validation:
-        logger.info("[runner] Step 4: SIS validation (batched, fail-closed)")
+        logger.info("[runner] Step 3.1: SIS validation (batched, fail-closed)")
         _cached_sis = (
             variant_cache.get_sis_verdicts() if variant_cache is not None else None
         )
@@ -606,10 +605,10 @@ def run_analysis(
             return rej
     else:
         sis_ids = [c.node_id for c in candidates]
-        logger.info("[runner] Step 4: SIS validation DISABLED — {} seeds", len(sis_ids))
+        logger.info("[runner] Step 3.1: SIS validation DISABLED — {} seeds", len(sis_ids))
 
-    # Step 5 — Resolve doc-chunk SIS hits to code seeds (FR-C6). All variants.
-    logger.info("[runner] Step 5: Seed resolution")
+    # Step 4.1 — Resolve doc-chunk SIS hits to code seeds (FR-C6). All variants.
+    logger.info("[runner] Step 4.1: Seed resolution")
     sis_id_set = set(sis_ids)
     # Sort admitted candidates by raw_reranker_score desc (absolute quality);
     # fall back to rrf_score for V0-V2 where reranker was disabled.
@@ -637,7 +636,7 @@ def run_analysis(
         code_node_ids=_code_node_ids,
     )
     logger.info(
-        "[runner] Step 5: {} direct code seeds, {} doc-chunk resolutions",
+        "[runner] Step 4.1: {} direct code seeds, {} doc-chunk resolutions",
         len(direct_code_seeds), len(resolutions),
     )
     _trace("step_5_resolutions", {
@@ -648,7 +647,7 @@ def run_analysis(
         ],
     })
 
-    # Step 5b — Trace validation (LLM #3, FR-C7). Verdicts cached across V5-V7.
+    # Step 4.2 — Trace validation (LLM #3, FR-C7). Verdicts cached across V5-V7.
     # Emits a mechanism map (non-empty only for CONFIRMED) that makes a
     # doc-resolved seed anchor-eligible for sibling promotion like a code seed.
     low_conf: dict[str, bool] = {}
@@ -656,7 +655,7 @@ def run_analysis(
     trace_mechanisms: dict[str, str] = {}
 
     if variant_flags.enable_trace_validation and resolutions:
-        logger.info("[runner] Step 5b: Trace validation (LLM #3, batched max 5)")
+        logger.info("[runner] Step 4.2: Trace validation (LLM #3, batched max 5)")
 
         _cached_trace = (
             variant_cache.get_trace_verdicts() if variant_cache is not None else None
@@ -738,7 +737,7 @@ def run_analysis(
         if llm3_degraded:
             degraded_run = True
         logger.info(
-            "[runner] Step 5b: {} validated seeds ({} low-conf, degraded={})",
+            "[runner] Step 4.2: {} validated seeds ({} low-conf, degraded={})",
             len(validated_code_seeds), sum(1 for v in low_conf.values() if v),
             llm3_degraded,
         )
@@ -758,7 +757,7 @@ def run_analysis(
                 validated_code_seeds.append(top_id)
                 low_conf[top_id] = True  # Blind = low confidence
         logger.info(
-            "[runner] Step 5b: Trace validation DISABLED — {} blind seeds",
+            "[runner] Step 4.2: Trace validation DISABLED — {} blind seeds",
             len(validated_code_seeds),
         )
     else:
@@ -769,9 +768,9 @@ def run_analysis(
     logger.info("[runner] Combined code seeds: {}", len(all_code_seeds))
 
     # ------------------------------------------------------------------
-    # Step 6 — Propagation (deterministic; the Propagator component).
-    # Delegates the full deterministic pass (BFS + DELETION filter + sibling
-    # expansion + both top-K precision prunes) to graph_bfs.propagate, which
+    # Phase 5 (deterministic) — Propagation (the Propagator component).
+    # Delegates the full deterministic pass (5.1a BFS + DELETION filter + 5.1b
+    # sibling expansion + both top-K precision prunes) to graph_bfs.propagate, which
     # owns its bfs_cis cache + trace surface. Runs only when BFS is enabled;
     # otherwise the CIS is the validated seeds alone.
     # ------------------------------------------------------------------
@@ -800,14 +799,14 @@ def run_analysis(
         )
     else:
         cis = _seeds_only_cis()
-        logger.info("[runner] Step 6: BFS disabled — {} SIS seeds", len(cis.sis_nodes))
+        logger.info("[runner] Step 5.1a: BFS disabled — {} SIS seeds", len(cis.sis_nodes))
 
-    # Step 7 — Propagation validation (LLM #4, FR-D2). Outward arm: prunes the
-    # BFS-propagated nodes; sibling_candidate nodes pass through to Step 7.5.
+    # Step 5.3a — Propagation validation (LLM #4, FR-D2). Outward arm: prunes the
+    # BFS-propagated nodes; sibling_candidate nodes pass through to Step 5.3b.
     llm4_justifications: dict[str, str] = {}
     if variant_flags.enable_propagation_validation and cis.propagated_nodes:
         logger.info(
-            "[runner] Step 7: Propagation validation (LLM #4, {} propagated nodes)",
+            "[runner] Step 5.3a: Propagation validation (LLM #4, {} propagated nodes)",
             len(cis.propagated_nodes),
         )
         # Fetch node metadata for all CIS nodes (SIS + propagated).
@@ -861,11 +860,11 @@ def run_analysis(
             llm4_degraded,
         )
     elif variant_flags.enable_propagation_validation:
-        logger.info("[runner] Step 7: Propagation validation SKIPPED (no propagated nodes)")
+        logger.info("[runner] Step 5.3a: Propagation validation SKIPPED (no propagated nodes)")
 
-    # Step 7.5 — Sibling validation (in-file arm of LLM #4). A distinct LLM #4
-    # call from Step 7: admits/rejects the raw sibling_candidate nodes from
-    # Step 6.7, drops rejects, relabels admits "llm4_sibling". Caps apply here,
+    # Step 5.3b — Sibling validation (in-file arm of LLM #4). A distinct LLM #4
+    # call from Step 5.3a: admits/rejects the raw sibling_candidate nodes from
+    # Step 5.1b, drops rejects, relabels admits "llm4_sibling". Caps apply here,
     # post-validation.
     sibling_admitted_count = 0
     if (
@@ -874,7 +873,7 @@ def run_analysis(
     ):
         from impactracer.pipeline.traversal_validator import validate_siblings_for_file
 
-        # Raw candidates injected at Step 6.7 (and round-tripped through the
+        # Raw candidates injected at Step 5.1b (and round-tripped through the
         # bfs_cis cache for propagate-only resumes).
         raw_sibling_ids = [
             nid for nid, tr in cis.propagated_nodes.items()
@@ -882,7 +881,7 @@ def run_analysis(
         ]
 
         # Per-candidate context (file, anchor, anchor mechanism) — from the
-        # Step 6.7 cache; fall back to each candidate's NodeTrace when running
+        # Step 5.1b cache; fall back to each candidate's NodeTrace when running
         # in a single in-process pass without a cache.
         cand_meta = (
             variant_cache.get_sibling_candidates() if variant_cache is not None else None
@@ -908,7 +907,7 @@ def run_analysis(
                 admitted_ids, cached_justifications, cached_count = _cached_admits
                 admitted_set = set(admitted_ids)
                 logger.info(
-                    "[runner] Step 7.5: sibling-admissions cache HIT "
+                    "[runner] Step 5.3b: sibling-admissions cache HIT "
                     "(admitted={}, candidates={})",
                     len(admitted_set), len(raw_sibling_ids),
                 )
@@ -982,7 +981,7 @@ def run_analysis(
                     per_file_cap = getattr(settings, "sibling_admit_max_per_file", 2)
                     if per_file_cap > 0 and len(admitted) > per_file_cap:
                         logger.info(
-                            "[runner] Step 7.5: per-file cap — {} admits -> top-{} for {}",
+                            "[runner] Step 5.3b: per-file cap — {} admits -> top-{} for {}",
                             len(admitted), per_file_cap, file_path,
                         )
                         items = list(admitted.items())[:per_file_cap]
@@ -995,7 +994,7 @@ def run_analysis(
                 per_cr_cap = getattr(settings, "sibling_admit_max_per_cr", 5)
                 if per_cr_cap > 0 and len(sibling_justifications) > per_cr_cap:
                     logger.info(
-                        "[runner] Step 7.5: per-CR cap — {} admits -> top-{}",
+                        "[runner] Step 5.3b: per-CR cap — {} admits -> top-{}",
                         len(sibling_justifications), per_cr_cap,
                     )
                     kept = list(sibling_justifications.keys())[:per_cr_cap]
@@ -1024,7 +1023,7 @@ def run_analysis(
                         del cis.propagated_nodes[sib_id]  # rejected — drop
 
             logger.info(
-                "[runner] Step 7.5: sibling VALIDATION admitted {} / {} raw candidates",
+                "[runner] Step 5.3b: sibling VALIDATION admitted {} / {} raw candidates",
                 sibling_admitted_count, len(raw_sibling_ids),
             )
             _trace("step_7p5_sibling_validation", {
@@ -1099,7 +1098,7 @@ def run_analysis(
 
     for pid, trace in list(cis.propagated_nodes.items()):
         v4 = llm4_justifications.get(pid, "")
-        # Sibling-arm nodes keep their own source tag (set by Step 6.7/7.5),
+        # Sibling-arm nodes keep their own source tag (set by Step 5.1b/5.3b),
         # NOT the outward-BFS attribution: "llm4_sibling" (V7, validated) or
         # "sibling_candidate" (V6, raw/unvalidated).
         if trace.justification_source in ("llm4_sibling", "sibling_candidate"):
@@ -1123,8 +1122,8 @@ def run_analysis(
             justification_source=src,
         )
 
-    # Step 8 — Backlinks + token-budgeted context (FR-E1/E2).
-    logger.info("[runner] Step 8: Build context")
+    # Step 6.1 — Backlinks + token-budgeted context (FR-E1/E2).
+    logger.info("[runner] Step 6.1: Build context")
     all_node_ids = cis.all_node_ids()
 
     # Build node_types and node_file_paths maps — candidates plus SQLite for propagated nodes.
@@ -1165,10 +1164,10 @@ def run_analysis(
         candidate_scores=candidate_scores,
     )
 
-    # Step 9 — Synthesize (LLM #5, FR-E3). Aggregator only: emits executive_summary
+    # Step 6.2 — Synthesize (LLM #5, FR-E3). Aggregator only: emits executive_summary
     # + documentation_conflicts; impacted_entities is built deterministically from
     # the full validated CIS (every validated node appears, truncation-independent).
-    logger.info("[runner] Step 9: Synthesize report (aggregator-only LLM #5)")
+    logger.info("[runner] Step 6.2: Synthesize report (aggregator-only LLM #5)")
 
     impacted_entities_deterministic = build_deterministic_impacted_entities(
         cis=cis,
@@ -1190,7 +1189,7 @@ def run_analysis(
             conflicts=[],
         )
         logger.info(
-            "[runner] Step 9: LLM #5 SKIPPED ({})",
+            "[runner] Step 6.2: LLM #5 SKIPPED ({})",
             "forced inclusion" if forced_inclusion else "empty CIS",
         )
     else:
@@ -1198,7 +1197,7 @@ def run_analysis(
             synthesis = synthesize_summary(context, ctx.llm_client)
         except Exception as exc:
             logger.error(
-                "[runner] Step 9: LLM #5 failed after retries: {} - "
+                "[runner] Step 6.2: LLM #5 failed after retries: {} - "
                 "using minimal summary (degraded)",
                 exc,
             )
@@ -1217,7 +1216,7 @@ def run_analysis(
     bfs_ran = variant_flags.enable_bfs and len(cis.propagated_nodes) > 0
     analysis_mode = "retrieval_plus_propagation" if bfs_ran else "retrieval_only"
 
-    # Step 9 augmentation: extra impacted_files come from File-type CIS nodes
+    # Step 6.2 augmentation: extra impacted_files come from File-type CIS nodes
     # (and bare path nodes) that we filtered out of impacted_entities. Their
     # paths still belong in the file-level report.
     extra_file_paths: list[str] = []

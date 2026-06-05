@@ -3,7 +3,7 @@
 Uses the precomputed ``doc_code_candidates`` table. Direct code-node SIS
 entries bypass resolution. The output feeds LLM #3 when enabled.
 
-Reference: master_blueprint.md §4 Step 5.
+Reference: master_blueprint.md §4 Step 4.1.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ def resolve_doc_to_code(
     The optional ``code_node_ids`` parameter lets the caller supply a
     pre-built set to skip the full table scan (used by the ablation harness).
 
-    Blueprint §4 Step 5.
+    Blueprint §4 Step 4.1.
     """
     if code_node_ids is None:
         code_node_set: set[str] = {

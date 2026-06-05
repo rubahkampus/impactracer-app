@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     min_traceability_similarity: float = 0.40
     degenerate_embed_min_length: int = 50
 
-    # ---- Step 2: Retrieval (RRF) ------------------------------------
+    # ---- Step 2.1: Retrieval (RRF) ------------------------------------
     # top_k_per_query: candidates kept per individual dense/BM25 query call.
     top_k_per_query: int = 30
     # top_k_rrf_pool: pool entering cross-encoder after RRF fusion. A wide
@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     max_admitted_seeds: int = 15
     rrf_k: int = 60
 
-    # ---- Step 2: Raw-CR multilingual bridge -------------------------
+    # ---- Step 2.1: Raw-CR multilingual bridge -------------------------
     # When True, the retriever runs one additional dense query against the
     # code collection using the raw (pre-interpretation) CR text. BGE-M3 is
     # multilingual; an Indonesian CR can natively reach English-identifier
@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     enable_raw_cr_dense_pass: bool = True
     raw_cr_dense_top_k: int = 60
 
-    # ---- Step 2: Per-layer code retrieval ---------------------------
+    # ---- Step 2.1: Per-layer code retrieval ---------------------------
     # When CRInterpretation.layered_search_queries is populated, the retriever
     # runs an additional pass per architectural layer (api_route, page_component,
     # ui_component, utility, type_definition) against the code collection
@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     # are biased toward one architectural plane.
     per_layer_top_k: int = 12
 
-    # ---- Step 7.5: File-local sibling promotion ---------------------
+    # ---- Step 5.3b: File-local sibling promotion ---------------------
     # After LLM #4 validation, the runner enumerates every qualified sibling
     # of each validated node within the same file (via CONTAINS) and lets
     # LLM #4 admit/reject each sibling using the anchor's justification as
@@ -106,7 +106,7 @@ class Settings(BaseSettings):
     sibling_admit_max_per_file: int = 4
     sibling_admit_max_per_cr: int = 0               # 0 = no global cap
 
-    # ---- Step 6.8: Weight-decay propagation prune -------------------
+    # ---- Step 5.2a: Weight-decay propagation prune -------------------
     # Deterministic flood control: after BFS + sibling expansion, rank the
     # propagated pool by edge-weight-aware decay (constants.propagation_decay_
     # score: prod(edge_weight)/(1+depth), weights = measured edge productivity)
@@ -132,22 +132,22 @@ class Settings(BaseSettings):
     enable_propagation_weight_prune: bool = True
     propagation_prune_top_k: int = 10
 
-    # ---- Step 6.9: Sibling-precision prune (in-file arm, parallel to 6.8) ----
-    # Deterministic precision step for the in-file arm, mirroring how Step 6.8
-    # prunes the outward-BFS arm. Siblings are EXEMPT from 6.8 (they tie under
+    # ---- Step 5.2b: Sibling-precision prune (in-file arm, parallel to 5.2a) ----
+    # Deterministic precision step for the in-file arm, mirroring how Step 5.2a
+    # prunes the outward-BFS arm. Siblings are EXEMPT from 5.2a (they tie under
     # decay scoring); instead they are ranked here by their ANCHOR's rrf_score
     # and cut to the top-K. A sibling-pool bake-off found anchor-rrf
     # the best deterministic sibling ranker — 83% sibling-GT @ top-5 vs 0%
     # semantic (GT siblings are mostly unembeddable type defs), 33% PPR, 50%
     # flat-tie, 17% random; combining signals only hurt. K=10 is the recall-
     # safe point (100% sibling-GT retained, ~53% sibling noise cut), matching
-    # the 6.8 philosophy: hand V7's sibling validator the full recall with
+    # the 5.2a philosophy: hand V7's sibling validator the full recall with
     # less noise. Detachable; sibling_prune_top_k=0 disables the cut.
     # Env-overridable (bare name, like TOP_K_RRF_POOL): SIBLING_PRUNE_TOP_K=<n>.
     enable_sibling_precision_prune: bool = True
     sibling_prune_top_k: int = 10
 
-    # ---- Step 2: Traceability-matrix pool seeding -------------------
+    # ---- Step 2.1: Traceability-matrix pool seeding -------------------
     # After dense_doc retrieval, query doc_code_candidates for code-nodes
     # linked to those doc-chunks above this threshold and inject them into
     # the RRF pool with a synthetic rank. Promotes the offline traceability
@@ -157,12 +157,12 @@ class Settings(BaseSettings):
     traceability_seed_min_score: float = 0.40
     traceability_seed_synthetic_rank: int = 5
 
-    # ---- Steps 3.5 / 3.6 / 3.7: Pre-Validation Gates (FR-C4) --------
-    # Score floor is a sanity-only gate (-2.0 admits all candidates above
-    # the BGE-reranker-v2-m3 "irrelevant" floor). LLM #2 is the real precision gate.
+    # ---- Pre-Validation Gates (FR-C4): only 2.2 semantic dedup is live ----
+    # The two params below belong to RETIRED gates (former score floor and
+    # plausibility) — found inert/net-negative by ablation, never invoked.
+    # Kept archival-only; their values (incl. any .env override) are dead.
+    # LLM #2 (Step 3.1) is the real precision gate.
     min_reranker_score_for_validation: float = -2.0
-    # Density threshold: rejects candidates when a single file exceeds this
-    # fraction of the total pool. Density-only; no per-file count cap.
     plausibility_gate_density_threshold: float = 0.50
     # Additive boost applied to a candidate's raw_reranker_score at the
     # score-floor admission step when its name substring-matches any of
@@ -174,7 +174,7 @@ class Settings(BaseSettings):
     # anchor_candidates extraction.
     anchor_priming_boost: float = 0.10
 
-    # Anchor-priming BM25 boost (Step 2 Path 4). Multiplier applied to a
+    # Anchor-priming BM25 boost (Step 2.1 Path 4). Multiplier applied to a
     # synthetic BM25 query built from each anchor_candidate identifier
     # inside retriever.hybrid_search Path 4. Default 1.5 = anchor-matching
     # candidates get a 0.5 weight bonus in the BM25 max-over-queries step.
@@ -200,7 +200,7 @@ class Settings(BaseSettings):
     locked_parameters_path: str = "./data/locked_parameters.json"
     alpha: float = 0.05
 
-    # ---- Step 1: Project skeleton -----------------------------------
+    # ---- Step 1.2: Project skeleton -----------------------------------
     # Cached project-skeleton text written at index time and consumed by
     # the two-stage interpreter at run time. Missing file is treated as
     # a graceful degrade signal (single-stage interpreter only).
@@ -212,7 +212,7 @@ class Settings(BaseSettings):
     #     disables doc retrieval (dense_doc / bm25_doc paths).
     #   - enable_traceability_pool_seeding is treated as False (no doc->code
     #     neighbour injection into the RRF pool).
-    #   - merged_doc_contexts attachment in step_3_6_semantic_dedup is
+    #   - merged_doc_contexts attachment in semantic_dedup is
     #     skipped, so LLM-2 receives no "Business Context" block.
     # Together these three toggles isolate "what would ImpacTracer score if
     # the SRS / SDD did not exist". Default False = production behaviour.

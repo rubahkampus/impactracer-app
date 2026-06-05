@@ -11,7 +11,7 @@ attach function_purpose, mechanism_of_impact, and justification to NodeTrace.
 
 No retrieval scores in the prompt — the LLM judges structural relevance only.
 
-Blueprint: master_blueprint.md §4 Step 4.
+Blueprint: master_blueprint.md §4 Step 3.1.
 """
 
 from __future__ import annotations
@@ -116,7 +116,7 @@ def chunk_candidates(
 ) -> list[list[Candidate]]:
     """Split candidates into batches of at most batch_size.
 
-    Blueprint §4 Step 4 (Batching Mandate: max 5 per LLM call).
+    Blueprint §4 Step 3.1 (Batching Mandate: max 5 per LLM call).
     """
     return [candidates[i : i + batch_size] for i in range(0, len(candidates), batch_size)]
 
@@ -135,7 +135,7 @@ def build_validator_prompt(
     DELIBERATELY EXCLUDES all retrieval scores (reranker_score, rrf_score,
     cosine_score). The LLM must judge structural relevance independently.
 
-    Blueprint §4 Step 4 Anti-Circular Logic Mandate.
+    Blueprint §4 Step 3.1 Anti-Circular Logic Mandate.
     """
     lines: list[str] = []
     lines.append(f"Change Request Intent: {cr_interp.primary_intent}")
@@ -218,7 +218,7 @@ def validate_sis_candidates_batched(
         justifications: dict node_id -> {function_purpose, mechanism, justification}.
         degraded: True if any batch was dropped due to API exhaustion.
 
-    Blueprint §4 Step 4 (Batching Mandate).
+    Blueprint §4 Step 3.1 (Batching Mandate).
     """
     if not candidates:
         return [], {}, False

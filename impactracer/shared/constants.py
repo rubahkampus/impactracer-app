@@ -140,7 +140,7 @@ INTO the package node and treating it as a unit-of-impact is incorrect.
 
 
 # =========================================================================
-# Weight-decay propagation prune (Step 6.8) — deterministic flood control.
+# Weight-decay propagation prune (Step 5.2a) — deterministic flood control.
 # =========================================================================
 #
 # 3. PROPAGATION_DECAY_WEIGHTS — the third flood-defence mechanism. After BFS
@@ -158,7 +158,7 @@ INTO the package node and treating it as a unit-of-impact is incorrect.
 #    (eval results,): at equal K it removed ~68% of propagated false
 #    positives while retaining ~70% of propagated true positives — strictly
 #    more surgical than PPR (40% TP kept) or semantic (55%) at the same FP cut.
-#    These are the authoritative decay weights for the always-on Step 6.8.
+#    These are the authoritative decay weights for the always-on Step 5.2a.
 
 PROPAGATION_DECAY_WEIGHTS: dict[str, float] = {
     "RENDERS": 1.0,          # workhorse: 13/17 BFS true positives
@@ -171,7 +171,7 @@ PROPAGATION_DECAY_WEIGHTS: dict[str, float] = {
     "DYNAMIC_IMPORT": 0.3,
     "IMPORTS": 0.3,          # dominant flood source: dead-reference fan-out
 }
-"""Per-edge weights for the Step 6.8 weight-decay propagation prune."""
+"""Per-edge weights for the Step 5.2a weight-decay propagation prune."""
 
 
 def propagation_decay_score(causal_chain: list[str], depth: int | None = None) -> float:

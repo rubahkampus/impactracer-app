@@ -1,42 +1,23 @@
 """Unit tests for pipeline/prevalidation_filter.py (FR-C4).
 
-Blueprint: master_blueprint.md §4 Steps 3.5–3.7.
+Blueprint: master_blueprint.md Phase 2 Step 2.2 (semantic dedup — the only active
+gate; the former score floor and plausibility gates are retired).
 """
 
 from __future__ import annotations
 
 import sqlite3
 
-import pytest
-
 from impactracer.pipeline.prevalidation_filter import (
     apply_prevalidation_gates,
-    step_3_6_semantic_dedup,
+    semantic_dedup,
 )
-from impactracer.shared.models import Candidate, CRInterpretation
+from impactracer.shared.models import Candidate
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _make_cr(
-    affected_layers=None,
-    named_entry_points=None,
-    out_of_scope_operations=None,
-    change_type="ADDITION",
-) -> CRInterpretation:
-    return CRInterpretation(
-        is_actionable=True,
-        primary_intent="Test CR",
-        change_type=change_type,
-        affected_layers=affected_layers or ["requirement", "design", "code"],
-        domain_concepts=["test"],
-        search_queries=["test query", "another query"],
-        named_entry_points=named_entry_points or [],
-        out_of_scope_operations=out_of_scope_operations or [],
-    )
-
 
 def _make_code_candidate(
     node_id="src/lib/services/auth.service.ts::loginUser",
@@ -111,11 +92,7 @@ def _make_db_with_candidates(pairs: list[tuple[str, str, float]]) -> sqlite3.Con
 
 
 # ---------------------------------------------------------------------------
-# Step 3.5 — Score Floor
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# Step 3.6 — Semantic Dedup
+# Step 2.2 — Semantic Dedup
 # ---------------------------------------------------------------------------
 
 def test_3_6_merges_doc_with_resolved_code():
@@ -123,7 +100,7 @@ def test_3_6_merges_doc_with_resolved_code():
     code = _make_code_candidate(node_id="src/lib/services/auth.service.ts::loginUser")
     conn = _make_db_with_candidates([("sdd__v_1", "src/lib/services/auth.service.ts::loginUser", 0.7)])
 
-    result = step_3_6_semantic_dedup([doc, code], conn)
+    result = semantic_dedup([doc, code], conn)
 
     assert len(result) == 1
     assert result[0].node_id == code.node_id
@@ -134,7 +111,7 @@ def test_3_6_keeps_doc_with_no_resolution():
     doc = _make_doc_candidate(node_id="sdd__v_1")
     conn = _make_db_with_candidates([])  # no candidates
 
-    result = step_3_6_semantic_dedup([doc], conn)
+    result = semantic_dedup([doc], conn)
     assert len(result) == 1
     assert result[0].node_id == doc.node_id
 
@@ -144,14 +121,14 @@ def test_3_6_keeps_doc_resolved_to_absent_code():
     # resolved code is NOT in candidates list
     conn = _make_db_with_candidates([("sdd__v_1", "src/other/node.ts::fn", 0.7)])
 
-    result = step_3_6_semantic_dedup([doc], conn)
+    result = semantic_dedup([doc], conn)
     assert len(result) == 1
 
 
 def test_3_6_preserves_code_candidates():
     code = _make_code_candidate()
     conn = _make_db_with_candidates([])
-    result = step_3_6_semantic_dedup([code], conn)
+    result = semantic_dedup([code], conn)
     assert len(result) == 1
     assert result[0].node_id == code.node_id
 
@@ -165,20 +142,10 @@ def test_3_6_multiple_docs_same_code():
         ("sdd__b", "src/lib/services/wallet.service.ts", 0.65),
     ])
 
-    result = step_3_6_semantic_dedup([doc1, doc2, code], conn)
+    result = semantic_dedup([doc1, doc2, code], conn)
     assert len(result) == 1
     assert set(result[0].merged_doc_ids) == {"sdd__a", "sdd__b"}
 
-
-# ---------------------------------------------------------------------------
-# Step 3.7 — Plausibility + Affinity
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # apply_prevalidation_gates (integration)
@@ -187,10 +154,9 @@ def test_3_6_multiple_docs_same_code():
 def test_apply_gates_all_disabled():
     code = _make_code_candidate(reranker_score=0.05)
     conn = _make_db_with_candidates([])
-    cr = _make_cr()
     settings = _make_settings(min_reranker_score=0.5)
     result = apply_prevalidation_gates(
-        [code], cr, settings, conn,
+        [code], settings, conn,
         enable_dedup=False,
     )
     # Nothing dropped — all gates disabled
@@ -207,10 +173,9 @@ def test_apply_gates_only_dedup_active():
     doc = _make_doc_candidate(node_id="sdd__v_1")
     code = _make_code_candidate()
     conn = _make_db_with_candidates([("sdd__v_1", code.node_id, 0.7)])
-    cr = _make_cr()
     settings = _make_settings(min_reranker_score=0.5)
     result = apply_prevalidation_gates(
-        [c_low, c_high, doc, code], cr, settings, conn,
+        [c_low, c_high, doc, code], settings, conn,
         enable_dedup=True,
     )
     # Score floor RETIRED: c_low (0.1 < 0.5) survives.
@@ -226,11 +191,10 @@ def test_apply_gates_dedup_can_be_disabled():
     doc = _make_doc_candidate(node_id="sdd__v_1")
     code = _make_code_candidate()
     conn = _make_db_with_candidates([("sdd__v_1", code.node_id, 0.7)])
-    cr = _make_cr()
     settings = _make_settings()
     candidates = [doc, code]
     result = apply_prevalidation_gates(
-        candidates, cr, settings, conn,
+        candidates, settings, conn,
         enable_dedup=False,
     )
     assert result == candidates
@@ -257,7 +221,7 @@ def test_3_6_merged_doc_contexts_populated():
         ("srs__v_1_pin", "src/lib/services/auth.service.ts::loginUser", 0.8)
     ])
 
-    result = step_3_6_semantic_dedup([doc, code], conn)
+    result = semantic_dedup([doc, code], conn)
 
     assert len(result) == 1
     code_node = result[0]

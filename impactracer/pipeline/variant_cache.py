@@ -96,7 +96,7 @@ class VariantCache:
         )
 
     # ----------------------------------------------------------------
-    # Step 1 — Interpret (LLM #1)
+    # Phase 1 — Interpret (LLM #1)
     # ----------------------------------------------------------------
 
     def get_interp(self) -> CRInterpretation | None:
@@ -109,7 +109,7 @@ class VariantCache:
         self._write_json("interp", ci.model_dump())
 
     # ----------------------------------------------------------------
-    # Step 2 — Retrieval (variant-scoped)
+    # Step 2.1 — Retrieval (variant-scoped)
     # ----------------------------------------------------------------
 
     def _get_candidates(self, key: str) -> list[Candidate] | None:
@@ -141,7 +141,7 @@ class VariantCache:
         self._put_candidates("retrieval_v2plus", candidates)
 
     # ----------------------------------------------------------------
-    # Step 3 — Cross-encoder rerank + 3 gates (V3-V7 share)
+    # Step 2.3 — Cross-encoder rerank + 3 gates (V3-V7 share)
     # ----------------------------------------------------------------
 
     def get_rerank_gated(self) -> list[Candidate] | None:
@@ -151,7 +151,7 @@ class VariantCache:
         self._put_candidates("rerank_gated", candidates)
 
     # ----------------------------------------------------------------
-    # Step 4 — LLM #2 SIS validation (V4-V7 share)
+    # Step 3.1 — LLM #2 SIS validation (V4-V7 share)
     # ----------------------------------------------------------------
 
     def get_sis_verdicts(self) -> tuple[list[str], dict[str, dict[str, str]], bool] | None:
@@ -180,7 +180,7 @@ class VariantCache:
         )
 
     # ----------------------------------------------------------------
-    # Step 5b — LLM #3 trace validation + code seeds (V5-V7 share)
+    # Step 4.2 — LLM #3 trace validation + code seeds (V5-V7 share)
     # ----------------------------------------------------------------
 
     def get_trace_verdicts(
@@ -221,7 +221,7 @@ class VariantCache:
         )
 
     # ----------------------------------------------------------------
-    # Step 6 — BFS CIS (V6-V7 share)
+    # Step 5.1a — BFS CIS (V6-V7 share)
     # ----------------------------------------------------------------
 
     def get_bfs_cis(self) -> CISResult | None:
@@ -234,7 +234,7 @@ class VariantCache:
         self._write_json("bfs_cis", _cisresult_to_dict(cis))
 
     # ----------------------------------------------------------------
-    # Step 7 — LLM #4 propagation validation (V7 only)
+    # Step 5.3a — LLM #4 propagation validation (V7 only)
     # ----------------------------------------------------------------
 
     def get_llm4_verdicts(self) -> tuple[CISResult, dict[str, str], bool] | None:
@@ -263,7 +263,7 @@ class VariantCache:
         )
 
     # ----------------------------------------------------------------
-    # Step 7.5 — LLM #4 sibling promotion (V6-V7 shared after the
+    # Step 5.3b — LLM #4 sibling promotion (V6-V7 shared after the
     # Ablation-boundary fix: sibling promotion moved from
     # V7-only gating to V6+ gating to isolate the LLM #4 propagation
     # validation contribution at the V6->V7 boundary).
@@ -304,7 +304,7 @@ class VariantCache:
         )
 
     # ----------------------------------------------------------------
-    # Step 7.5a — raw sibling CANDIDATES (V6 deterministic expansion).
+    # Step 5.1b — raw sibling CANDIDATES (V6 deterministic expansion).
     # After the V6/V7 split, sibling promotion has two halves mirroring
     # BFS's two halves:
     #   V6 (expand): collect_file_local_siblings injects RAW, unvalidated

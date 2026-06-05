@@ -3,7 +3,7 @@
 Four ranked lists per query: dense-doc, bm25-doc, dense-code, bm25-code,
 fused via unweighted Reciprocal Rank Fusion.
 
-Reference: master_blueprint.md §4 Step 2.
+Reference: master_blueprint.md §4 Step 2.1.
 """
 
 from __future__ import annotations
@@ -140,7 +140,7 @@ def reciprocal_rank_fusion(
 def _doc_filter_from_layers(affected_layers: list[str]) -> list[str]:
     """Map affected_layers to chunk_type values for ChromaDB $in filter.
 
-    Blueprint §4 Step 2:
+    Blueprint §4 Step 2.1:
       "requirement" -> ["FR", "NFR"]
       "design"      -> ["Design"]
       "code"        -> ["General"]  (N5: General chunks describe process flows
@@ -234,9 +234,8 @@ def _hydrate_doc_candidates(
 ) -> list[Candidate]:
     """Build Candidate objects for doc_chunks collection entries.
 
-    Populates file_path from ChromaDB metadata source_file so the density gate
-    in Step 3.7 can distinguish documents by source and the validator prompt
-    shows a meaningful source file for doc chunks.
+    Populates file_path from ChromaDB metadata source_file so the validator
+    prompt shows a meaningful source file for doc chunks.
     """
     if not ids:
         return []

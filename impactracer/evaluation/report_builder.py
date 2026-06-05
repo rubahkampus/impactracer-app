@@ -169,9 +169,8 @@ def path_contribution_section(
     lines.append(f"| {lbl3} | {fa['final']} | {fa['final_gt']} | "
                  f"{fb['final']} | {fb['final_gt']} |")
     lines.append("")
-    lines.append("_Filter row uses 6.8 drops for Path A and 6.9 drops for Path B; "
-                 "Path A counts are approximate (graph-collapse also folds CONTAINS "
-                 "leaves before the cut)._")
+    lines.append("_Filter row uses 6.8 weight-decay-prune drops for Path A and "
+                 "6.9 anchor-rrf-prune drops for Path B._")
     lines.append("")
     lines.append("### Final attribution — each path's contribution to the scored set")
     lines.append("")

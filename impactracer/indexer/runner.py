@@ -328,7 +328,7 @@ def run_indexing(
     chroma_client = get_client(settings.chroma_path)
     doc_col, code_col = init_collections(chroma_client)
 
-    # ── Step 1: scan repo ───────────────────────────────────────────────────
+    # ── Step A1.2: scan repo ───────────────────────────────────────────────────
     md_files, ts_files = _scan_repo(repo_path)
     all_files = md_files + ts_files
     logger.info(
@@ -339,7 +339,7 @@ def run_indexing(
     # Build lookup: relative path → absolute Path (for Pass 2 re-extraction)
     rel_to_abs: dict[str, Path] = {_rel_posix(p): p for p in ts_files}
 
-    # ── Step 2: hash diff ───────────────────────────────────────────────────
+    # ── Step A1.3: hash diff ───────────────────────────────────────────────────
     if force:
         # Clear file_hashes so every file re-enters the work set, AND wipe the
         # derived SQLite tables. Pass 1 uses INSERT OR REPLACE and Pass 2 uses
@@ -376,7 +376,7 @@ def run_indexing(
         len(work_set), len(deleted_posix),
     )
 
-    # ── Step 3: purge deleted files ─────────────────────────────────────────
+    # ── Step A1.4: purge deleted files ─────────────────────────────────────────
     for posix in deleted_posix:
         logger.debug("Purging deleted file: {}", posix)
         if posix.endswith(".md"):
@@ -394,14 +394,14 @@ def run_indexing(
     # Relative paths for the changed TS files (src/... or just filename)
     work_ts_rel: set[str] = {_rel_posix(p) for p in work_ts}
 
-    # ── Step 4: Markdown chunking ────────────────────────────────────────────
+    # ── Step A2.1: Markdown chunking ────────────────────────────────────────────
     all_chunks: list[dict] = []
     for md_path in work_md:
         chunks = chunk_markdown(md_path)
         all_chunks.extend(chunks)
         logger.debug("Chunked {} → {} chunks", md_path.name, len(chunks))
 
-    # ── Step 5: AST Pass 1 ───────────────────────────────────────────────────
+    # ── Step A2.2: AST Pass 1 ───────────────────────────────────────────────────
     if work_ts_rel:
         ph = ",".join("?" * len(work_ts_rel))
         reverse_dep_rows = conn.execute(
@@ -425,7 +425,7 @@ def run_indexing(
         extract_nodes(ts_path, source_bytes, conn)
         logger.debug("Pass 1: {}", ts_path.name)
 
-    # ── Step 6: AST Pass 2 ─────────────────────────────────────────────────
+    # ── Step A2.3: AST Pass 2 ─────────────────────────────────────────────────
     # Collect ALL known node IDs for cross-file resolution AFTER Pass 1.
     known_node_ids: set[str] = {
         r[0] for r in conn.execute("SELECT node_id FROM code_nodes").fetchall()
@@ -455,7 +455,7 @@ def run_indexing(
 
     conn.commit()
 
-    # ── Step 7: embed and upsert ─────────────────────────────────────────────
+    # ── Step A3.1: embed and upsert ─────────────────────────────────────────────
     logger.info("Loading embedder: {}", settings.embedding_model)
     embedder = Embedder(
         model_name=settings.embedding_model,
@@ -475,7 +475,7 @@ def run_indexing(
     )
     _embed_code_nodes(conn, embedder, code_col, min_len, rel_paths=embed_rel)
 
-    # ── Step 8: traceability (full recompute) ────────────────────────────────
+    # ── Step A3.2: traceability (full recompute) ────────────────────────────────
     # Blueprint §3.8 step 8: "full recompute is correct; layer-weighted scores
     # depend on the population." Fetch ALL vecs from ChromaDB.
     all_code = code_col.get(include=["embeddings", "metadatas"])
@@ -512,12 +512,12 @@ def run_indexing(
     )
     logger.info("Traceability pairs stored: {}", pairs_stored)
 
-    # ── Project-skeleton extraction (consumed by LLM #1 Step 1) ──────────────
+    # ── Step A3.3: Project-skeleton extraction (consumed by LLM #1 Step 1.2) ──────────────
     # Build the cached textual summary the two-stage interpreter feeds to
     # LLM #1. Deterministic given the current index state.
     write_project_skeleton(conn, Path(settings.project_skeleton_path))
 
-    # ── Step 9: update file_hashes ────────────────────────────────────────────
+    # ── Step A4.1: update file_hashes ────────────────────────────────────────────
     now = dt.datetime.now(dt.timezone.utc).isoformat()
     for path in work_set:
         posix = path.as_posix()
@@ -529,7 +529,7 @@ def run_indexing(
         )
     conn.commit()
 
-    # ── Step 10: index_metadata ──────────────────────────────────────────────
+    # ── Step A4.2: index_metadata ──────────────────────────────────────────────
     total_code_nodes = conn.execute("SELECT COUNT(*) FROM code_nodes").fetchone()[0]
     total_edges = conn.execute("SELECT COUNT(*) FROM structural_edges").fetchone()[0]
     total_doc_chunks = doc_col.count()

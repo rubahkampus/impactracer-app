@@ -4,7 +4,7 @@ Hub Node Mitigation (mandate #1): any node with in-degree + out-degree > 20
 (typical for generic interfaces / framework primitives) has its traversal
 depth capped to 1 for ALL edge types.
 
-Reference: master_blueprint.md §4 Step 6.
+Reference: master_blueprint.md §4 Step 5.1a.
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ def compute_confidence_tiers(
 ) -> frozenset[str]:
     """Return the top-N seeds by reranker score as the high-confidence set.
 
-    Blueprint §4 Step 6: doc-chunk reranker scores propagate to their
+    Blueprint §4 Step 5.1a: doc-chunk reranker scores propagate to their
     resolved code seeds via dict.setdefault in runner.py.
     """
     if not code_seeds:
@@ -113,7 +113,7 @@ def bfs_propagate(
 
     Invariant: ``len(sis_nodes) + len(propagated_nodes) == len(visited_set)``.
 
-    Blueprint §4 Step 6.
+    Blueprint §4 Step 5.1a.
     """
     if seed_file_classification is None:
         seed_file_classification = {}
@@ -298,7 +298,7 @@ def bfs_propagate(
 
 
 # =========================================================================
-# Sibling promotion via CONTAINS (Step 7.5 support)
+# Sibling promotion via CONTAINS (Step 5.3b support)
 # =========================================================================
 
 #: Node types that can appear as anchors for sibling promotion.
@@ -492,7 +492,7 @@ def apply_deletion_import_only_filter(cis: CISResult) -> tuple[CISResult, int]:
 
 
 # =========================================================================
-# Propagator — the deterministic propagation component (steps 6 + 6.6-6.9).
+# Propagator — the deterministic propagation component (Phase 5 deterministic: 5.1a/5.1b/5.2a/5.2b).
 # =========================================================================
 # Composes the building blocks above into the full V6 propagation pass and
 # owns its cache + trace surface, so the runner calls it once. Two arms:
@@ -521,7 +521,7 @@ def _expand_siblings(cis, conn, sis_justifications, trace_mechanisms,
                      trace_justifications, admitted_candidates, settings, variant_cache):
     """In-file arm: inject raw CONTAINS-sibling candidates of mechanism-carrying
     seeds, tagged ``sibling_candidate``. Caches the per-candidate context
-    (file, anchor, anchor rrf) the V7 sibling validator and the 6.9 prune need.
+    (file, anchor, anchor rrf) the V7 sibling validator and the 5.2b prune need.
     Returns the trace payload."""
     anchors: list[str] = []
     anchor_just: dict[str, str] = {}

@@ -415,7 +415,7 @@ class SISValidationResult(TruncatingModel):
 class TraceVerdict(TruncatingModel):
     """Per-pair decision from LLM Call #3 (FR-C7).
 
-    LLM #3 now applies the SAME two-standard test as LLM #2 (Step 4): a
+    LLM #3 now applies the SAME two-standard test as LLM #2 (Step 3.1): a
     resolved code node is admitted only if (1) it has a structural
     implementation relationship to the doc section AND (2) the CR
     structurally modifies it. The ``decision`` encodes the joint outcome and
@@ -811,7 +811,7 @@ class Candidate:
     text_snippet: str = ""
     internal_logic_abstraction: str | None = None
     # merged_doc_ids: node IDs of doc chunks deduplicated into this code node
-    # during Step 3.6 (semantic dedup).
+    # during Step 2.2 (semantic dedup).
     merged_doc_ids: list[str] = field(default_factory=list)
     # merged_doc_contexts: parallel list of (section_title, text) tuples for
     # each merged doc chunk.  Injected into the LLM #2 validator prompt as

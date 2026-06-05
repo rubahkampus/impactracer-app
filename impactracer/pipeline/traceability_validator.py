@@ -13,12 +13,12 @@ DROP entire batch, continue. Runner sets degraded_run=True on any drop.
 Returns (validated_seeds, low_conf_map, justifications, mechanisms, degraded)
 so the runner can attach LLM #3 reasoning to resolved code seed NodeTraces.
 ``mechanisms`` is non-empty only for CONFIRMED seeds and is what makes a
-resolved seed anchor-eligible for Step-7.5 sibling promotion on par with a
+resolved seed anchor-eligible for Step-5.3b sibling promotion on par with a
 direct LLM-#2-confirmed code seed.
 
 No retrieval scores in the prompt (anti-circular mandate).
 
-Reference: master_blueprint.md §4 Step 5b.
+Reference: master_blueprint.md §4 Step 4.2.
 """
 
 from __future__ import annotations
@@ -191,7 +191,7 @@ def validate_trace_resolutions(
                               with a direct LLM #2-confirmed code seed).
         degraded:             True if any batch was dropped due to API exhaustion.
 
-    Blueprint §4 Step 5b.
+    Blueprint §4 Step 4.2.
     """
     if not resolutions:
         return [], {}, {}, {}, False

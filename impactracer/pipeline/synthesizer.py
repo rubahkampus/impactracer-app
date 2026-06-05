@@ -10,7 +10,7 @@ The runner builds impacted_entities and impacted_files deterministically
 from the validated CIS. LLM #5 never authors per-entity justifications.
 The full CIS appears in the report regardless of prompt-window truncation.
 
-Reference: master_blueprint.md §4 Step 9.
+Reference: master_blueprint.md §4 Step 6.2.
 """
 
 from __future__ import annotations

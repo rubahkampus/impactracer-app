@@ -21,12 +21,11 @@ from impactracer.shared.models import Candidate
 
 def apply_prevalidation_gates(
     candidates: list[Candidate],
-    cr_interp: CRInterpretation,
     settings: object,
     conn: sqlite3.Connection,
     enable_dedup: bool = True,
 ) -> list[Candidate]:
-    """Pre-validation gate: Step 3.6 semantic dedup (the only active gate).
+    """Pre-validation gate: Step 2.2 semantic dedup (the only active gate).
 
     Merges each doc chunk into its resolved code candidate, attaching the doc's
     section text as Business Context for LLM #2 and avoiding doc/code
@@ -34,14 +33,14 @@ def apply_prevalidation_gates(
     """
     if enable_dedup:
         attach_doc_contexts = not bool(getattr(settings, "code_only_mode", False))
-        candidates = step_3_6_semantic_dedup(
+        candidates = semantic_dedup(
             candidates, conn, attach_doc_contexts=attach_doc_contexts
         )
-        logger.info("[gates] Post-3.6 (semantic dedup): {} candidates", len(candidates))
+        logger.info("[gates] Post-2.2 (semantic dedup): {} candidates", len(candidates))
     return candidates
 
 
-def step_3_6_semantic_dedup(
+def semantic_dedup(
     candidates: list[Candidate],
     conn: sqlite3.Connection,
     attach_doc_contexts: bool = True,
@@ -66,7 +65,7 @@ def step_3_6_semantic_dedup(
     the Sprint-24 supervisor experiment to isolate the documentation
     contribution.
 
-    Blueprint §4 Step 3.6.
+    Blueprint §4 Step 2.2.
     """
     # Build index of current code node IDs for O(1) lookup
     code_candidate_idx: dict[str, Candidate] = {
@@ -119,13 +118,13 @@ def step_3_6_semantic_dedup(
 
             merged.add(c.node_id)
             logger.debug(
-                "[gates 3.6] Merged doc {} -> code {} (merged_doc_ids={})",
+                "[gates 2.2] Merged doc {} -> code {} (merged_doc_ids={})",
                 c.node_id, top1_code, target_code.merged_doc_ids,
             )
         else:
             result.append(c)
 
     if merged:
-        logger.info("[gates 3.6] Merged {} doc chunks into existing code candidates", len(merged))
+        logger.info("[gates 2.2] Merged {} doc chunks into existing code candidates", len(merged))
 
     return result

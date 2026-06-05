@@ -16,7 +16,7 @@ principle — LLM #5 never re-justifies individual nodes).
 
 No retrieval scores in the prompt (anti-circular mandate).
 
-Reference: master_blueprint.md §4 Step 7.
+Reference: master_blueprint.md §4 Step 5.3a.
 """
 
 from __future__ import annotations
@@ -213,7 +213,7 @@ def validate_propagation(
         justifications: dict node_id -> LLM #4 justification text (for kept nodes).
         degraded: True if any batch (main or child) was dropped due to API exhaustion.
 
-    Blueprint §4 Step 7.
+    Blueprint §4 Step 5.3a.
     """
     if not cis.propagated_nodes:
         return cis, {}, False
@@ -226,7 +226,7 @@ def validate_propagation(
         if trace.justification_source == "sibling_candidate":
             # Raw file-local sibling candidates (the in-file arm of
             # propagation) are validated by the dedicated sibling validator
-            # (Step 7.5), NOT this outward-BFS validator. Pass them through
+            # (Step 5.3b), NOT this outward-BFS validator. Pass them through
             # untouched so the sibling pass can admit/reject them.
             auto_kept[node_id] = trace
         elif (
@@ -321,7 +321,7 @@ def validate_propagation(
 
 
 # =========================================================================
-# Sibling validation via LLM #4 (Step 7.5)
+# Sibling validation via LLM #4 (Step 5.3b)
 # =========================================================================
 
 _SIBLING_SYSTEM_PROMPT = """\
