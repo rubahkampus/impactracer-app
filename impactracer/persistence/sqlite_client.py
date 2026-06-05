@@ -19,8 +19,7 @@ CREATE TABLE IF NOT EXISTS code_nodes (
     node_type                   TEXT    NOT NULL
         CHECK (node_type IN (
             'File', 'Class', 'Function', 'Method',
-            'Interface', 'TypeAlias', 'Enum',
-            'ExternalPackage', 'InterfaceField', 'Variable'
+            'Interface', 'TypeAlias', 'Enum', 'Variable'
         )),
     name                        TEXT    NOT NULL,
     file_path                   TEXT,
@@ -51,16 +50,10 @@ CREATE TABLE IF NOT EXISTS structural_edges (
     source_id   TEXT    NOT NULL,
     target_id   TEXT    NOT NULL,
     edge_type   TEXT    NOT NULL
-        -- Schema retains all extracted edge types for provenance. NOTE: four
-        -- of these (HOOK_DEPENDS_ON, PASSES_CALLBACK, DEPENDS_ON_EXTERNAL,
-        -- CLIENT_API_CALLS) were retired from BFS propagation as
-        -- inert (see constants.RETIRED_PROPAGATION_EDGES). They are still
-        -- emitted and stored, but the traversal no longer walks them.
         CHECK (edge_type IN (
-            'CALLS', 'INHERITS', 'IMPLEMENTS', 'TYPED_BY', 'FIELDS_ACCESSED',
-            'DEFINES_METHOD', 'HOOK_DEPENDS_ON', 'PASSES_CALLBACK',
-            'IMPORTS', 'RENDERS', 'DEPENDS_ON_EXTERNAL',
-            'CLIENT_API_CALLS', 'DYNAMIC_IMPORT', 'CONTAINS'
+            'CALLS', 'INHERITS', 'IMPLEMENTS', 'TYPED_BY',
+            'DEFINES_METHOD', 'IMPORTS', 'RENDERS',
+            'DYNAMIC_IMPORT', 'CONTAINS'
         )),
     PRIMARY KEY (source_id, target_id, edge_type),
     FOREIGN KEY (source_id) REFERENCES code_nodes(node_id),

@@ -97,12 +97,6 @@ class Settings(BaseSettings):
     # --force-change-type-from-gt is passed. Not for production analyze.
     force_change_type: str | None = None
 
-    # Re-admit the four retired propagation edges (PASSES_CALLBACK,
-    # HOOK_DEPENDS_ON, CLIENT_API_CALLS, DEPENDS_ON_EXTERNAL) into the BFS
-    # traversal config. Default False: they were retired as
-    # propagation-inert (zero TP on citrakara+nova). True is diagnostic-only —
-    # see constants.active_edge_config / RETIRED_PROPAGATION_EDGES.
-    enable_retired_edges: bool = False
 
     enable_sibling_promotion: bool = True
     sibling_promotion_max_per_file: int = 12        # candidate ceiling per file

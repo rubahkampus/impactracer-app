@@ -9,7 +9,7 @@ import pytest
 
 from impactracer.persistence.sqlite_client import connect, init_schema
 from impactracer.persistence.chroma_client import get_client, init_collections
-from impactracer.shared.constants import EDGE_CONFIG, RETIRED_PROPAGATION_EDGES
+from impactracer.shared.constants import EDGE_CONFIG
 
 
 # ---------------------------------------------------------------------------
@@ -21,13 +21,10 @@ _VALID_CLASSIFICATION = "UTILITY"
 
 _ALL_NODE_TYPES = (
     "File", "Class", "Function", "Method",
-    "Interface", "TypeAlias", "Enum",
-    "ExternalPackage", "InterfaceField",
+    "Interface", "TypeAlias", "Enum", "Variable",
 )
 
-# All 14 extracted/stored edge types: 10 propagated (EDGE_CONFIG) + 4 retired.
-# The DDL CHECK accepts all 14; only EDGE_CONFIG was trimmed to 10 in 2026-06.
-_ALL_EDGE_TYPES = tuple(EDGE_CONFIG.keys()) + tuple(RETIRED_PROPAGATION_EDGES.keys())
+_ALL_EDGE_TYPES = tuple(EDGE_CONFIG.keys())
 
 
 def _fresh_conn() -> sqlite3.Connection:
@@ -146,20 +143,8 @@ def test_all_14_edge_types_accepted() -> None:
 
 
 def test_edge_config_has_exactly_9_propagated_entries() -> None:
-    """EDGE_CONFIG defines the 9 propagated edge types (post 2026-06 retirements).
-
-    14 edge types are extracted/stored. 5 are retired from propagation and live
-    in RETIRED_PROPAGATION_EDGES: PASSES_CALLBACK, HOOK_DEPENDS_ON,
-    DEPENDS_ON_EXTERNAL, CLIENT_API_CALLS (wave 1, inert), and FIELDS_ACCESSED
-    (wave 2 — its only target, the InterfaceField node type, was retired). The
-    two sets together still total 14.
-    """
+    """EDGE_CONFIG defines the 9 walked edge types."""
     assert len(EDGE_CONFIG) == 9
-    assert len(RETIRED_PROPAGATION_EDGES) == 5
-    assert len(set(EDGE_CONFIG) | set(RETIRED_PROPAGATION_EDGES)) == 14
-    assert set(EDGE_CONFIG).isdisjoint(RETIRED_PROPAGATION_EDGES)
-    # FIELDS_ACCESSED specifically is retired, not active.
-    assert "FIELDS_ACCESSED" in RETIRED_PROPAGATION_EDGES
     assert "FIELDS_ACCESSED" not in EDGE_CONFIG
 
 

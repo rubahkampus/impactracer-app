@@ -116,8 +116,6 @@ NodeType = Literal[
     "Interface",
     "TypeAlias",
     "Enum",
-    "ExternalPackage",
-    "InterfaceField",
     "Variable",
 ]
 """Code graph node kinds.

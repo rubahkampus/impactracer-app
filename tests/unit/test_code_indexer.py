@@ -25,17 +25,6 @@ from impactracer.indexer.code_indexer import (
 # Fixtures
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(autouse=True)
-def _emit_retired_edges(monkeypatch):
-    """Force-enable retired-edge/ExternalPackage emission for Pass-1 acceptance
-    tests. Production gates these off by default (retired 2026-06), but the
-    extraction LOGIC is intentionally preserved and reversible — these tests
-    validate that logic. Tests asserting ABSENCE (e.g. relative imports never
-    create an ExternalPackage) remain correct under emission-on.
-    """
-    from impactracer.indexer import code_indexer as _ci
-    monkeypatch.setattr(_ci, "_EMIT_RETIRED_EDGES", True)
-
 
 @pytest.fixture()
 def conn():
@@ -298,32 +287,8 @@ def test_interface_extracted(conn):
     assert "Interface" in types
 
 
-def test_interface_fields_extracted(conn):
-    src = b"export interface IUser { name: string; age: number; }"
-    nodes = extract_nodes(_make_file_path("src/types/common.ts"), src, conn)
-    field_nodes = [n for n in nodes if n["node_type"] == "InterfaceField"]
-    names = {n["name"] for n in field_nodes}
-    assert names == {"name", "age"}
-
-
-def test_interface_field_node_ids(conn):
-    src = b"export interface IUser { name: string; age: number; }"
-    nodes = extract_nodes(_make_file_path("src/types/common.ts"), src, conn)
-    ids = {n["node_id"] for n in nodes}
-    assert "src/types/common.ts::IUser.name" in ids
-    assert "src/types/common.ts::IUser.age" in ids
-
-
-def test_interface_field_embed_text_is_empty(conn):
-    """InterfaceField nodes are degenerate by blueprint §3.2 — embed_text == ''."""
-    src = b"export interface IUser { name: string; }"
-    nodes = extract_nodes(_make_file_path("src/types/common.ts"), src, conn)
-    field = next(n for n in nodes if n["node_type"] == "InterfaceField")
-    assert field["embed_text"] == ""
-
-
 # ---------------------------------------------------------------------------
-# extract_nodes — TypeAlias nodes (object shape → InterfaceField children)
+# extract_nodes — TypeAlias nodes
 # ---------------------------------------------------------------------------
 
 def test_type_alias_extracted(conn):
@@ -331,15 +296,6 @@ def test_type_alias_extracted(conn):
     nodes = extract_nodes(_make_file_path("src/types/common.ts"), src, conn)
     types = [n["node_type"] for n in nodes]
     assert "TypeAlias" in types
-
-
-def test_type_alias_object_shape_emits_fields(conn):
-    src = b"export type MyAlias = { x: number; y: string; };"
-    nodes = extract_nodes(_make_file_path("src/types/common.ts"), src, conn)
-    fields = [n for n in nodes if n["node_type"] == "InterfaceField"]
-    assert {f["name"] for f in fields} == {"x", "y"}
-
-
 # ---------------------------------------------------------------------------
 # extract_nodes — Enum nodes
 # ---------------------------------------------------------------------------
@@ -356,52 +312,6 @@ def test_enum_node_id(conn):
     nodes = extract_nodes(_make_file_path("src/types/common.ts"), src, conn)
     ids = {n["node_id"] for n in nodes}
     assert "src/types/common.ts::Direction" in ids
-
-
-# ---------------------------------------------------------------------------
-# extract_nodes — ExternalPackage nodes
-# ---------------------------------------------------------------------------
-
-def test_external_package_extracted(conn):
-    src = b"import { useState } from 'react';\nexport function f() {}"
-    nodes = extract_nodes(_make_file_path("src/components/Foo.tsx"), src, conn)
-    types = [n["node_type"] for n in nodes]
-    assert "ExternalPackage" in types
-
-
-def test_external_package_node_id(conn):
-    src = b"import axios from 'axios';\nexport function f() {}"
-    nodes = extract_nodes(_make_file_path("src/lib/helper.ts"), src, conn)
-    ids = {n["node_id"] for n in nodes}
-    assert "ext::axios" in ids
-
-
-def test_external_package_embed_text_is_empty(conn):
-    """ExternalPackage nodes are degenerate — embed_text == ''."""
-    src = b"import axios from 'axios';\nexport function f() {}"
-    nodes = extract_nodes(_make_file_path("src/lib/helper.ts"), src, conn)
-    ext = next(n for n in nodes if n["node_type"] == "ExternalPackage")
-    assert ext["embed_text"] == ""
-
-
-def test_relative_import_does_not_create_external_package(conn):
-    src = b"import { foo } from './utils';\nexport function f() {}"
-    nodes = extract_nodes(_make_file_path("src/lib/helper.ts"), src, conn)
-    ext_nodes = [n for n in nodes if n["node_type"] == "ExternalPackage"]
-    assert ext_nodes == []
-
-
-def test_external_package_deduplicated(conn):
-    """Same external package imported twice → only one ExternalPackage node."""
-    src = b"""
-import { useState } from 'react';
-import { useEffect } from 'react';
-export function f() {}
-"""
-    nodes = extract_nodes(_make_file_path("src/components/Foo.tsx"), src, conn)
-    ext_nodes = [n for n in nodes if n["node_type"] == "ExternalPackage"]
-    react_nodes = [n for n in ext_nodes if n["name"] == "react"]
-    assert len(react_nodes) == 1
 
 
 # ---------------------------------------------------------------------------

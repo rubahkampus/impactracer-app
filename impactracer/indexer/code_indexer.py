@@ -4,8 +4,7 @@ Two-pass design:
 
 - Pass 1 (:func:`extract_nodes`): walks the AST to produce all ten
   canonical node kinds — ``File``, ``Class``, ``Function``, ``Method``,
-  ``Interface``, ``TypeAlias``, ``Enum``, ``InterfaceField``, ``Variable``,
-  and ``ExternalPackage``. Populates ``internal_logic_abstraction`` via
+  ``Interface``, ``TypeAlias``, ``Enum``, and ``Variable``. Populates ``internal_logic_abstraction`` via
   :func:`skeletonize_node`. ``Variable`` covers module-level ``const``
   declarations whose RHS is a non-arrow expression (Mongoose schemas,
   constant arrays, frozen objects), restoring GT-existence coverage that
@@ -21,7 +20,6 @@ Reference: master_blueprint.md §3.2 (Pass 1), §3.4 (Pass 2).
 
 from __future__ import annotations
 
-import os
 import re
 import sqlite3
 from pathlib import Path
@@ -31,25 +29,6 @@ from tree_sitter import Node, Parser
 from tree_sitter_languages import get_parser as _get_ts_parser_impl
 
 from impactracer.indexer.skeletonizer import skeletonize_node
-from impactracer.shared.constants import RETIRED_NODE_TYPES, RETIRED_PROPAGATION_EDGES
-
-
-def _resolve_emit_retired_edges() -> bool:
-    """Whether the indexer writes the four retired edge types.
-
-    Default False (index stays clean). Re-enable by setting
-    Settings.enable_retired_edges (env IMPACTRACER_ENABLE_RETIRED_EDGES=1) and
-    re-indexing. Falls back to the raw env var if Settings cannot be built.
-    """
-    try:
-        from impactracer.shared.config import Settings
-        return bool(Settings().enable_retired_edges)
-    except Exception:
-        return os.getenv("IMPACTRACER_ENABLE_RETIRED_EDGES", "").lower() in ("1", "true", "yes")
-
-
-#: Resolved once at import. Gate applied in :func:`_emit_edge`.
-_EMIT_RETIRED_EDGES: bool = _resolve_emit_retired_edges()
 
 
 # ---------------------------------------------------------------------------
@@ -413,22 +392,12 @@ def extract_nodes(
     nodes.append(file_node)
 
     # --- Walk top-level declarations ---
-    # Track external packages seen (to emit one ExternalPackage per unique specifier)
-    external_packages: dict[str, dict[str, Any]] = {}
-
-    # We need to look at every top-level and nested declaration.
-    # Strategy: recursive walk collecting nodes for each declaration type.
+    # Recursive walk collecting nodes for each declaration type.
     _walk_declarations(
         root, source_bytes, rel_posix, file_path.name,
-        file_classification, nodes, external_packages,
+        file_classification, nodes,
         parent_class_id=None,
     )
-
-    # --- ExternalPackage nodes ---
-    # Built here but filtered at the _insert_nodes write chokepoint when
-    # retired (RETIRED_NODE_TYPES, default on). See _insert_nodes / _emit_edge.
-    for pkg_id, pkg_node in external_packages.items():
-        nodes.append(pkg_node)
 
     # --- Insert all nodes into SQLite ---
     _insert_nodes(nodes, conn)
@@ -443,7 +412,6 @@ def _walk_declarations(
     filename: str,
     file_classification: str | None,
     nodes: list[dict[str, Any]],
-    external_packages: dict[str, dict[str, Any]],
     parent_class_id: str | None,
 ) -> None:
     """Recursive walker for all declaration types."""
@@ -451,17 +419,15 @@ def _walk_declarations(
         # Unwrap export_statement to get the actual declaration
         decl = child
         if child.type == "export_statement":
-            # Find the actual declaration inside the export
             inner = _unwrap_export(child)
             if inner is not None:
                 decl = inner
             else:
-                # Could be export * from ... or export { } from ... — handle imports
-                _handle_import_for_external(child, src, file_posix, external_packages)
+                # export * from ... / export { } from ... — no node produced.
                 continue
 
         if decl.type == "import_statement":
-            _handle_import_for_external(decl, src, file_posix, external_packages)
+            # Imports produce no node (ExternalPackage retired).
             continue
 
         if decl.type == "function_declaration":
@@ -497,17 +463,15 @@ def _walk_declarations(
             continue
 
         if decl.type == "interface_declaration":
-            iface_node, field_nodes = _build_interface_nodes(decl, child, src, file_posix)
+            iface_node = _build_interface_node(decl, child, src, file_posix)
             if iface_node:
                 nodes.append(iface_node)
-                nodes.extend(field_nodes)
             continue
 
         if decl.type == "type_alias_declaration":
-            ta_node, field_nodes = _build_type_alias_nodes(decl, child, src, file_posix)
+            ta_node = _build_type_alias_node(decl, child, src, file_posix)
             if ta_node:
                 nodes.append(ta_node)
-                nodes.extend(field_nodes)
             continue
 
         if decl.type == "enum_declaration":
@@ -520,7 +484,7 @@ def _walk_declarations(
         if child.child_count > 0:
             _walk_declarations(
                 child, src, file_posix, filename, file_classification,
-                nodes, external_packages, parent_class_id,
+                nodes, parent_class_id,
             )
 
 
@@ -537,52 +501,6 @@ def _unwrap_export(export_node: Node) -> Node | None:
         ):
             return child
     return None
-
-
-def _handle_import_for_external(
-    node: Node,
-    src: bytes,
-    file_posix: str,
-    external_packages: dict[str, dict[str, Any]],
-) -> None:
-    """Extract non-relative imports and register ExternalPackage nodes."""
-    # Works for both import_statement and export_statement (re-export from)
-    specifier_node = None
-    for child in node.children:
-        if child.type == "string":
-            specifier_node = child
-            break
-    if specifier_node is None:
-        return
-    raw = src[specifier_node.start_byte:specifier_node.end_byte].decode(errors="replace")
-    # Strip quotes
-    specifier = raw.strip("'\"")
-    # Relative imports are handled in Pass 2 (IMPORTS edge); skip here
-    if specifier.startswith("."):
-        return
-    # @/ path-alias imports are intra-repo — Pass 2 resolves them as IMPORTS edges.
-    # Creating an ExternalPackage node here would leave a rogue unreachable node.
-    if specifier.startswith("@/"):
-        return
-    if specifier in external_packages:
-        return
-    pkg_id = f"ext::{specifier}"
-    external_packages[specifier] = {
-        "node_id": pkg_id,
-        "node_type": "ExternalPackage",
-        "name": specifier,
-        "file_path": file_posix,
-        "file_classification": None,
-        "route_path": None,
-        "signature": None,
-        "docstring": None,
-        "internal_logic_abstraction": None,
-        "source_code": None,
-        "start_line": node.start_point[0] + 1,
-        "end_line": node.end_point[0] + 1,
-        "is_exported": False,
-        "embed_text": "",  # Degenerate: not embedded (blueprint §3.2)
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -1032,15 +950,15 @@ def _build_method_node(
     }
 
 
-def _build_interface_nodes(
+def _build_interface_node(
     decl: Node,
     raw_child: Node,
     src: bytes,
     file_posix: str,
-) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+) -> dict[str, Any] | None:
     name_node = decl.child_by_field_name("name")
     if name_node is None:
-        return None, []
+        return None
     name = src[name_node.start_byte:name_node.end_byte].decode(errors="replace")
     is_exported, _ = _is_exported(decl)
     docstring = _extract_jsdoc(raw_child, src)
@@ -1080,58 +998,18 @@ def _build_interface_nodes(
         "is_exported": is_exported,
         "embed_text": embed_text,
     }
-
-    # --- InterfaceField nodes (one per property_signature in object_type) ---
-    field_nodes: list[dict[str, Any]] = []
-    body_node = None
-    for c in decl.children:
-        if c.type == "object_type":
-            body_node = c
-            break
-    if body_node:
-        for prop in body_node.children:
-            if prop.type == "property_signature":
-                prop_name_node = prop.child_by_field_name("name")
-                if prop_name_node is None:
-                    # Some property_signatures have the name as first identifier child
-                    for cc in prop.children:
-                        if cc.type in ("property_identifier", "identifier"):
-                            prop_name_node = cc
-                            break
-                if prop_name_node is None:
-                    continue
-                prop_name = src[prop_name_node.start_byte:prop_name_node.end_byte].decode(errors="replace")
-                field_id = _make_node_id(file_posix, f"{name}.{prop_name}")
-                field_nodes.append({
-                    "node_id": field_id,
-                    "node_type": "InterfaceField",
-                    "name": prop_name,
-                    "file_path": file_posix,
-                    "file_classification": None,
-                    "route_path": None,
-                    "signature": src[prop.start_byte:prop.end_byte].decode(errors="replace"),
-                    "docstring": None,
-                    "internal_logic_abstraction": None,
-                    "source_code": None,
-                    "start_line": prop.start_point[0] + 1,
-                    "end_line": prop.end_point[0] + 1,
-                    "is_exported": False,
-                    "embed_text": "",  # Degenerate by blueprint §3.2
-                    "parent_interface_id": iface_node_id,
-                })
-
-    return iface_node, field_nodes
+    return iface_node
 
 
-def _build_type_alias_nodes(
+def _build_type_alias_node(
     decl: Node,
     raw_child: Node,
     src: bytes,
     file_posix: str,
-) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+) -> dict[str, Any] | None:
     name_node = decl.child_by_field_name("name")
     if name_node is None:
-        return None, []
+        return None
     name = src[name_node.start_byte:name_node.end_byte].decode(errors="replace")
     is_exported, _ = _is_exported(decl)
     docstring = _extract_jsdoc(raw_child, src)
@@ -1158,47 +1036,7 @@ def _build_type_alias_nodes(
         "is_exported": is_exported,
         "embed_text": embed_text,
     }
-
-    # InterfaceField children for object-shape TypeAliases
-    field_nodes: list[dict[str, Any]] = []
-    # Find the value of the type alias — if it's an object_type, emit fields
-    value_node = None
-    for c in decl.children:
-        if c.type == "object_type":
-            value_node = c
-            break
-    if value_node:
-        for prop in value_node.children:
-            if prop.type == "property_signature":
-                prop_name_node = prop.child_by_field_name("name")
-                if prop_name_node is None:
-                    for cc in prop.children:
-                        if cc.type in ("property_identifier", "identifier"):
-                            prop_name_node = cc
-                            break
-                if prop_name_node is None:
-                    continue
-                prop_name = src[prop_name_node.start_byte:prop_name_node.end_byte].decode(errors="replace")
-                field_id = _make_node_id(file_posix, f"{name}.{prop_name}")
-                field_nodes.append({
-                    "node_id": field_id,
-                    "node_type": "InterfaceField",
-                    "name": prop_name,
-                    "file_path": file_posix,
-                    "file_classification": None,
-                    "route_path": None,
-                    "signature": src[prop.start_byte:prop.end_byte].decode(errors="replace"),
-                    "docstring": None,
-                    "internal_logic_abstraction": None,
-                    "source_code": None,
-                    "start_line": prop.start_point[0] + 1,
-                    "end_line": prop.end_point[0] + 1,
-                    "is_exported": False,
-                    "embed_text": "",
-                    "parent_interface_id": ta_node_id,
-                })
-
-    return ta_node, field_nodes
+    return ta_node
 
 
 def _build_enum_node(
@@ -1242,16 +1080,7 @@ def _build_enum_node(
 # ---------------------------------------------------------------------------
 
 def _insert_nodes(nodes: list[dict[str, Any]], conn: sqlite3.Connection) -> None:
-    """INSERT OR REPLACE all node dicts into code_nodes.
-
-    Node types in ``RETIRED_NODE_TYPES`` (ExternalPackage, InterfaceField) are
-    NOT written by default (retired as inert). The extraction logic that builds
-    them is left intact for reversibility; this is the single write chokepoint
-    where the gate is applied. Set ``IMPACTRACER_ENABLE_RETIRED_EDGES=1`` (env)
-    or ``settings.enable_retired_edges`` and re-index to restore them.
-    """
-    if not _EMIT_RETIRED_EDGES:
-        nodes = [n for n in nodes if n["node_type"] not in RETIRED_NODE_TYPES]
+    """INSERT OR REPLACE all node dicts into code_nodes."""
     sql = """
         INSERT OR REPLACE INTO code_nodes (
             node_id, node_type, name, file_path, file_classification,
@@ -1292,7 +1121,6 @@ def _insert_nodes(nodes: list[dict[str, Any]], conn: sqlite3.Connection) -> None
 # ---------------------------------------------------------------------------
 
 # Regex for CLIENT_API_CALLS: matches /api/... path strings
-_API_PATH_RE = re.compile(r"^/api/[^\s\"'`?#]+")
 # Template literal expression placeholder
 _TEMPLATE_EXPR_RE = re.compile(r"\$\{[^}]*\}")
 # Dynamic segment :param or [param] -> [id]
@@ -1473,16 +1301,7 @@ def _emit_edge(
     conn: sqlite3.Connection,
     counter: list[int],
 ) -> None:
-    """INSERT OR IGNORE one structural edge. Increments counter[0].
-
-    Edge types in ``RETIRED_PROPAGATION_EDGES`` are NOT written to the index
-    (retired as propagation-inert; see constants). The extraction logic
-    that calls this for those types is left intact for reversibility — set
-    ``IMPACTRACER_ENABLE_RETIRED_EDGES=1`` (env) to re-enable emission and then
-    re-index. Default: dropped at the write chokepoint so the index stays clean.
-    """
-    if not _EMIT_RETIRED_EDGES and edge_type in RETIRED_PROPAGATION_EDGES:
-        return
+    """INSERT OR IGNORE one structural edge. Increments counter[0]."""
     conn.execute(
         "INSERT OR IGNORE INTO structural_edges (source_id, target_id, edge_type) "
         "VALUES (?, ?, ?)",
@@ -1586,18 +1405,11 @@ def _build_import_map(
                 _emit_edge(file_posix, target_file_id, "IMPORTS", conn, counter)
                 dep_pairs.append((file_posix, target_file_id))
                 _map_import_names(stmt, src, target_file_id, import_map, known_node_ids)
-            else:
-                # Alias not resolvable (e.g. generated type file) -> DEPENDS_ON_EXTERNAL
-                pkg_id = f"ext::{specifier}"
-                if pkg_id in known_node_ids:
-                    _emit_edge(file_posix, pkg_id, "DEPENDS_ON_EXTERNAL", conn, counter)
         else:
-            # Non-relative, non-alias -> DEPENDS_ON_EXTERNAL edge (real npm package)
-            pkg_id = f"ext::{specifier}"
-            if pkg_id in known_node_ids:
-                _emit_edge(file_posix, pkg_id, "DEPENDS_ON_EXTERNAL", conn, counter)
-            # Also map namespace imports: import * as X from 'pkg'
-            _map_namespace_import(stmt, src, pkg_id, import_map, known_node_ids)
+            # Non-relative, non-alias (external package): no edge produced
+            # (ExternalPackage / DEPENDS_ON_EXTERNAL retired). Still map any
+            # namespace import so intra-file CALLS through it resolve.
+            _map_namespace_import(stmt, src, f"ext::{specifier}", import_map, known_node_ids)
 
     return import_map, dep_pairs
 
@@ -1792,53 +1604,6 @@ def _collect_type_refs_recursive(node: Node, src: bytes, out: list[str]) -> None
             _collect_type_refs_recursive(c, src, out)
 
 
-def _is_hook_dep_array(node: Node, src: bytes) -> bool:
-    """Return True if node is the dep-array argument of a React hook call.
-    Blueprint §3.3 (skeletonizer) and §3.4 HOOK_DEPENDS_ON.
-    """
-    from impactracer.shared.constants import HOOK_NAMES
-    parent = node.parent
-    if parent is None or parent.type != "arguments":
-        return False
-    call = parent.parent
-    if call is None or call.type != "call_expression":
-        return False
-    fn = call.child_by_field_name("function")
-    if fn is None:
-        return False
-    fn_text = src[fn.start_byte:fn.end_byte].decode(errors="replace")
-    return fn_text in HOOK_NAMES
-
-
-def _extract_string_value(node: Node, src: bytes) -> str | None:
-    """Return the string value of a string or template_string literal, or None."""
-    if node.type == "string":
-        # Prefer string_fragment child (avoids quote-stripping issues)
-        for c in node.children:
-            if c.type == "string_fragment":
-                return src[c.start_byte:c.end_byte].decode(errors="replace")
-        raw = src[node.start_byte:node.end_byte].decode(errors="replace")
-        return raw.strip("'\"")
-    if node.type == "template_string":
-        # Reconstruct by walking byte gaps between children.
-        # tree-sitter may NOT emit template_chars as named nodes;
-        # the literal text appears in gaps between child nodes.
-        parts: list[str] = []
-        cursor = node.start_byte
-        for c in node.children:
-            gap = src[cursor:c.start_byte]
-            if gap and gap not in (b"`",):
-                parts.append(gap.decode(errors="replace"))
-            if c.type == "template_substitution":
-                parts.append("[id]")
-            elif c.type == "template_chars":
-                parts.append(src[c.start_byte:c.end_byte].decode(errors="replace"))
-            cursor = c.end_byte
-        # trailing gap (closing backtick already excluded by not appending '`')
-        return "".join(parts)
-    return None
-
-
 def _get_root_identifier(node: Node, src: bytes) -> str | None:
     """Return the root-level identifier of a call expression's function.
 
@@ -1921,26 +1686,8 @@ def _walk_body(
                 for arg in args.children:
                     _find_dynamic_imports(arg, src, source_id, file_posix, import_map, known_node_ids, conn, counter)
 
-        # --- CLIENT_API_CALLS: scan fetch() or axiosClient.X() args ---
-        # Must run BEFORE the builtins check (fetch is a builtin but still relevant here)
-        fn_node2 = fn_node
-        if fn_node2 is not None:
-            root_name = _get_root_identifier(fn_node2, src)
-            is_http_call = (
-                root_name == "fetch"
-                or (fn_node2.type == "member_expression" and _is_http_method_call(fn_node2, src))
-            )
-            if is_http_call:
-                args_node = node.child_by_field_name("arguments")
-                if args_node:
-                    first_arg = _first_real_child(args_node)
-                    if first_arg is not None:
-                        val = _extract_string_value(first_arg, src)
-                        if val and _API_PATH_RE.match(val):
-                            for target in resolve_api_route(val, known_node_ids):
-                                _emit_edge(source_id, target, "CLIENT_API_CALLS", conn, counter)
-
         # --- CALLS ---
+        fn_node2 = fn_node
         if fn_node2 is not None:
             root_id_str = _get_root_identifier(fn_node2, src)
             if root_id_str and root_id_str not in builtins:
@@ -1964,28 +1711,6 @@ def _walk_body(
                     if target:
                         _emit_edge(source_id, target, "CALLS", conn, counter)
 
-        # --- HOOK_DEPENDS_ON: useEffect/useCallback/useMemo/useLayoutEffect dep arrays ---
-        if fn_node2 is not None:
-            fn_text2 = src[fn_node2.start_byte:fn_node2.end_byte].decode(errors="replace")
-            if fn_text2 in hook_names:
-                args_node = node.child_by_field_name("arguments")
-                if args_node:
-                    dep_array = _find_dep_array(args_node)
-                    if dep_array is not None:
-                        for elem in dep_array.children:
-                            if elem.type == "identifier":
-                                dep_name = src[elem.start_byte:elem.end_byte].decode(errors="replace")
-                                target = resolve_call_target(dep_name, import_map, file_posix, known_node_ids)
-                                if target:
-                                    _emit_edge(source_id, target, "HOOK_DEPENDS_ON", conn, counter)
-                            elif elem.type == "member_expression":
-                                obj = elem.child_by_field_name("object")
-                                if obj and obj.type == "identifier":
-                                    dep_name = src[obj.start_byte:obj.end_byte].decode(errors="replace")
-                                    target = resolve_call_target(dep_name, import_map, file_posix, known_node_ids)
-                                    if target:
-                                        _emit_edge(source_id, target, "HOOK_DEPENDS_ON", conn, counter)
-
     # --- TYPED_BY: type annotations on parameters / variable declarations ---
     if node.type in ("required_parameter", "optional_parameter",
                      "variable_declarator", "lexical_declaration"):
@@ -1996,19 +1721,6 @@ def _walk_body(
                     target = resolve_call_target(type_name, import_map, file_posix, known_node_ids)
                     if target:
                         _emit_edge(source_id, target, "TYPED_BY", conn, counter)
-
-    # --- FIELDS_ACCESSED: member_expression where object type is known Interface ---
-    if node.type == "member_expression":
-        obj = node.child_by_field_name("object")
-        prop = node.child_by_field_name("property")
-        if obj and prop:
-            obj_text = src[obj.start_byte:obj.end_byte].decode(errors="replace")
-            prop_text = src[prop.start_byte:prop.end_byte].decode(errors="replace")
-            # Look up obj in import_map to see if it maps to an Interface
-            _try_emit_fields_accessed(
-                obj_text, prop_text, source_id, import_map, file_posix,
-                known_node_ids, conn, counter,
-            )
 
     # --- JSX elements: RENDERS + PASSES_CALLBACK ---
     if node.type in ("jsx_element", "jsx_self_closing_element"):
@@ -2023,32 +1735,6 @@ def _walk_body(
             import_map, known_node_ids, conn, counter,
             builtins, primitives, hook_names,
         )
-
-
-def _is_http_method_call(member_expr: Node, src: bytes) -> bool:
-    """Return True if a member_expression ends in .get/.post/.put/.delete/.patch."""
-    prop = member_expr.child_by_field_name("property")
-    if prop is None:
-        return False
-    name = src[prop.start_byte:prop.end_byte].decode(errors="replace")
-    return name in ("get", "post", "put", "delete", "patch", "request")
-
-
-def _first_real_child(args_node: Node) -> Node | None:
-    """Return the first non-punctuation child of an arguments node."""
-    for c in args_node.children:
-        if c.type not in ("(", ")", ","):
-            return c
-    return None
-
-
-def _find_dep_array(args_node: Node) -> Node | None:
-    """Find the last array literal argument in an arguments node."""
-    last_array: Node | None = None
-    for c in args_node.children:
-        if c.type == "array":
-            last_array = c
-    return last_array
 
 
 def _find_dynamic_imports(
@@ -2076,33 +1762,6 @@ def _find_dynamic_imports(
                                 _emit_edge(source_id, target, "DYNAMIC_IMPORT", conn, counter)
     for child in node.children:
         _find_dynamic_imports(child, src, source_id, file_posix, import_map, known_node_ids, conn, counter)
-
-
-def _try_emit_fields_accessed(
-    obj_name: str,
-    prop_name: str,
-    source_id: str,
-    import_map: dict[str, str],
-    file_posix: str,
-    known_node_ids: set[str],
-    conn: sqlite3.Connection,
-    counter: list[int],
-) -> None:
-    """Emit FIELDS_ACCESSED if obj_name resolves to an Interface and prop is a known field.
-
-    Blueprint §3.4: member_expression where object's annotated type is a known
-    Interface and the property exists as an InterfaceField node.
-    We approximate by checking if import_map[obj_name] is an Interface node and
-    obj_name::prop_name (or the resolved type::prop_name) exists as InterfaceField.
-    """
-    if obj_name not in import_map:
-        return
-    iface_id = import_map[obj_name]
-    # iface_id might be the Interface node itself, or a File node
-    # Try: iface_id is "src/foo.ts::IUser" pattern => check "src/foo.ts::IUser.propName"
-    field_candidate = f"{iface_id}.{prop_name}"
-    if field_candidate in known_node_ids:
-        _emit_edge(source_id, field_candidate, "FIELDS_ACCESSED", conn, counter)
 
 
 def _emit_jsx_edges(
@@ -2231,17 +1890,9 @@ def _emit_passes_callback(
         return
 
     for c in attr_value_node.children:
-        if c.type == "identifier":
-            fn_name = src[c.start_byte:c.end_byte].decode(errors="replace")
-            target = resolve_call_target(fn_name, import_map, file_posix, known_node_ids)
-            if target:
-                # Case 1: known imported function → PASSES_CALLBACK
-                _emit_edge(source_id, target, "PASSES_CALLBACK", conn, counter)
-            # Case 2: local handler identifier — body already walked by _emit_body_edges;
-            # transitive CALLS edges are emitted there.  Nothing extra needed here.
-            break
-        if c.type == "member_expression":
-            # e.g. props.onClick -> skip (not a resolvable local ref)
+        if c.type in ("identifier", "member_expression"):
+            # Identifier handlers (imported or local) and props.onClick:
+            # transitive CALLS are emitted by the body walk; nothing here.
             break
         if c.type in ("arrow_function", "function"):
             # Case 3: inline handler — walk the function body for CALLS/CLIENT_API_CALLS
@@ -2356,61 +2007,20 @@ def _emit_contains_edges(
     conn: sqlite3.Connection,
     counter: list[int],
 ) -> None:
-    """Emit CONTAINS edges for every node owned by this file.
-
-    Two passes:
-      1. File → {Function, Method, Interface, TypeAlias, Class, Enum, Variable}
-         (+ InterfaceField only when retired nodes are enabled)
-      2. Interface → InterfaceField  (only when retired nodes are enabled)
-
-    The InterfaceField CONTAINS sub-branch is gated: InterfaceField is a
-    retired node type (see RETIRED_NODE_TYPES), so by default no such nodes exist
-    and both the IN-list entry and Pass 2 are skipped. The File→{named
-    declaration} backbone is unaffected. Re-enabled via settings.enable_retired_edges.
-
-    Blueprint §3.4.
+    """Emit File → {named declaration} CONTAINS edges, bridging the
+    File ↔ symbol membrane for BFS. Blueprint §3.4.
     """
-    # --- Pass 1: File → direct children (named declarations) ---
-    _child_types = [
+    child_types = [
         "Function", "Method", "Interface", "TypeAlias", "Class", "Enum", "Variable",
     ]
-    if _EMIT_RETIRED_EDGES:
-        _child_types.append("InterfaceField")
-    _ph = ",".join("?" * len(_child_types))
+    ph = ",".join("?" * len(child_types))
     cur = conn.execute(
-        f"SELECT node_id FROM code_nodes WHERE file_path = ? AND node_type IN ({_ph})",
-        (file_posix, *_child_types),
+        f"SELECT node_id FROM code_nodes WHERE file_path = ? AND node_type IN ({ph})",
+        (file_posix, *child_types),
     )
-    for row in cur:
-        child_id = row[0]
+    for (child_id,) in cur:
         if child_id in known_node_ids:
             _emit_edge(file_posix, child_id, "CONTAINS", conn, counter)
-
-    # --- Pass 2: Interface → InterfaceField (retired; skipped by default) ---
-    if not _EMIT_RETIRED_EDGES:
-        return
-    cur2 = conn.execute(
-        "SELECT node_id FROM code_nodes WHERE file_path = ? AND node_type = 'InterfaceField'",
-        (file_posix,),
-    )
-    for row in cur2:
-        field_id: str = row[0]
-        if field_id not in known_node_ids:
-            continue
-        # Derive interface node_id by stripping the ".fieldName" suffix
-        # node_id format: "path/to/file.ts::InterfaceName.fieldName"
-        separator = "::"
-        sep_idx = field_id.rfind(separator)
-        if sep_idx == -1:
-            continue
-        symbol_part = field_id[sep_idx + len(separator):]  # "InterfaceName.fieldName"
-        dot_idx = symbol_part.rfind(".")
-        if dot_idx == -1:
-            continue
-        iface_symbol = symbol_part[:dot_idx]               # "InterfaceName"
-        iface_id = field_id[:sep_idx + len(separator)] + iface_symbol
-        if iface_id in known_node_ids:
-            _emit_edge(iface_id, field_id, "CONTAINS", conn, counter)
 
 
 # ---------------------------------------------------------------------------
