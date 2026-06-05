@@ -1,4 +1,4 @@
-# ImpacTracer v4.0 — Master Blueprint
+# ImpacTracer v5.0 — Master Blueprint
 
 **Status:** LOCKED. This is the authoritative design specification for the artefact contribution of a Master's thesis on RAG-based Change Impact Analysis. Every architectural decision in the codebase traces to a section of this document.
 
