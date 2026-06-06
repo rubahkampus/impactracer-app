@@ -825,11 +825,12 @@ class Candidate:
     # pinning at the top-K cut was retired, so this is effectively always
     # False now; the dedup-survival check is kept for the flag's semantics.
     pinned_by_named_entry: bool = False
-    # anchor_boost_applied: True if this candidate matched a substring of any
-    # cr_interp.anchor_candidates token during the score-floor admission step.
-    # Unlike pinned_by_named_entry, this is a SOFT signal: the
-    # candidate's effective score gets an additive boost
-    # (settings.anchor_priming_boost) BEFORE the floor comparison; if the
-    # boosted score still fails the floor the candidate is dropped. Trace-only
-    # field; no downstream code branches on it.
+    # anchor_boost_applied: vestigial trace-only flag. It was set by a former
+    # score-floor admission step that gave anchor-matching candidates an
+    # additive score boost before a floor comparison; that gate was retired
+    # (settings.anchor_priming_boost / min_reranker_score_for_validation are now
+    # read by no live code). The surviving anchor signal is the BM25 Path-4
+    # boost in retriever.hybrid_search, which does NOT set this field. No
+    # downstream code branches on it; it persists only for serialization
+    # compatibility in variant_cache.
     anchor_boost_applied: bool = False

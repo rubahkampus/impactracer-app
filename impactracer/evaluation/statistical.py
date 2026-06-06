@@ -16,7 +16,7 @@ PROTOCOL (pre-registered):
     excluded from the test. Substituting 0 or filling-forward is
     forbidden.
 
-Reference: master_blueprint.md §7 (Evaluation Protocol) §4.
+Reference: master_blueprint.md §7.2 (Statistical test).
 """
 
 from __future__ import annotations

@@ -117,7 +117,7 @@ These tokens directly match the vocabulary that appears in CR descriptions ("exp
 
 | Node | Condition | Replacement |
 |---|---|---|
-| `jsx_element`, `jsx_self_closing_element` | always | `/* [JSX: N elements] */` |
+| `jsx_element`, `jsx_self_closing_element`, `jsx_fragment` | always | `/* [JSX: N elements] */` |
 | `array` | length > 3 AND not a hook dep array | `/* [array: N items] */` |
 | `object` | length > 4 AND not tagged | `/* [object: N props] */` |
 | `if_statement`, `switch_statement` | no high-signal descendant | `/* [logic block] */` |

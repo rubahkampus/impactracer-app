@@ -167,8 +167,9 @@ def analyze(
 ) -> None:
     """Analyze a CR against the indexed repository and emit an ImpactReport.
 
-    Invokes the nine-step online pipeline. V7 runs all five LLM invocations;
-    lower variants disable subsets as specified in master_blueprint.md §6 (Ablation Harness).
+    Invokes the six-phase online pipeline (plus Step 0 bootstrap). V7 runs all
+    five LLM invocations; lower variants disable subsets as specified in
+    master_blueprint.md §6 (Ablation Harness).
 
     Implementation entry point:
         impactracer.pipeline.runner.run_analysis(cr_text, settings, flags)
@@ -280,7 +281,8 @@ def evaluate(
         "--anchor-priming/--no-anchor-priming",
         help=(
             "Anchor-priming toggle: when True (default), LLM #1 extracts "
-            "anchor_candidates and the score-floor gate applies a soft boost. "
+            "anchor_candidates and the retriever applies a soft BM25 boost "
+            "(Path 4) to anchor-matching code identifiers. "
             "Pass --no-anchor-priming to reproduce the baseline without "
             "anchor extraction."
         ),

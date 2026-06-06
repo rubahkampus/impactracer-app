@@ -27,7 +27,7 @@ anchor_priming) scope):
   retrieval_v0            V0 only (BM25-only)
   retrieval_v1            V1 only (dense-only)
   retrieval_v2plus        V2-V7 (BM25 + dense + RRF)
-  rerank_gated            V3-V7 (cross-encoder + 3 gates output)
+  rerank_gated            V3-V7 (cross-encoder + semantic-dedup gate output)
   sis_verdicts            V4-V7 (LLM #2 SIS verdicts)
   trace_verdicts          V5-V7 (LLM #3 trace verdicts + code seeds)
   bfs_cis                 V6-V7 (BFS CIS with sis_nodes and propagated)
@@ -38,7 +38,7 @@ Pydantic ``model_validate_json``. Pipeline code can mutate the
 returned candidates in place (rerank score normalisation, pinning)
 without corrupting the cache for later variants.
 
-Reference: ``master_blueprint.md §7``.
+Reference: ``master_blueprint.md §6`` (Ablation Harness).
 """
 
 from __future__ import annotations
@@ -141,7 +141,7 @@ class VariantCache:
         self._put_candidates("retrieval_v2plus", candidates)
 
     # ----------------------------------------------------------------
-    # Step 2.3 — Cross-encoder rerank + 3 gates (V3-V7 share)
+    # Step 2.3 — Cross-encoder rerank + semantic-dedup gate (V3-V7 share)
     # ----------------------------------------------------------------
 
     def get_rerank_gated(self) -> list[Candidate] | None:

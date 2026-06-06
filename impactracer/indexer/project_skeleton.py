@@ -20,7 +20,7 @@ The skeleton contains four sections, in order:
 Section 4 is the most valuable for anchor extraction; section 3
 disambiguates camelCase functions from PascalCase classes.
 
-Reference: master_blueprint.md §7 §4.
+Reference: master_blueprint.md §3.9 (Project Skeleton).
 """
 
 from __future__ import annotations

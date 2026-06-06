@@ -21,7 +21,7 @@ Transport:
   ``response_format: {"type": "json_object"}``; the response content is
   parsed against ``response_schema`` using ``model_validate_json``.
 
-Reference: master_blueprint.md §7.
+Reference: master_blueprint.md §9 (LLM Transport).
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 """Backlink retrieval and synthesis context assembly (FR-E1, FR-E2).
 
-Reference: master_blueprint.md §4 Steps 8.
+Reference: master_blueprint.md §4 Step 6.1.
 """
 
 from __future__ import annotations

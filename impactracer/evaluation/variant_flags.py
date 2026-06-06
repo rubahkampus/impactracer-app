@@ -63,9 +63,9 @@ class VariantFlags:
     # LLM #1 anchor priming. When True (default), LLM #1's system
     # prompt instructs the model to populate CRInterpretation.anchor_candidates
     # with 1-3 likely host/sibling symbols from the codebase even when the CR
-    # does not explicitly name them. The prevalidation score-floor gate then
-    # applies an additive boost (settings.anchor_priming_boost) to any
-    # candidate whose name substring-matches an anchor candidate. When False,
+    # does not explicitly name them. The retriever then applies a soft BM25
+    # boost (Path 4, settings.anchor_priming_bm25_boost) to candidates whose
+    # name matches an anchor candidate. When False,
     # LLM #1 emits an empty anchor_candidates list and no boost is applied.
     # All V0-V7 variants inherit this default; toggling it produces the
     # before-and-after ablation reported in the thesis methodology amendment.

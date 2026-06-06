@@ -296,8 +296,9 @@ def hybrid_search(
         anchor identifier is fed through the BM25 index as an extra query
         whose contribution is scaled by ``(boost - 1.0)``. Surfaces
         anchor-matching code identifiers earlier in the bm25_code path
-        before RRF fusion. Complements the score-floor boost applied to
-        anchor_candidates downstream.
+        before RRF fusion. This is the only surviving anchor-priming
+        retrieval signal; the former downstream score-floor boost was
+        retired.
     """
     flags = ctx.variant_flags
     top_k = settings.top_k_per_query

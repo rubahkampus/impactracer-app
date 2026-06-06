@@ -17,8 +17,8 @@ agnostic. The two-stage mode requires a non-empty ``project_skeleton``
 argument; the runner passes ``None`` when no skeleton was found on
 disk, in which case this module degrades gracefully to single-stage.
 
-Reference: analysis_implementation.md §3, master_blueprint.md §7
-Amendments 1 and 3.
+Reference: analysis_implementation.md §2 (LLM #1 — Interpret),
+master_blueprint.md §4 Phase 1 (and §3.9 project skeleton).
 """
 
 from __future__ import annotations

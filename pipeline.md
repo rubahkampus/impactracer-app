@@ -169,7 +169,7 @@ canonical numbers live here:
   going through LLM #1's English search queries (NFR-04).
 - `enable_traceability_pool_seeding=True` — seeds the offline doc↔code
   similarity matrix into the retrieval pool as a pool-membership signal.
-- `enable_sibling_promotion=True`, `propagation_prune_top_k=20`,
+- `enable_sibling_promotion=True`, `propagation_prune_top_k=10`,
   `sibling_prune_top_k=10`, `sibling_admit_max_per_file=4` — the two propagation
   arms' deterministic prune ceilings (5.2a / 5.2b) and the in-file LLM admission
   cap (5.3b). Sibling promotion recovers GT entities that share a file with a
@@ -189,12 +189,12 @@ canonical numbers live here:
 SQLite connection (WAL mode, foreign-keys on) and creates six tables:
 
 - `code_nodes` — every code entity. Key columns: `node_id` (PK),
-  `node_type` (the 10-value CHECK constraint), `file_path`, `name`,
+  `node_type` (the 8-value CHECK constraint), `file_path`, `name`,
   `line_start/end`, `signature`, `docstring`, `source_code`,
   `internal_logic_abstraction` (the skeletonized body), `file_classification`,
   `embed_text`.
 - `structural_edges` — `(source_id, target_id, edge_type)` triple as primary
-  key, with the 14-value CHECK constraint on `edge_type`.
+  key, with the 9-value CHECK constraint on `edge_type`.
 - `doc_code_candidates` — the precomputed doc↔code similarity table:
   `(code_id, doc_id, weighted_similarity_score)`.
 - `file_hashes`, `file_dependencies`, `index_metadata` — bookkeeping for
@@ -629,7 +629,7 @@ Output: a `CISResult` (Change Impact Set) with `sis_nodes` (depth-0 seeds, `Node
 
 **Step 5.1b — In-file sibling expansion** (V6+, deterministic, no LLM): the in-file arm. `collect_file_local_siblings()` injects the CONTAINS-siblings of every mechanism-carrying confirmed seed as **raw, unvalidated** propagated nodes tagged `justification_source="sibling_candidate"`. **Anchor gate:** only seeds with a non-empty `mechanism_of_impact` (from LLM #2 *or* a CONFIRMED LLM #3 resolution) qualify, preventing over-admission from weakly-justified seeds.
 
-**Step 5.2a — Weight-decay prune** (outward arm, V6+, deterministic, default-on): ranks the BFS pool by `constants.propagation_decay_score` (`prod(edge_weight)/(1+depth)`, weights = measured edge productivity — `RENDERS`=1.0 workhorse, `IMPORTS`=0.3 flood source) and keeps the top-`propagation_prune_top_k` (default **20**). SIS seeds are never scored or cut. Chosen over PPR / semantic-cosine by an offline V6 sweep (retains 100% of propagated true positives at K=20 while cutting ~32% of false positives — a recall-safe efficiency layer, not an accuracy knob).
+**Step 5.2a — Weight-decay prune** (outward arm, V6+, deterministic, default-on): ranks the BFS pool by `constants.propagation_decay_score` (`prod(edge_weight)/(1+depth)`, weights = measured edge productivity — `RENDERS`=1.0 workhorse, `IMPORTS`=0.3 flood source) and keeps the top-`propagation_prune_top_k` (default **10**). SIS seeds are never scored or cut. Chosen over PPR / semantic-cosine by an offline V6 sweep; K=10 is the recall-safe floor (BFS-GT recall is 100% at K≥10 on this corpus — the binding CR has its last BFS-GT at rank 9), a recall-safe efficiency layer, not an accuracy knob. The earlier conservative choice was K=20; K=10 is recall-identical here with marginally better precision. Overridable via `PROPAGATION_PRUNE_TOP_K`.
 
 **Step 5.2b — Anchor-RRF prune** (in-file arm, V6+, deterministic): ranks the raw siblings by anchor-RRF and keeps the top-`sibling_prune_top_k`. The anchor-RRF scorer beat PPR / semantic / flat in an offline bake-off.
 
@@ -747,10 +747,10 @@ in `impacted_entities`.
 
 | Variant | Retrieval | Cross-Enc | Gates | LLM #2 SIS | LLM #3 Trace | BFS | LLM #4 Prop | LLM Calls |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| V0 | BM25 only | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | 1 (interpret + synth, but synth on raw retrieval) |
-| V1 | Dense only | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | 1 |
-| V2 | RRF hybrid | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | 1 |
-| V3 | RRF hybrid | ✓ | ✓ (all 3) | ✗ | ✗ | ✗ | ✗ | 1 |
+| V0 | BM25 only | ✗ | ✓ (dedup) | ✗ | ✗ | ✗ | ✗ | 1 (interpret + synth, but synth on raw retrieval) |
+| V1 | Dense only | ✗ | ✓ (dedup) | ✗ | ✗ | ✗ | ✗ | 1 |
+| V2 | RRF hybrid | ✗ | ✓ (dedup) | ✗ | ✗ | ✗ | ✗ | 1 |
+| V3 | RRF hybrid | ✓ | ✓ (dedup) | ✗ | ✗ | ✗ | ✗ | 1 |
 | V4 | RRF hybrid | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ | 2 |
 | V5 | RRF hybrid | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | 3 |
 | V6 | RRF hybrid | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ | 3 (blind propagation) |
@@ -759,6 +759,9 @@ in `impacted_entities`.
 Notes:
 
 - LLM #1 (`interpret`) and LLM #5 (`synthesize`) run in **every** variant.
+- The "Gates" column is **not** a variant differentiator: the sole surviving
+  pre-validation gate (Step 2.2 semantic dedup) runs on all of V0–V7. The
+  former score-floor and plausibility gates were retired.
 - The "LLM Calls" column counts canonical *stages*, not wire calls. With the
   default two-stage interpreter, LLM #1 is itself two calls
   (`interpret_intent` + `interpret_anchors`), and Steps 7 / 7.5 spawn

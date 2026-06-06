@@ -93,7 +93,7 @@ The online pipeline transforms an Indonesian / English Change Request (CR) into 
               direction (§3). V6+.                  unvalidated siblings of
               │                                     each mechanism-carrying
    Step 5.2a  Weight-decay prune                    anchor (V6+). NO LLM.
-              (deterministic, K=20).      │
+              (deterministic, K=10).      │
               Recall-safe flood          Step 5.2b  Anchor-RRF prune
               control. SIS never cut.               (deterministic,
               │                                     K=sibling_prune_top_k).
@@ -141,11 +141,12 @@ The online pipeline transforms an Indonesian / English Change Request (CR) into 
 The runner writes a per-step trace to `impact_report_full.json` when `trace_sink` is provided (always populated by the CLI). The trace keys retain stable identifiers for tooling continuity (they are functional data keys, not display labels):
 
 ```
-step_1_interpretation, step_2_rrf_pool, step_3_reranked,
-step_3_gates_survivors, step_4_llm2_verdicts, step_5_resolutions,
-step_5b_llm3_verdicts, step_6_bfs_raw_cis, step_7_llm4_verdicts,
-step_7p5_sibling_validation, final_report
+step_1_interpretation, step_2_rrf_pool, step_3_reranked_full,
+step_3_reranked, step_3_gates_survivors, step_4_llm2_verdicts,
+step_5_resolutions, step_5b_llm3_verdicts, step_6_bfs_raw_cis,
+step_7_llm4_verdicts, step_7p5_sibling_validation, final_report
 ```
+(The deterministic propagation sub-steps `step_6p6_deletion_import_only_filter`, `step_6p7_sibling_expansion`, `step_6p8_weight_decay_prune`, and `step_6p9_sibling_precision_prune` are also emitted by `graph_bfs.py` and consumed by `report_builder.py`.)
 
 These keys may be absent for variants that disable the corresponding phase or for CRs that resolve to zero seeds before a stage.
 
@@ -262,7 +263,7 @@ Seeds whose `file_classification == "UTILITY"` cap their reverse-CALLS chain at 
 
 ### 3.7 Weight-decay prune (Step 5.2a, deterministic, default-ON)
 
-After the outward BFS, the propagated pool (SIS seeds + BFS nodes) is ranked by `prod(edge_weight)/(1+depth)` (RENDERS=1.0 … IMPORTS=0.3) and the top-K kept (`propagation_prune_top_k=20`). SIS seeds are never cut. Recall-safe flood control (100% TP kept, ~32% FP cut at K=20 on the calibration set). Overridable via `PROPAGATION_PRUNE_TOP_K`.
+After the outward BFS, the propagated pool (SIS seeds + BFS nodes) is ranked by `prod(edge_weight)/(1+depth)` (RENDERS=1.0 … IMPORTS=0.3) and the top-K kept (`propagation_prune_top_k=10`). SIS seeds are never cut. Recall-safe flood control: K=10 is the recall-safe floor found by a live K-sweep on the V6 BFS pool (BFS-GT recall is 100% at K≥10, and the binding CR has its last BFS-GT at rank 9). The earlier K=20 was the conservative choice; K=10 is recall-identical on this corpus with marginally better precision and ~half the BFS budget on flood CRs. Overridable via `PROPAGATION_PRUNE_TOP_K`.
 
 ### 3.8 Graph isolation invariant
 
@@ -365,7 +366,7 @@ The contribution is the **pre-registered ablation and its findings** — LLM val
 The following architectural invariants are FROZEN. Violating any requires updating this document AND `master_blueprint.md`.
 
 1. **Node vocabulary** (`shared/models.py::NodeType`): the schema defines 8 node types (`File, Class, Function, Method, Interface, TypeAlias, Enum, Variable`). The live citrakara index emits 7 (no `Enum` instances on this corpus).
-2. **Edge vocabulary** (`shared/models.py::EdgeType`, `shared/constants.py::EDGE_CONFIG`): 9 propagation edge types, all walked by BFS — see §3.1.
+2. **Edge vocabulary** (`shared/constants.py::EDGE_CONFIG`, `persistence/sqlite_client.py` `structural_edges` CHECK): 9 propagation edge types, all walked by BFS — see §3.1. (There is no `EdgeType` Literal in `models.py`; the edge vocabulary is defined by `EDGE_CONFIG`'s keys and the SQLite CHECK constraint, not a typed enum.)
 3. **5 canonical LLM stages in V7**: `interpret`, `validate_sis`, `validate_trace`, `validate_propagation`, `synthesize`. Per-CR call counts exceed 5 because the two-stage interpreter splits `interpret`, and Steps 5.3a / 5.3b each spawn per-child / per-file LLM #4 sub-calls. The five canonical stage names remain the contract.
 4. **8 canonical ablation variants** (`evaluation/variant_flags.py::ALL_VARIANTS`). V3 = deterministic-filtering peak (cross-encoder rerank + cut, no LLM gating). V7 = full pipeline (both propagation arms + LLM #4 + LLM #5 aggregator).
 5. **3 change_type values**: `ADDITION, MODIFICATION, DELETION`.

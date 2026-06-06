@@ -3,7 +3,7 @@
 All parameters are locked pre-evaluation; values here represent the
 defaults. Overrides come from environment variables (see .env.template).
 
-Reference: master_blueprint.md §8 (Configuration) §1.
+Reference: master_blueprint.md §8 (Configuration).
 """
 
 from __future__ import annotations
@@ -164,14 +164,12 @@ class Settings(BaseSettings):
     # LLM #2 (Step 3.1) is the real precision gate.
     min_reranker_score_for_validation: float = -2.0
     plausibility_gate_density_threshold: float = 0.50
-    # Additive boost applied to a candidate's raw_reranker_score at the
-    # score-floor admission step when its name substring-matches any of
-    # cr_interp.anchor_candidates. Soft semantics — a candidate whose
-    # boosted score is still below min_reranker_score_for_validation is
-    # dropped. Default 0.10 sits roughly one cross-encoder logit step above
-    # the floor, enough to admit borderline anchors without overwhelming
-    # the validator chain. Set to 0.0 to disable the boost while keeping
-    # anchor_candidates extraction.
+    # RETIRED (never invoked, like the two params above): was an additive boost
+    # applied to a candidate's raw_reranker_score at the former score-floor
+    # admission step when its name substring-matched any of
+    # cr_interp.anchor_candidates. That step no longer runs. The live
+    # anchor-priming signal is anchor_priming_bm25_boost (Step 2.1 Path 4)
+    # below; this value is read by no code.
     anchor_priming_boost: float = 0.10
 
     # Anchor-priming BM25 boost (Step 2.1 Path 4). Multiplier applied to a

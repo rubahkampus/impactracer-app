@@ -10,7 +10,7 @@ Evaluation invariant: metrics are computed against CIS node IDs, not against
 ``report.impacted_nodes``. The two are equivalent post-demotion of LLM #5,
 but the contract is stated against the CIS for reproducibility.
 
-Reference: master_blueprint.md §7 (Evaluation Protocol) §3.
+Reference: master_blueprint.md §7.1 (Metrics).
 """
 
 from __future__ import annotations

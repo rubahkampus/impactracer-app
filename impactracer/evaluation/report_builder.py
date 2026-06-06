@@ -9,7 +9,7 @@ The Wilcoxon test artifact (``statistical_tests.json``) is owned by the
 CLI orchestrator, not this builder, so that descriptive statistics and
 hypothesis testing remain separable concerns.
 
-Reference: master_blueprint.md §7 (Evaluation Protocol) §6.
+Reference: master_blueprint.md §7.3 (Reports written by run_full_evaluation).
 """
 
 from __future__ import annotations

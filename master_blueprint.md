@@ -77,7 +77,7 @@ Forward slashes in all node IDs and file paths, even on Windows. `pathlib.Path.a
 | FR-C1 | Pencarian Hibrida Dua-Jalur | `pipeline/retriever.py` | — |
 | FR-C2 | Pemeringkatan Kandidat (RRF, unweighted) | `pipeline/retriever.py` | — |
 | FR-C3 | Pemeringkatan Ulang Cross-Encoder | `indexer/reranker.py` (used online) | — |
-| FR-C4 | Penyaringan Pra-Validasi (3 gates) | `pipeline/prevalidation_filter.py` | — |
+| FR-C4 | Penyaringan Pra-Validasi (semantic dedup; sole live gate) | `pipeline/prevalidation_filter.py` | — |
 | FR-C5 | Validasi Hasil Pencarian Awal | `pipeline/validator.py` | #2 |
 | FR-C6 | Resolusi Keterlacakan Dokumen | `pipeline/seed_resolver.py` | — |
 | FR-C7 | Validasi Hasil Resolusi Keterlacakan | `pipeline/traceability_validator.py` | #3 |
@@ -467,7 +467,7 @@ The **in-file arm of propagation**, parallel to outward BFS. `collect_file_local
 
 ### Step 5.2a — Weight-decay prune (outward arm, V6+, deterministic, default-on)
 
-Deterministic flood control over the outward-BFS pool. Ranks by `constants.propagation_decay_score` = `prod(edge_weight)/(1+depth)` (weights encode measured edge productivity — `RENDERS`=1.0 workhorse, `IMPORTS`=0.3 flood source) and keeps the top-`settings.propagation_prune_top_k` (default **20**, overridable via `PROPAGATION_PRUNE_TOP_K`). SIS seeds are never scored or cut. Chosen over PPR / semantic-cosine by an offline V6 sweep: at K=20 it retains 100% of propagated true positives while cutting ~32% of false positives — a **recall-safe efficiency layer** that shrinks the pool LLM #4 validates, not an accuracy knob.
+Deterministic flood control over the outward-BFS pool. Ranks by `constants.propagation_decay_score` = `prod(edge_weight)/(1+depth)` (weights encode measured edge productivity — `RENDERS`=1.0 workhorse, `IMPORTS`=0.3 flood source) and keeps the top-`settings.propagation_prune_top_k` (default **10**, overridable via `PROPAGATION_PRUNE_TOP_K`). SIS seeds are never scored or cut. Chosen over PPR / semantic-cosine by an offline V6 sweep; K=10 is the recall-safe floor (BFS-GT recall is 100% at K≥10 on this corpus — the binding CR has its last BFS-GT at rank 9). The earlier conservative choice was K=20; K=10 is recall-identical here with marginally better precision and ~half the BFS budget on flood CRs — a **recall-safe efficiency layer** that shrinks the pool LLM #4 validates, not an accuracy knob.
 
 ### Step 5.2b — Anchor-RRF prune (in-file arm, V6+, deterministic)
 
@@ -743,7 +743,7 @@ sibling_admit_max_per_file           = 4        # LLM #4 admission ceiling per f
 sibling_admit_max_per_cr             = 0        # 0 = no global cap
 
 # Phase 5 outward arm — weight-decay prune
-propagation_prune_top_k              = 20        # Step 5.2a ceiling; env PROPAGATION_PRUNE_TOP_K
+propagation_prune_top_k              = 10        # Step 5.2a ceiling; env PROPAGATION_PRUNE_TOP_K
 
 # Pre-validation gate (FR-C4) — Step 2.2 semantic dedup is the only gate.
 anchor_priming_bm25_boost             = 1.5     # multiplier on the synthetic anchor BM25 query (Path 4)
@@ -818,7 +818,7 @@ Build or update the knowledge representation for the chosen profile. Orchestrate
 
 ### `impactracer analyze "<cr_text>" [--output PATH] [--variant V0..V7] [--profile NAME]`
 
-Run the nine-step online pipeline on a single CR against the chosen profile's index. Writes both `impact_report.json` (user-visible) and `impact_report_full.json` (step-by-step trace) to `--output` (and its `_full.json` sibling). Default `--variant V7`. Fails fast if the profile's index is empty/uninitialized.
+Run the six-phase online pipeline (plus Step 0 bootstrap) on a single CR against the chosen profile's index. Writes both `impact_report.json` (user-visible) and `impact_report_full.json` (step-by-step trace) to `--output` (and its `_full.json` sibling). Default `--variant V7`. Fails fast if the profile's index is empty/uninitialized.
 
 ### `impactracer evaluate --dataset DIR [--output DIR] [--profile NAME] [--run-full-ablation] [--verify-nfr]`
 

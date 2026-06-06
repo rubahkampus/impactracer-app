@@ -2,17 +2,17 @@
 
 Two-pass design:
 
-- Pass 1 (:func:`extract_nodes`): walks the AST to produce all ten
+- Pass 1 (:func:`extract_nodes`): walks the AST to produce all 8
   canonical node kinds — ``File``, ``Class``, ``Function``, ``Method``,
   ``Interface``, ``TypeAlias``, ``Enum``, and ``Variable``. Populates ``internal_logic_abstraction`` via
   :func:`skeletonize_node`. ``Variable`` covers module-level ``const``
   declarations whose RHS is a non-arrow expression (Mongoose schemas,
   constant arrays, frozen objects), restoring GT-existence coverage that
-  the original nine-type vocabulary missed.
+  the original (pre-``Variable``) vocabulary missed.
 
 - Pass 2 (:func:`extract_edges`): walks the AST again with the full
-  set of node IDs from Pass 1 available, and emits all 14 edge types
-  (the original 13 plus ``CONTAINS``, which bridges the File-to-symbol
+  set of node IDs from Pass 1 available, and emits all 9 edge types
+  (including ``CONTAINS``, which bridges the File-to-symbol
   membrane). Populates ``file_dependencies`` for incremental reindex.
 
 Reference: master_blueprint.md §3.2 (Pass 1), §3.4 (Pass 2).
@@ -2033,7 +2033,7 @@ def extract_edges(
     known_node_ids: set[str],
     conn: sqlite3.Connection,
 ) -> int:
-    """Pass 2: extract all 14 edge types.
+    """Pass 2: extract all 9 edge types.
 
     Returns the number of edges emitted. Also populates
     ``file_dependencies`` for incremental reindex support.

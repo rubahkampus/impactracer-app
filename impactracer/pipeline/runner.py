@@ -261,9 +261,13 @@ def run_analysis(
     with every step's result so the CLI can write ``impact_report_full.json``
     for academic auditability. The dict is mutated in-place; None disables tracing.
 
-    Trace keys: step_1_interpretation, step_2_rrf_pool, step_3_reranked,
-    step_3_gates_survivors, step_4_llm2_verdicts, step_5_resolutions,
-    step_5b_llm3_verdicts, step_6_bfs_raw_cis, step_7_llm4_verdicts, final_report.
+    Trace keys: step_1_interpretation, step_2_rrf_pool, step_3_reranked_full,
+    step_3_reranked, step_3_gates_survivors, step_4_llm2_verdicts,
+    step_5_resolutions, step_5b_llm3_verdicts, step_6_bfs_raw_cis,
+    step_7_llm4_verdicts, step_7p5_sibling_validation, final_report.
+    (The deterministic propagation sub-steps step_6p6_deletion_import_only_filter,
+    step_6p7_sibling_expansion, step_6p8_weight_decay_prune, and
+    step_6p9_sibling_precision_prune are emitted from graph_bfs.py.)
 
     Blueprint §4.
     """
@@ -441,7 +445,7 @@ def run_analysis(
         if _cached_rerank_gated is not None:
             logger.info(
                 "[runner] [cache HIT] rerank_gated ({} candidates, "
-                "rerank + 3 gates skipped)",
+                "rerank + dedup gate skipped)",
                 len(_cached_rerank_gated),
             )
             candidates = _cached_rerank_gated
