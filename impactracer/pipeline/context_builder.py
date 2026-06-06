@@ -147,15 +147,6 @@ def _estimate_tokens(text: str) -> int:
 # ~60 K tokens × 4 chars/token = 240 000 chars.
 _HARD_CHAR_LIMIT: int = 240_000
 
-# Warning block injected into the context when the hard limit activates.
-_TRUNCATION_WARNING_TEMPLATE = (
-    "[SYSTEM WARNING: The impact graph was too massive. "
-    "Nodes beyond Depth {max_depth} were truncated from this context "
-    "({n_dropped} nodes dropped). "
-    "Explicitly mention this depth-based truncation limitation in your "
-    "report scope section.]"
-)
-
 
 _SEVERITY_RANK_MAP = {"Tinggi": 0, "Menengah": 1, "Rendah": 2}
 

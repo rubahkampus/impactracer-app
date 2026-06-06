@@ -820,17 +820,3 @@ class Candidate:
     merged_doc_contexts: list[tuple[str, str]] = field(default_factory=list)
     bm25_score: float = 0.0
     cosine_score: float = 0.0
-    # pinned_by_named_entry: when True, the candidate survives Step 2.2
-    # semantic dedup (a pinned doc chunk is not merged away). Named-entry
-    # pinning at the top-K cut was retired, so this is effectively always
-    # False now; the dedup-survival check is kept for the flag's semantics.
-    pinned_by_named_entry: bool = False
-    # anchor_boost_applied: vestigial trace-only flag. It was set by a former
-    # score-floor admission step that gave anchor-matching candidates an
-    # additive score boost before a floor comparison; that gate was retired
-    # (settings.anchor_priming_boost / min_reranker_score_for_validation are now
-    # read by no live code). The surviving anchor signal is the BM25 Path-4
-    # boost in retriever.hybrid_search, which does NOT set this field. No
-    # downstream code branches on it; it persists only for serialization
-    # compatibility in variant_cache.
-    anchor_boost_applied: bool = False

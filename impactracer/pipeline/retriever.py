@@ -401,7 +401,7 @@ def hybrid_search(
         # reaches English-identifier code without going through LLM #1.
         if (
             cr_text
-            and getattr(settings, "enable_raw_cr_dense_pass", False)
+            and getattr(settings, "enable_raw_cr_dense_pass", True)
         ):
             raw_top_k = getattr(settings, "raw_cr_dense_top_k", top_k)
             try:
@@ -608,7 +608,7 @@ def hybrid_search(
     if (
         has_code_layer
         and retrieved_doc_ids_for_seeding
-        and getattr(settings, "enable_traceability_pool_seeding", False)
+        and getattr(settings, "enable_traceability_pool_seeding", True)
         and getattr(ctx, "conn", None) is not None
     ):
         per_doc_cap = getattr(settings, "traceability_seed_top_k_per_doc", 5)

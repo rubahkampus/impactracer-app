@@ -9,10 +9,9 @@ Verifies the four contract invariants:
   4. anchor_priming=True and =False are isolated keys; cross-contamination
      is impossible.
 
-The cache must also tolerate full Candidate field surface, including
-``merged_doc_contexts`` (tuples), ``pinned_by_named_entry``, and
-``anchor_boost_applied``. CISResult round-trip preserves NodeTrace
-metadata.
+The cache must also tolerate the full Candidate field surface, including
+``merged_doc_contexts`` (tuples). CISResult round-trip preserves
+NodeTrace metadata.
 
 Reference: ``docs/evaluation_protocol.md``.
 """
@@ -20,8 +19,6 @@ Reference: ``docs/evaluation_protocol.md``.
 from __future__ import annotations
 
 from pathlib import Path
-
-import pytest
 
 from impactracer.pipeline.variant_cache import VariantCache
 from impactracer.shared.models import (
@@ -53,9 +50,6 @@ def _make_interp(anchor_candidates: list[str] | None = None) -> CRInterpretation
 
 def _make_candidate(
     node_id: str = "src/lib/services/wallet.service.ts::getTransactions",
-    *,
-    pinned: bool = False,
-    boost: bool = False,
 ) -> Candidate:
     return Candidate(
         node_id=node_id,
@@ -74,8 +68,6 @@ def _make_candidate(
         merged_doc_contexts=[("Section Title", "Some doc text here")],
         bm25_score=1.2,
         cosine_score=0.8,
-        pinned_by_named_entry=pinned,
-        anchor_boost_applied=boost,
     )
 
 
@@ -158,8 +150,8 @@ def test_interp_roundtrip(tmp_path: Path) -> None:
 def test_candidates_roundtrip_preserves_all_fields(tmp_path: Path) -> None:
     cache = VariantCache(tmp_path, "run1", "C1", anchor_priming=True)
     original = [
-        _make_candidate(pinned=True, boost=False),
-        _make_candidate("other::func", pinned=False, boost=True),
+        _make_candidate(),
+        _make_candidate("other::func"),
     ]
 
     cache.put_rerank_gated(original)
@@ -168,10 +160,7 @@ def test_candidates_roundtrip_preserves_all_fields(tmp_path: Path) -> None:
     assert loaded is not None
     assert len(loaded) == 2
     assert loaded[0].node_id == original[0].node_id
-    assert loaded[0].pinned_by_named_entry is True
-    assert loaded[0].anchor_boost_applied is False
-    assert loaded[1].pinned_by_named_entry is False
-    assert loaded[1].anchor_boost_applied is True
+    assert loaded[1].node_id == original[1].node_id
     # merged_doc_contexts must round-trip as tuples (not lists).
     assert loaded[0].merged_doc_contexts == [("Section Title", "Some doc text here")]
     assert isinstance(loaded[0].merged_doc_contexts[0], tuple)
@@ -280,7 +269,7 @@ def test_llm4_verdicts_roundtrip(tmp_path: Path) -> None:
 
 def test_candidate_get_returns_deep_copy(tmp_path: Path) -> None:
     cache = VariantCache(tmp_path, "run1", "C1", anchor_priming=True)
-    original = [_make_candidate(pinned=False, boost=False)]
+    original = [_make_candidate()]
 
     cache.put_rerank_gated(original)
 
@@ -289,8 +278,6 @@ def test_candidate_get_returns_deep_copy(tmp_path: Path) -> None:
     assert loaded1 is not None
     loaded1[0].reranker_score = 99.0
     loaded1[0].raw_reranker_score = 99.0
-    loaded1[0].pinned_by_named_entry = True
-    loaded1[0].anchor_boost_applied = True
     loaded1[0].merged_doc_ids.append("injected")
     loaded1[0].merged_doc_contexts.append(("injected", "junk"))
 
@@ -299,8 +286,6 @@ def test_candidate_get_returns_deep_copy(tmp_path: Path) -> None:
     assert loaded2 is not None
     assert loaded2[0].reranker_score == 0.7
     assert loaded2[0].raw_reranker_score == 2.5
-    assert loaded2[0].pinned_by_named_entry is False
-    assert loaded2[0].anchor_boost_applied is False
     assert loaded2[0].merged_doc_ids == ["doc1", "doc2"]
     assert loaded2[0].merged_doc_contexts == [("Section Title", "Some doc text here")]
 

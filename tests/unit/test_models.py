@@ -415,9 +415,9 @@ def test_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.min_traceability_similarity == 0.40
     assert s.degenerate_embed_min_length == 50
     assert s.bfs_high_conf_top_n == 5
-    # Score floor is a sanity-only gate (-2.0).
-    assert s.min_reranker_score_for_validation == -2.0
-    # Density threshold (no per-file count cap).
-    assert s.plausibility_gate_density_threshold == 0.50
-    # plausibility_gate_max_per_file removed entirely.
+    # Retired pre-validation gate knobs removed entirely (score floor,
+    # plausibility density, score-floor anchor boost, per-file cap).
+    assert not hasattr(s, "min_reranker_score_for_validation")
+    assert not hasattr(s, "plausibility_gate_density_threshold")
+    assert not hasattr(s, "anchor_priming_boost")
     assert not hasattr(s, "plausibility_gate_max_per_file")

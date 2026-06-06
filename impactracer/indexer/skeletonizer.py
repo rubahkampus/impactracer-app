@@ -12,16 +12,15 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
+# Shared canonical hook-name set (single source of truth in shared.constants).
+from impactracer.shared.constants import HOOK_NAMES as _HOOK_NAMES
+
 
 HIGH_SIGNAL_NODE_TYPES: frozenset[str] = frozenset({
     "call_expression",
     "return_statement",
     "throw_statement",
     "import_declaration",
-})
-
-_HOOK_NAMES: frozenset[str] = frozenset({
-    "useEffect", "useCallback", "useMemo", "useLayoutEffect",
 })
 
 

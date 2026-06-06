@@ -14,7 +14,6 @@ from impactracer.pipeline.graph_bfs import (
     build_graph_from_sqlite,
     compute_confidence_tiers,
 )
-from impactracer.shared.models import CISResult
 
 
 # ---------------------------------------------------------------------------

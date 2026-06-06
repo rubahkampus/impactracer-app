@@ -507,8 +507,6 @@ def _unwrap_export(export_node: Node) -> Node | None:
 # Node builders
 # ---------------------------------------------------------------------------
 
-_DEGENERATE_MIN_LEN = 50  # blueprint §3.2 / §7
-
 
 def _build_function_node(
     decl: Node,
@@ -1123,8 +1121,6 @@ def _insert_nodes(nodes: list[dict[str, Any]], conn: sqlite3.Connection) -> None
 # Regex for CLIENT_API_CALLS: matches /api/... path strings
 # Template literal expression placeholder
 _TEMPLATE_EXPR_RE = re.compile(r"\$\{[^}]*\}")
-# Dynamic segment :param or [param] -> [id]
-_DYN_SEG_RE = re.compile(r":[a-zA-Z_][a-zA-Z0-9_]*|\[[^\]]+\]")
 
 
 def _resolve_rel_import(
@@ -1624,17 +1620,6 @@ def _get_root_identifier(node: Node, src: bytes) -> str | None:
     return None
 
 
-def _get_direct_name(node: Node, src: bytes) -> str | None:
-    """Return the direct name of a call/identifier (not the root, the whole chain)."""
-    if node.type in ("identifier", "type_identifier"):
-        return src[node.start_byte:node.end_byte].decode(errors="replace")
-    if node.type == "member_expression":
-        prop = node.child_by_field_name("property")
-        if prop:
-            return src[prop.start_byte:prop.end_byte].decode(errors="replace")
-    return None
-
-
 def _emit_body_edges(
     body_root: Node,
     src: bytes,
@@ -1947,8 +1932,6 @@ def _collect_fn_bodies(
                 body = decl.child_by_field_name("body")
                 if body and node_id in known_node_ids:
                     results.append((node_id, decl))
-                    # Also recurse into nested function declarations
-                    _collect_nested_fn_bodies(body, src, file_posix, known_node_ids, results)
 
         elif decl.type == "lexical_declaration":
             for vd in decl.children:
@@ -1961,9 +1944,6 @@ def _collect_fn_bodies(
                             node_id = f"{file_posix}::{name}"
                             if node_id in known_node_ids:
                                 results.append((node_id, val))
-                                body = val.child_by_field_name("body")
-                                if body:
-                                    _collect_nested_fn_bodies(body, src, file_posix, known_node_ids, results)
 
         elif decl.type == "class_declaration":
             name_n = decl.child_by_field_name("name")
@@ -1980,21 +1960,6 @@ def _collect_fn_bodies(
                                 body = mc.child_by_field_name("body")
                                 if body and method_id in known_node_ids:
                                     results.append((method_id, mc))
-
-
-def _collect_nested_fn_bodies(
-    body: Node,
-    src: bytes,
-    file_posix: str,
-    known_node_ids: set[str],
-    results: list[tuple[str, Node]],
-) -> None:
-    """Collect any inner arrow-function or function declarations inside a body.
-
-    These are local sub-functions (not top-level nodes), so we skip them
-    (they are not in known_node_ids and we don't emit edges from them separately).
-    """
-    pass  # Local inner functions inherit edges from their enclosing top-level function
 
 
 # ---------------------------------------------------------------------------
@@ -2330,11 +2295,6 @@ def _scan_module_dynamic_imports(
 # ---------------------------------------------------------------------------
 # Mongoose entity edge emitter
 # ---------------------------------------------------------------------------
-
-# Regex to match `model('ModelName', ...)` or `model<IFoo>('ModelName', ...)`
-# capturing the string literal model name.
-_MONGOOSE_REF_RE = re.compile(r"""['"]([A-Z][A-Za-z0-9]*)['"]""")
-
 
 def _emit_mongoose_edges(
     root: Node,

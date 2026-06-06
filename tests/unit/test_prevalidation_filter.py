@@ -63,15 +63,15 @@ def _make_doc_candidate(
     )
 
 
-def _make_settings(
-    min_reranker_score=-2.0,
-    density_threshold=0.50,
-    max_per_file=None,  # Retained for backwards-compat but unused (no per-file count cap).
-):
+def _make_settings(code_only_mode=False):
+    # apply_prevalidation_gates reads only ``code_only_mode`` from settings
+    # (everything else is deterministic). The stub provides just that.
     class _Settings:
-        min_reranker_score_for_validation = min_reranker_score
-        plausibility_gate_density_threshold = density_threshold
-    return _Settings()
+        pass
+
+    s = _Settings()
+    s.code_only_mode = code_only_mode
+    return s
 
 
 def _make_db_with_candidates(pairs: list[tuple[str, str, float]]) -> sqlite3.Connection:
@@ -154,7 +154,7 @@ def test_3_6_multiple_docs_same_code():
 def test_apply_gates_all_disabled():
     code = _make_code_candidate(reranker_score=0.05)
     conn = _make_db_with_candidates([])
-    settings = _make_settings(min_reranker_score=0.5)
+    settings = _make_settings()
     result = apply_prevalidation_gates(
         [code], settings, conn,
         enable_dedup=False,
@@ -173,7 +173,7 @@ def test_apply_gates_only_dedup_active():
     doc = _make_doc_candidate(node_id="sdd__v_1")
     code = _make_code_candidate()
     conn = _make_db_with_candidates([("sdd__v_1", code.node_id, 0.7)])
-    settings = _make_settings(min_reranker_score=0.5)
+    settings = _make_settings()
     result = apply_prevalidation_gates(
         [c_low, c_high, doc, code], settings, conn,
         enable_dedup=True,

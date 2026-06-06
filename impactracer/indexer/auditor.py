@@ -152,8 +152,9 @@ def generate_report(settings: Settings) -> str:
     blank()
 
     h3("2.1 Orphan Non-Degenerate Nodes")
+    _min_len = settings.degenerate_embed_min_length
     lines.append(
-        "Orphan = non-degenerate node (embed_text ≥ 50 chars) with "
+        f"Orphan = non-degenerate node (embed_text ≥ {_min_len} chars) with "
         "0 incoming AND 0 outgoing structural edges. "
         "ExternalPackage and InterfaceField are excluded (they are terminal by design)."
     )
@@ -164,17 +165,18 @@ def generate_report(settings: Settings) -> str:
         FROM code_nodes cn
         WHERE cn.node_type NOT IN ('ExternalPackage', 'InterfaceField')
           AND cn.embed_text IS NOT NULL
-          AND length(cn.embed_text) >= 50
+          AND length(cn.embed_text) >= ?
           AND NOT EXISTS (
               SELECT 1 FROM structural_edges se
               WHERE se.source_id = cn.node_id OR se.target_id = cn.node_id
           )
         ORDER BY cn.node_type, cn.file_path
-    """).fetchall()
+    """, (_min_len,)).fetchall()
 
     non_degen_count = conn.execute(
         "SELECT COUNT(*) FROM code_nodes "
-        "WHERE embed_text IS NOT NULL AND length(embed_text) >= 50"
+        "WHERE embed_text IS NOT NULL AND length(embed_text) >= ?",
+        (_min_len,),
     ).fetchone()[0]
 
     orphan_count = len(orphan_rows)

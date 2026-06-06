@@ -142,9 +142,6 @@ def build_deterministic_impacted_entities(
     return rows
 
 
-# Backward-compat alias.
-build_deterministic_impacted_nodes = build_deterministic_impacted_entities
-
 
 def derive_impacted_files(
     entities: list[ImpactedEntity],

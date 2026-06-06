@@ -982,7 +982,7 @@ def run_analysis(
                     if sibling_degraded:
                         degraded_run = True
                     # Per-file cap (post-validation), preserving LLM emission order.
-                    per_file_cap = getattr(settings, "sibling_admit_max_per_file", 2)
+                    per_file_cap = getattr(settings, "sibling_admit_max_per_file", 4)
                     if per_file_cap > 0 and len(admitted) > per_file_cap:
                         logger.info(
                             "[runner] Step 5.3b: per-file cap — {} admits -> top-{} for {}",
@@ -995,7 +995,7 @@ def run_analysis(
                         sibling_justifications[sib_id] = sib_just
 
                 # Per-CR cap (post-validation).
-                per_cr_cap = getattr(settings, "sibling_admit_max_per_cr", 5)
+                per_cr_cap = getattr(settings, "sibling_admit_max_per_cr", 0)
                 if per_cr_cap > 0 and len(sibling_justifications) > per_cr_cap:
                     logger.info(
                         "[runner] Step 5.3b: per-CR cap — {} admits -> top-{}",

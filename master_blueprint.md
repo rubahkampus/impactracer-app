@@ -730,7 +730,6 @@ raw_cr_dense_top_k               = 60
 enable_traceability_pool_seeding = True
 traceability_seed_top_k_per_doc  = 5
 traceability_seed_min_score      = 0.40
-traceability_seed_synthetic_rank = 5
 
 # Step 2 — per-layer code retrieval
 per_layer_top_k                  = 12

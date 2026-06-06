@@ -363,8 +363,6 @@ def _candidate_to_dict(c: Candidate) -> dict:
         "merged_doc_contexts": [list(t) for t in c.merged_doc_contexts],
         "bm25_score": c.bm25_score,
         "cosine_score": c.cosine_score,
-        "pinned_by_named_entry": c.pinned_by_named_entry,
-        "anchor_boost_applied": c.anchor_boost_applied,
     }
 
 
@@ -394,8 +392,6 @@ def _candidate_from_dict(d: dict) -> Candidate:
         ],
         bm25_score=float(d.get("bm25_score", 0.0)),
         cosine_score=float(d.get("cosine_score", 0.0)),
-        pinned_by_named_entry=bool(d.get("pinned_by_named_entry", False)),
-        anchor_boost_applied=bool(d.get("anchor_boost_applied", False)),
     )
 
 

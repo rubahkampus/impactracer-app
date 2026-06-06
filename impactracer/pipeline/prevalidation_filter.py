@@ -98,11 +98,6 @@ def semantic_dedup(
             result.append(c)
             continue
 
-        # Pinned doc chunks survive dedup.
-        if c.pinned_by_named_entry:
-            result.append(c)
-            continue
-
         top1_code = doc_top1_map.get(c.node_id)
         if top1_code is not None and top1_code in code_candidate_idx:
             # Merge: append this doc's ID to the code candidate and drop the doc candidate

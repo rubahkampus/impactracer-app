@@ -155,22 +155,12 @@ class Settings(BaseSettings):
     enable_traceability_pool_seeding: bool = True
     traceability_seed_top_k_per_doc: int = 5
     traceability_seed_min_score: float = 0.40
-    traceability_seed_synthetic_rank: int = 5
 
     # ---- Pre-Validation Gates (FR-C4): only 2.2 semantic dedup is live ----
-    # The two params below belong to RETIRED gates (former score floor and
-    # plausibility) — found inert/net-negative by ablation, never invoked.
-    # Kept archival-only; their values (incl. any .env override) are dead.
-    # LLM #2 (Step 3.1) is the real precision gate.
-    min_reranker_score_for_validation: float = -2.0
-    plausibility_gate_density_threshold: float = 0.50
-    # RETIRED (never invoked, like the two params above): was an additive boost
-    # applied to a candidate's raw_reranker_score at the former score-floor
-    # admission step when its name substring-matched any of
-    # cr_interp.anchor_candidates. That step no longer runs. The live
-    # anchor-priming signal is anchor_priming_bm25_boost (Step 2.1 Path 4)
-    # below; this value is read by no code.
-    anchor_priming_boost: float = 0.10
+    # The former score-floor and plausibility gates (and the score-floor
+    # anchor boost) were found inert/net-negative by ablation and removed;
+    # their config knobs are gone too. LLM #2 (Step 3.1) is the real
+    # precision gate.
 
     # Anchor-priming BM25 boost (Step 2.1 Path 4). Multiplier applied to a
     # synthetic BM25 query built from each anchor_candidate identifier
@@ -236,7 +226,6 @@ class Settings(BaseSettings):
 # is authoritative over any DB_PATH/CHROMA_PATH/etc. left in .env.
 
 DEFAULT_PROFILE = "citrakara"
-KNOWN_PROFILES = ("citrakara", "nova")  # advisory only; arbitrary names are allowed
 _PROFILE_ENV_VAR = "IMPACTRACER_PROFILE"
 
 # Settings field -> basename under ./data/<profile>/. Basenames match the
